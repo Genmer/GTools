@@ -11,8 +11,8 @@
     "shot": "electron scripts/shot.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && vue-tsc --noEmit -p tsconfig.json",
-    "dist": "electron-vite build && electron-builder --mac",
-    "dist:win": "electron-vite build && electron-builder --win"
+    "dist": "electron-vite build && electron-builder --mac --publish never",
+    "dist:win": "electron-vite build && electron-builder --win --publish never"
   },
   "dependencies": {
     "marked": "^18.0.14",
