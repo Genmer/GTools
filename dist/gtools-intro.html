@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="GTools —— 免费开源的 uTools 替代品。全局快捷键唤起，输入即搜，关键字路由进插件，24 个内置插件开箱即用。">
+<title>GTools · 免费开源的 uTools 替代品</title>
+<style>
+  /* ---------- 主题变量：浅色为默认，深色跟随系统 ---------- */
+  :root{
+    color-scheme: light dark;
+    --bg:#f6f7fa; --bg-tint-a:#e9edff; --bg-tint-b:#e3f2ff;
+    --card:#ffffff; --card-soft:#fafbfd;
+    --text:#161b26; --muted:#5a6474; --faint:#8a93a5;
+    --line:#e4e7ee; --line-strong:#d3d8e2;
+    --accent:#3457ff; --accent-2:#7a34f5; --accent-soft:rgba(52,87,255,.08);
+    --chip:#eef0f6; --chip-text:#414b5e;
+    --kbd-bg:#ffffff; --kbd-line:#c9cfdb; --kbd-shadow:#b9c0cd;
+    --code-bg:#eef0f5; --code-text:#2c3544;
+    --shadow:0 1px 2px rgba(18,22,32,.05),0 10px 30px rgba(18,22,32,.07);
+    --shadow-lg:0 2px 6px rgba(18,22,32,.06),0 20px 50px rgba(18,22,32,.12);
+    --radius:16px; --radius-sm:10px;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0b0e15; --bg-tint-a:#141b31; --bg-tint-b:#0f2233;
+      --card:#12161f; --card-soft:#171c28;
+      --text:#e8ebf2; --muted:#98a1b4; --faint:#6a7386;
+      --line:#212838; --line-strong:#2d3750;
+      --accent:#7b95ff; --accent-2:#b08cff; --accent-soft:rgba(123,149,255,.12);
+      --chip:#1b2232; --chip-text:#b6bfd2;
+      --kbd-bg:#1a2030; --kbd-line:#333d54; --kbd-shadow:#05070c;
+      --code-bg:#181e2b; --code-text:#dfe4f0;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 32px rgba(0,0,0,.45);
+      --shadow-lg:0 2px 8px rgba(0,0,0,.5),0 24px 60px rgba(0,0,0,.55);
+    }
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  section{padding:64px 0}
+  h2{font-size:26px;letter-spacing:.5px;margin-bottom:6px}
+  .sec-sub{color:var(--muted);font-size:14.5px;margin-bottom:30px}
+  .grad-text{
+    background:linear-gradient(100deg,var(--accent),var(--accent-2));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+
+  /* ---------- Hero ---------- */
+  .hero{
+    position:relative;text-align:center;padding:88px 0 64px;overflow:hidden;
+    background:
+      radial-gradient(600px 300px at 20% 0%,var(--bg-tint-a),transparent 70%),
+      radial-gradient(600px 300px at 80% 10%,var(--bg-tint-b),transparent 70%);
+    border-bottom:1px solid var(--line);
+  }
+  .hero .badge{
+    display:inline-flex;align-items:center;gap:8px;
+    font-size:12.5px;color:var(--muted);
+    border:1px solid var(--line-strong);border-radius:999px;
+    padding:5px 14px;margin-bottom:22px;background:var(--card);
+  }
+  .hero .badge .dot{width:7px;height:7px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.18)}
+  .hero h1{font-size:52px;line-height:1.2;letter-spacing:.5px}
+  .hero .tagline{font-size:19px;color:var(--muted);margin:16px auto 0;max-width:640px}
+  .hero .flow{
+    margin-top:26px;font-size:15px;color:var(--muted);
+    display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center;
+  }
+  .hero .flow b{color:var(--text);font-weight:600}
+  .hero .flow .sep{color:var(--faint)}
+  .search-mock{
+    max-width:560px;margin:34px auto 0;
+    background:var(--card);border:1px solid var(--line-strong);border-radius:14px;
+    box-shadow:var(--shadow);padding:14px 18px;text-align:left;
+    display:flex;align-items:center;gap:12px;
+  }
+  .search-mock .icon{font-size:17px;color:var(--faint)}
+  .search-mock .q{font-family:var(--mono);font-size:14.5px}
+  .search-mock .caret{display:inline-block;width:2px;height:16px;background:var(--accent);vertical-align:-3px}
+  .shortcut-row{margin-top:34px;display:flex;flex-wrap:wrap;gap:14px;justify-content:center;font-size:13.5px;color:var(--muted)}
+  .shortcut-row .item{display:inline-flex;align-items:center;gap:8px}
+  kbd{
+    font-family:var(--mono);font-size:12px;color:var(--text);
+    background:var(--kbd-bg);border:1px solid var(--kbd-line);border-bottom-width:2px;
+    border-radius:6px;padding:2px 7px;box-shadow:0 1.5px 0 var(--kbd-shadow);white-space:nowrap;
+  }
+  .stats{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:38px}
+  .stat{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm);
+    padding:12px 22px;min-width:130px;box-shadow:var(--shadow);
+  }
+  .stat b{display:block;font-size:24px;line-height:1.25}
+  .stat span{font-size:12.5px;color:var(--muted)}
+
+  /* ---------- 特性 ---------- */
+  .feat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:16px}
+  .feat{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:22px 22px 20px;box-shadow:var(--shadow);
+  }
+  .feat .fi{font-size:24px;margin-bottom:10px}
+  .feat h3{font-size:16.5px;margin-bottom:6px}
+  .feat p{font-size:13.8px;color:var(--muted)}
+  .feat code, .plug code{
+    font-family:var(--mono);font-size:.92em;
+    background:var(--code-bg);color:var(--code-text);
+    border-radius:5px;padding:1px 6px;
+  }
+
+  /* ---------- 插件卡片 ---------- */
+  .plug-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:16px}
+  .plug{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:20px 20px 18px;box-shadow:var(--shadow);
+    display:flex;flex-direction:column;gap:10px;
+    transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease;
+  }
+  .plug:hover{transform:translateY(-3px);box-shadow:var(--shadow-lg);border-color:var(--line-strong)}
+  .plug .head{display:flex;align-items:center;gap:12px}
+  .plug .pic{font-size:26px;line-height:1}
+  .plug h3{font-size:16px}
+  .plug .ver{font-size:11px;color:var(--faint);font-family:var(--mono);margin-left:auto}
+  .plug .desc{font-size:13.5px;color:var(--muted);flex:1}
+  .kw-row{display:flex;flex-wrap:wrap;gap:6px}
+  .kw{
+    font-family:var(--mono);font-size:11.5px;color:var(--chip-text);
+    background:var(--chip);border:1px solid var(--line);
+    border-radius:999px;padding:1px 9px;white-space:nowrap;
+  }
+  .plug .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+  .act{
+    font-size:11.5px;color:var(--muted);
+    border:1px dashed var(--line-strong);border-radius:6px;padding:1px 8px;
+  }
+  .resident-tag{
+    font-size:11px;color:var(--accent);background:var(--accent-soft);
+    border-radius:5px;padding:1px 7px;white-space:nowrap;
+  }
+  .new-tag{
+    font-size:11px;color:#0e7a3c;background:rgba(34,197,94,.14);
+    border-radius:5px;padding:1px 7px;white-space:nowrap;
+  }
+  @media (prefers-color-scheme: dark){
+    .new-tag{color:#5dd894}
+  }
+  .redo-tag{
+    font-size:11px;color:var(--accent-2);background:rgba(122,52,245,.10);
+    border-radius:5px;padding:1px 7px;white-space:nowrap;
+  }
+
+  /* ---------- 截图 ---------- */
+  .shot-hero{
+    display:block;background:var(--card);border:1px solid var(--line-strong);
+    border-radius:var(--radius);box-shadow:var(--shadow-lg);overflow:hidden;
+  }
+  .shot-hero img{display:block;width:100%;height:auto}
+  .shot-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-top:16px}
+  .shot{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:var(--shadow);overflow:hidden;
+    transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease;
+  }
+  .shot:hover{transform:translateY(-3px);box-shadow:var(--shadow-lg);border-color:var(--line-strong)}
+  .shot img{display:block;width:100%;height:auto}
+  .shot .cap{
+    padding:11px 16px;border-top:1px solid var(--line);
+    font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px;
+  }
+  .shot .cap b{color:var(--text);font-weight:600;font-size:13.5px}
+
+  /* ---------- 操作 ---------- */
+  .keys-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+  .keycard{
+    background:var(--card-soft);border:1px solid var(--line);border-radius:var(--radius-sm);
+    padding:16px 18px;font-size:13.8px;color:var(--muted);
+    display:flex;align-items:center;gap:12px;
+  }
+  .keycard .ks{display:flex;gap:5px;align-items:center;min-width:118px}
+
+  /* ---------- 安装 ---------- */
+  .install-box{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:var(--shadow);overflow:hidden;
+  }
+  .install-box .hd{
+    padding:13px 20px;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:8px;background:var(--card-soft);
+  }
+  .install-box .hd .tl{display:flex;gap:6px}
+  .install-box .hd .tl i{width:11px;height:11px;border-radius:50%;display:block}
+  .install-box .hd .tl i:nth-child(1){background:#ff5f57}
+  .install-box .hd .tl i:nth-child(2){background:#febc2e}
+  .install-box .hd .tl i:nth-child(3){background:#28c840}
+  .install-box .hd .path{font-family:var(--mono);font-size:12.5px;color:var(--faint);margin-left:6px}
+  .install-box pre{
+    margin:0;padding:20px 22px;overflow-x:auto;
+    font-family:var(--mono);font-size:13.5px;line-height:1.9;
+  }
+  .install-box pre .c{color:var(--faint)}
+  .install-box pre .p{color:var(--accent);font-weight:600}
+  .note{
+    margin-top:14px;font-size:13.2px;color:var(--muted);
+    background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);
+    border-radius:var(--radius-sm);padding:12px 16px;
+  }
+  .note code{font-family:var(--mono);font-size:.92em;background:var(--code-bg);color:var(--code-text);border-radius:5px;padding:1px 6px}
+
+  /* ---------- 页脚 ---------- */
+  footer{
+    border-top:1px solid var(--line);padding:34px 0 44px;
+    text-align:center;font-size:13px;color:var(--faint);
+  }
+  footer b{color:var(--muted)}
+  @media (max-width:640px){
+    .hero h1{font-size:36px}
+    section{padding:48px 0}
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= 首屏 ================= -->
+<header class="hero">
+  <div class="wrap">
+    <div class="badge"><span class="dot"></span>免费开源 · v0.2.0 · Electron 44 + Vue 3 · 数据全部留在本地</div>
+    <h1>GTools<span class="grad-text">，一敲即达</span></h1>
+    <p class="tagline">免费开源的 uTools 替代品 —— 全局快捷键唤起、输入即搜、按关键字路由进插件，效率工具一秒到手。</p>
+    <div class="flow">
+      <b>快捷键唤起</b><span class="sep">→</span><b>输入即搜</b><span class="sep">→</span><b>关键字路由进插件</b>
+    </div>
+    <div class="search-mock">
+      <span class="icon">🔍</span>
+      <span class="q">geshi <span style="color:var(--faint)">→「JSON 格式化」 · pdf →「PDF 工具箱」 · fs →「本地搜索」</span><span class="caret"></span></span>
+    </div>
+    <div class="shortcut-row">
+      <span class="item">macOS <kbd>Alt</kbd>+<kbd>Space</kbd> 唤起</span>
+      <span class="item">Windows <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd> 唤起</span>
+      <span class="item">设置页可改键，冲突时保留旧绑定</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>24</b><span>内置插件</span></div>
+      <div class="stat"><b>mac + win</b><span>双平台安装包</span></div>
+      <div class="stat"><b>拼音搜索</b><span>全拼 / 首字母</span></div>
+      <div class="stat"><b>0 原生编译</b><span>纯 JS 运行时依赖</span></div>
+    </div>
+  </div>
+</header>
+
+<!-- ================= 特性 ================= -->
+<section id="features">
+  <div class="wrap">
+    <h2>为什么选 GTools</h2>
+    <p class="sec-sub">一个搜索框，装下你的全部日常工具。</p>
+    <div class="feat-grid">
+      <div class="feat">
+        <div class="fi">⌨️</div>
+        <h3>全局快捷键，随叫随到</h3>
+        <p>macOS 默认 <code>Alt+Space</code>，Windows 默认 <code>Ctrl+Alt+Space</code>。无 Dock 常驻、托盘随行，任何界面下一敲即唤起，失焦自动隐藏。</p>
+      </div>
+      <div class="feat">
+        <div class="fi">🇨🇳</div>
+        <h3>中文拼音输入即搜</h3>
+        <p>支持中文、英文、全拼与首字母：敲 <code>geshi</code> 出「JSON 格式化」，敲 <code>kfz</code> 出「开发者工具集」，不用切输入法思维。</p>
+      </div>
+      <div class="feat">
+        <div class="fi">🧩</div>
+        <h3>插件化架构，加插件零改宿主</h3>
+        <p>内置 24 个插件随应用打包；新增插件 = 新建 <code>src/plugins/&lt;id&gt;/</code> 目录，glob 自动发现，宿主代码零改动。外部插件协议（协议 v1）已预留。</p>
+      </div>
+      <div class="feat">
+        <div class="fi">🔒</div>
+        <h3>本地优先，边界清晰</h3>
+        <p>设置与插件数据存于系统 userData 目录，插件间 storage 物理隔离；preload 单通道安全桥，能力按 manifest 权限白名单校验，最小授权。</p>
+      </div>
+      <div class="feat">
+        <div class="fi">🎨</div>
+        <h3>三态主题</h3>
+        <p>白色 / 黑色 / 玻璃三态切换 —— macOS vibrancy、Windows 亚克力，本页也会跟随你的系统深浅色。</p>
+      </div>
+      <div class="feat">
+        <div class="fi">🛠️</div>
+        <h3>自己打包，完全可控</h3>
+        <p>免费开源，克隆仓库即可构建：<code>npm run dist</code> 出 macOS 安装包，<code>npm run dist:win</code> 自打 Windows 安装包。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= v0.2.0 更新速览 ================= -->
+<section id="v020" style="background:var(--card-soft);border-top:1px solid var(--line)">
+  <div class="wrap">
+    <h2>v0.2.0 · 主界面新视觉</h2>
+    <p class="sec-sub">空态不再是空白 —— 功能宫格 + 最近使用，不输入也能一屏直达。本版新增 5 款插件、重做升级 6 款。</p>
+    <div class="feat-grid">
+      <div class="feat">
+        <div class="fi">🔲</div>
+        <h3>空态功能宫格</h3>
+        <p>唤起后未输入时，全部插件以四列图标宫格呈现于抬升面板：图标 + 名称，悬停显示简介，点击即进 —— 不记得关键字也能用。</p>
+      </div>
+      <div class="feat">
+        <div class="fi">🕘</div>
+        <h3>最近使用</h3>
+        <p>宫格下方常驻「最近使用」行，记录你高频访问的插件与功能，回访常用工具一键直达，越用越顺手。</p>
+      </div>
+      <div class="feat">
+        <div class="fi">🎮</div>
+        <h3>宫格键盘导航</h3>
+        <p><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> 在宫格与最近使用间逐格移动，<kbd>Enter</kbd> 进入选中项；敲下第一个字符即切回搜索结果，两种形态无缝衔接。</p>
+      </div>
+    </div>
+    <figure class="shot-hero" style="margin-top:26px">
+      <img src="shots/shell-empty.png" alt="GTools 主界面空态：搜索框 + 四列功能宫格 + 最近使用，底部为快捷键提示">
+    </figure>
+    <div class="note" style="margin-top:20px">
+      同版本一并重做升级 6 款插件：<code>计算稿纸</code>（千分位 · Σ 合计）· <code>剪贴板历史</code>（分类 · 固定置顶）· <code>聚合翻译</code>（双栏 · 引擎切换）· <code>Markdown 笔记</code>（编辑/预览切换）· <code>待办 · 番茄钟</code> · <code>图片悬浮</code>，详见下方插件卡片。
+    </div>
+  </div>
+</section>
+
+<!-- ================= 内置插件 ================= -->
+<section id="plugins" style="background:var(--card-soft);border-top:1px solid var(--line);border-bottom:1px solid var(--line)">
+  <div class="wrap">
+    <h2>内置插件 <span style="color:var(--faint);font-size:16px;font-weight:400">× 24</span></h2>
+    <p class="sec-sub">清单取自 <code style="font-family:var(--mono);font-size:.92em">src/plugins/*/manifest.ts</code>，全部开箱即用；输入关键字 + 空格即进入插件上下文。<span class="new-tag">新增</span> 为 v0.2.0 新插件，<span class="redo-tag">0.2.0 重做</span> 为本版重做升级。</p>
+    <div class="plug-grid">
+
+      <div class="plug">
+        <div class="head"><span class="pic">🔎</span><h3>本地搜索 <span class="new-tag">新增</span></h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">按文件名搜本机文件：macOS 走 Spotlight（mdfind），类型徽标 + 回车打开 + ⌘C 复制路径；Windows 支持规划中</p>
+        <div class="kw-row"><span class="kw">fs</span><span class="kw">文件搜索</span><span class="kw">本地搜索</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">📄</span><h3>PDF 工具箱 <span class="new-tag">新增</span></h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">PDF 本地处理：合并、拆分、旋转、删页、提取页、图片转 PDF，全部本地完成不出网</p>
+        <div class="kw-row"><span class="kw">pdf</span><span class="kw">PDF工具</span><span class="kw">合并</span><span class="kw">拆分</span><span class="kw">旋转</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🗒️</span><h3>备忘快贴 <span class="new-tag">新增</span></h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">极简备忘便签：顶部输入回车即存，单列便签流支持置顶 / 复制 / 删除，本地持久化</p>
+        <div class="kw-row"><span class="kw">memo</span><span class="kw">备忘</span><span class="kw">beiwang</span><span class="kw">快贴</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">⏰</span><h3>时间戳百宝箱 <span class="new-tag">新增</span></h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">时间工具百宝箱：当前时间多格式、时间戳↔日期互转（秒/毫秒自动识别）、相对时间计算、常用时区对照</p>
+        <div class="kw-row"><span class="kw">time</span><span class="kw">时间戳</span><span class="kw">时间</span><span class="kw">sj</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">{ }</span><h3>JSON 编辑器 <span class="new-tag">新增</span></h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">JSON 编辑器：左编辑右树视图，格式化/压缩/校验/复制，错误定位到行列，大 JSON 懒渲染</p>
+        <div class="kw-row"><span class="kw">json</span><span class="kw">json-editor</span><span class="kw">编辑器</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🧰</span><h3>开发者工具集</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">JSON / 时间戳 / UUID / Base64 / 正则 / 颜色 / JWT</p>
+        <div class="kw-row"><span class="kw">dev</span><span class="kw">开发者</span><span class="kw">kfz</span></div>
+        <div class="acts"><span class="act">JSON 格式化</span><span class="act">时间戳互转</span><span class="act">UUID</span><span class="act">Base64</span><span class="act">正则测试</span><span class="act">颜色转换</span><span class="act">JWT 解码</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">📘</span><h3>程序员离线手册</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">Linux 命令 / Git / HTTP 状态码 / 正则语法 / VSCode 快捷键离线速查，支持拼音搜索与收藏</p>
+        <div class="kw-row"><span class="kw">dev-manual</span><span class="kw">手册</span><span class="kw">shouce</span><span class="kw">linux</span></div>
+        <div class="acts"><span class="act">Linux 命令</span><span class="act">Git 操作</span><span class="act">HTTP 状态码</span><span class="act">正则语法</span><span class="act">VSCode 快捷键</span><span class="act">收藏</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">📋</span><h3>剪贴板历史 <span class="resident-tag">常驻后台</span> <span class="redo-tag">0.2.0 重做</span></h3><span class="ver">v0.2.0</span></div>
+        <p class="desc">后台记录文本/图片剪贴板历史，分类浏览、搜索、固定置顶、一键复制</p>
+        <div class="kw-row"><span class="kw">cb</span><span class="kw">剪贴板</span><span class="kw">jtb</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🚀</span><h3>应用启动器</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">搜索并启动本机已安装应用</p>
+        <div class="kw-row"><span class="kw">app</span><span class="kw">启动</span><span class="kw">qd</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🌐</span><h3>聚合翻译 <span class="redo-tag">0.2.0 重做</span></h3><span class="ver">v0.3.0</span></div>
+        <p class="desc">左右双栏聚合翻译：引擎切换（取设置 → API 服务 已启用引擎）· 交换语种 · 复制与发音，默认 MyMemory 免 Key</p>
+        <div class="kw-row"><span class="kw">fy</span><span class="kw">翻译</span><span class="kw">fanyi</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🔗</span><h3>网页快开</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">常用站点一敲即开：内置搜索/视频/开发/社交站点库，拼音全拼/首字母模糊匹配，支持自定义站点与「缩写 关键词」直达搜索</p>
+        <div class="kw-row"><span class="kw">web-quick-open</span><span class="kw">web</span><span class="kw">网页快开</span><span class="kw">wykk</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🔥</span><h3>热搜聚合榜</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">聚合微博/百度/知乎/B站/抖音/头条实时热搜，关注词过滤，新上榜标『新』，点击直达原文</p>
+        <div class="kw-row"><span class="kw">hot-search</span><span class="kw">热搜</span><span class="kw">resou</span><span class="kw">热榜</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🧮</span><h3>计算稿纸 <span class="redo-tag">0.2.0 重做</span></h3><span class="ver">v0.3.0</span></div>
+        <p class="desc">行式计算稿纸：逐行实时结果（千分位）· 变量/ans/pi · 百分比/幂/括号/常用函数 · Σ 合计 · 本地保存与历史</p>
+        <div class="kw-row"><span class="kw">calc</span><span class="kw">计算</span><span class="kw">jisuan</span><span class="kw">稿纸</span><span class="kw">gaozhi</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">📝</span><h3>Markdown 笔记 <span class="redo-tag">0.2.0 重做</span></h3><span class="ver">v0.2.0</span></div>
+        <p class="desc">速记型 Markdown 笔记本：列表管理 + 编辑/预览切换，本地持久化，导出 .md / 复制富文本</p>
+        <div class="kw-row"><span class="kw">markdown-notes</span><span class="kw">md</span><span class="kw">markdown</span><span class="kw">笔记</span><span class="kw">biji</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🍅</span><h3>待办 · 番茄钟 <span class="resident-tag">常驻后台</span> <span class="redo-tag">0.2.0 重做</span></h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">待办清单（优先级 · 今日/全部视图）＋ 番茄钟（25/5 可调 · 到点通知 · 今日统计 · 便签悬浮常驻）</p>
+        <div class="kw-row"><span class="kw">todo-pomodoro</span><span class="kw">todo</span><span class="kw">待办</span><span class="kw">番茄钟</span><span class="kw">fanqie</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">📌</span><h3>图片悬浮 <span class="redo-tag">0.2.0 重做</span></h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">贴图：把剪贴板 / 本地图片钉成置顶小窗，可拖动、滚轮缩放、调不透明度，位置与缩放会被记住</p>
+        <div class="kw-row"><span class="kw">float-image</span><span class="kw">贴图</span><span class="kw">tietu</span><span class="kw">ft</span></div>
+        <div class="acts"><span class="act">贴出剪贴板图片</span><span class="act">选择图片文件</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🖼️</span><h3>图床上传</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">拖入 / 粘贴 / 选择图片上传图床（默认 sm.ms，兼容兰空 lsky 与自定义接口），成功即复制链接，Markdown/HTML/URL 三格式切换，本地保留上传历史</p>
+        <div class="kw-row"><span class="kw">image-bed</span><span class="kw">图床</span><span class="kw">tuchuang</span><span class="kw">tc</span></div>
+        <div class="acts"><span class="act">上传历史</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🗂️</span><h3>批量重命名</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">拖入/多选文件，规则链实时预览新旧名对照：查找替换(正则)、插入/删除、序号、大小写、扩展名，冲突标红，批量执行 + 撤销</p>
+        <div class="kw-row"><span class="kw">batch-rename</span><span class="kw">批量重命名</span><span class="kw">重命名</span><span class="kw">plmm</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🔀</span><h3>代码对比</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">左右两栏文本/代码对比：行级+词级高亮、同步滚动、增删改统计、忽略大小写/空白、结果可复制</p>
+        <div class="kw-row"><span class="kw">diff</span><span class="kw">对比</span><span class="kw">duibi</span><span class="kw">db</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🏷️</span><h3>变量命名</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">输入中英文描述 → 按语言预设生成各上下文命名候选，一键复制；中译英经全局 API 中心，离线词典兜底</p>
+        <div class="kw-row"><span class="kw">vn</span><span class="kw">命名</span><span class="kw">var</span></div>
+        <div class="acts"><span class="act">16 种语言预设</span><span class="act">通用五件套</span><span class="act">历史 / 收藏</span><span class="act">缩写展开</span><span class="act">读剪贴板</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🎲</span><h3>随机假数据</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">本地生成中文姓名/手机号/邮箱/身份证/地址/公司名/时间/金额等测试数据，支持字段组合模板</p>
+        <div class="kw-row"><span class="kw">fake-data</span><span class="kw">假数据</span><span class="kw">jiashuju</span><span class="kw">随机数据</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">🔐</span><h3>密码管理器</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">主密码 + PBKDF2/AES-GCM 本地加密保存账号，复制密码 30 秒自动清空剪贴板，附随机密码生成器</p>
+        <div class="kw-row"><span class="kw">password-vault</span><span class="kw">密码</span><span class="kw">mm</span><span class="kw">passwd</span></div>
+        <div class="acts"><span class="act">随机密码生成</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">📡</span><h3>局域网文件共享</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">选文件夹在局域网起 HTTP 服务：手机扫码即可上传/下载/在线预览，多文件打包下载，实时连接设备与传输日志</p>
+        <div class="kw-row"><span class="kw">lan-file-share</span><span class="kw">共享</span><span class="kw">文件共享</span><span class="kw">wjgx</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">📦</span><h3>数据备份迁移</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">导出全部数据为单个 .gtools 文件，跨 win/mac 迁移，导入前可预览差异</p>
+        <div class="kw-row"><span class="kw">backup</span><span class="kw">备份</span><span class="kw">迁移</span><span class="kw">beifen</span></div>
+        <div class="acts"><span class="act">导出备份</span><span class="act">导入备份</span></div>
+      </div>
+
+      <div class="plug">
+        <div class="head"><span class="pic">👋</span><h3>Hello 示例</h3><span class="ver">v0.1.0</span></div>
+        <p class="desc">新增插件零改动公共代码的最小示例 —— 证明「新增插件 = 新建目录，宿主零改动」</p>
+        <div class="kw-row"><span class="kw">hello</span><span class="kw">你好</span></div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ================= 新插件先睹为快 ================= -->
+<section id="shots">
+  <div class="wrap">
+    <h2>五款新插件，先睹为快</h2>
+    <p class="sec-sub">截图取自应用实机界面（演示数据），全部本地运行、开箱即用。</p>
+    <div class="shot-grid">
+      <figure class="shot">
+        <img src="shots/file-search.png" alt="本地搜索插件：按文件名搜索结果列表，含类型徽标与路径">
+        <figcaption class="cap"><b>🔎 本地搜索</b>文件名搜本机 · 类型徽标 · ⌘C 复制路径</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="shots/pdf-tools.png" alt="PDF 工具箱插件：文件列表与合并、拆分、旋转等功能标签页">
+        <figcaption class="cap"><b>📄 PDF 工具箱</b>合并 · 拆分 · 旋转 · 删页 · 图片转 PDF</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="shots/memo.png" alt="备忘快贴插件：顶部输入框与便签列表，含置顶便签">
+        <figcaption class="cap"><b>🗒️ 备忘快贴</b>回车即存 · 置顶 / 复制 / 删除</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="shots/time-toolbox.png" alt="时间戳百宝箱插件：时间戳互转、相对时间计算与时区对照">
+        <figcaption class="cap"><b>⏰ 时间戳百宝箱</b>互转（秒/毫秒自动识别）· 相对时间 · 时区对照</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="shots/json-editor.png" alt="JSON 编辑器插件：左侧带行号编辑区与右侧树视图">
+        <figcaption class="cap"><b>{ } JSON 编辑器</b>左编辑右树 · 格式化 / 校验 · 错误定位行列</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 全局 API 配置中心 ================= -->
+<section id="api-center">
+  <div class="wrap">
+    <h2>全局 API 配置中心</h2>
+    <p class="sec-sub">通用 API 配一次、全局共用；插件专属 API 留在插件设置页自配 —— 什么进中心、什么留在插件，规则清晰。</p>
+    <div class="feat-grid">
+      <div class="feat">
+        <div class="fi">🔌</div>
+        <h3>通用 API：配置一次，全局共用</h3>
+        <p>能脱离具体插件描述成「服务品类」（翻译、LLM 补全、OCR…）、消费方 ≥2、配置属于 endpoint / 密钥 / 模板类技术凭证 —— 三项全满足的 API 进全局中心，在「设置 → API 服务」统一管理。翻译与变量命名插件共用同一份翻译服务配置，配一次两边生效：默认 MyMemory 免 Key，可添加自定义 HTTP 接口（DeepL / 百度 / 彩云等），多服务商启停切换、一键测试。</p>
+      </div>
+      <div class="feat">
+        <div class="fi">🧩</div>
+        <h3>插件专属 API：留在插件内自配</h3>
+        <p>仅单一插件消费、难以品类化的配置（图床的仓库与域名规则、密码管理器主密码、局域网共享端口），以及语言方向、历史容量这类业务偏好，都留在插件自己的设置页 —— 偏好类配置永不上收。某专属 API 出现第二个消费方时，再按既定路径平滑上移全局中心。</p>
+      </div>
+      <div class="feat">
+        <div class="fi">🔐</div>
+        <h3>密钥不出主进程</h3>
+        <p>API 请求由主进程统一代理执行，密钥只保存在本地主进程、永不下发渲染层，设置页也只见「密钥已保存」；插件须在 manifest 声明 <code>apis:&lt;service&gt;</code> 权限（如翻译的 <code>apis:translate</code>），经白名单校验后才能调用。API 服务配置随整机备份一起导出 / 导入。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 操作速览 ================= -->
+<section id="usage">
+  <div class="wrap">
+    <h2>上手只要三个键</h2>
+    <p class="sec-sub">唤起后输入即搜；输入插件关键字 + 空格进入插件上下文（如 <code style="font-family:var(--mono);font-size:.92em">dev&nbsp;</code> 进开发者工具集）。</p>
+    <div class="keys-grid">
+      <div class="keycard"><span class="ks"><kbd>↑</kbd><kbd>↓</kbd></span>在结果列表中选择</div>
+      <div class="keycard"><span class="ks"><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd></span>空态下在功能宫格与最近使用间移动</div>
+      <div class="keycard"><span class="ks"><kbd>Enter</kbd></span>进入选中的插件 / 功能</div>
+      <div class="keycard"><span class="ks"><kbd>Esc</kbd></span>逐级退出：插件 → 搜索 → 隐藏窗口</div>
+      <div class="keycard"><span class="ks"><kbd>Alt</kbd>+<kbd>Space</kbd></span>macOS 全局唤起（默认）</div>
+      <div class="keycard"><span class="ks"><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd></span>Windows 全局唤起（默认）</div>
+      <div class="keycard"><span class="ks">🖱️ 失焦</span>窗口失焦自动隐藏，不打扰</div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 安装与构建 ================= -->
+<section id="install" style="background:var(--card-soft);border-top:1px solid var(--line)">
+  <div class="wrap">
+    <h2>获取与自建</h2>
+    <p class="sec-sub">免费开源 —— 克隆仓库、两条命令跑起来；想要 Windows 安装包，自己打一个就行。</p>
+    <div class="install-box">
+      <div class="hd">
+        <span class="tl"><i></i><i></i><i></i></span>
+        <span class="path">GTools — 终端</span>
+      </div>
+      <pre><span class="c"># 安装依赖（.npmrc 已配置 npmmirror 与 electron 镜像）</span>
+<span class="p">npm</span> install
+
+<span class="c"># 本地调试 / 构建 / 测试 / 类型检查</span>
+<span class="p">npm</span> run dev
+<span class="p">npm</span> run build        <span class="c"># 编译主/预加载/渲染三段产物到 out/</span>
+<span class="p">npm</span> test             <span class="c"># vitest 单测（node 环境，纯逻辑）</span>
+<span class="p">npm</span> run typecheck    <span class="c"># tsc + vue-tsc 类型检查</span>
+
+<span class="c"># 打安装包（release/）</span>
+<span class="p">npm</span> run dist         <span class="c"># macOS 安装包（dmg）</span>
+<span class="p">npm</span> run dist:win     <span class="c"># 自打 Windows 安装包（nsis，需在 Windows 环境实测）</span></pre>
+    </div>
+    <div class="note">
+      打包首次需下载二进制，建议先设镜像：<code>export ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/</code>。
+      运行时依赖均为纯 JS 库（vue / pinyin-pro 等），无原生编译，clone 即可构建。
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p><b>GTools</b> · 免费开源的 uTools 替代品 · 全局快捷键唤起 · 数据全部留在本地</p>
+    <p style="margin-top:6px">本页为静态页（截图位于 <b>shots/</b> 同级目录），深浅色跟随系统；插件清单依据 <b>src/plugins/*/manifest.ts</b>（24 个 + Hello 示例）。</p>
+  </div>
+</footer>
+
+</body>
+</html>

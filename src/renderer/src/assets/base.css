@@ -1,0 +1,64 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  background: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+#app {
+  height: 100%;
+}
+
+/* 全局槽 10px：插件页（PluginViewHost 与各插件 scoped thumb）依赖此宽度，勿动 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  background-clip: content-box;
+  border: 2px solid transparent;
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-hover);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* shell 三滚动容器隐藏原生槽（经典滚动条槽永久占位会把面板右缘挤短 10px、与搜索框错开）；
+   滚动反馈改由 is-scrolling（app.ts 挂）在容器右缘画不占位、不随内容滚动的半透明悬浮条 */
+.empty-state::-webkit-scrollbar,
+.result-list::-webkit-scrollbar,
+.settings::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+.empty-state.is-scrolling,
+.result-list.is-scrolling,
+.settings.is-scrolling {
+  background-image: linear-gradient(
+    to right,
+    transparent calc(100% - 6px),
+    var(--scrollbar-thumb) calc(100% - 6px),
+    var(--scrollbar-thumb) calc(100% - 2px),
+    transparent calc(100% - 2px)
+  );
+}
+
+/* shell 滚动容器底部 32px 渐隐收尾：替代面板/列表被视口硬切（仅溢出滚动时启用，折叠空态不遮罩）；
+   mask 相对容器边框盒固定、不随内容滚动 */
+.empty-state.is-overflowing,
+.result-list {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 32px), transparent);
+}

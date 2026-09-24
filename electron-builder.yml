@@ -1,0 +1,32 @@
+appId: com.genmer.gtools
+productName: GTools
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+extraResources:
+  - from: resources
+    to: .
+asar: true
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+mac:
+  category: public.app-category.productivity
+  icon: build/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - x64
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: GTools

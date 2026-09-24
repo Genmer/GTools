@@ -1,0 +1,113 @@
+/* 变量全集按 WCAG AA（正文 >=4.5:1）取值；全部 UI 只许取变量，禁止硬编码色值 */
+:root,
+html[data-theme='light'] {
+  --bg: #ffffff;
+  --bg-raised: #f2f3f5;
+  --fg: #1f2328;
+  --fg-dim: #59626d;
+  --accent: #0969da;
+  --accent-dim: rgba(9, 105, 218, 0.12);
+  --border: #d8dee4;
+  --danger: #cf222e;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+
+  /* 四期 design tokens（docs/design/ui-style-guide.md §1.2）：字号/圆角/间距主题无关，只放 :root */
+  /* accent 底上的前景字/勾（三主题 accent 均为蓝色系，统一白字） */
+  --on-accent: #ffffff;
+  --fs-input: 15px;
+  --fs-title: 14px;
+  --fs-sub: 12px;
+  --fs-foot: 11px;
+  --r-lg: 12px;
+  --r-md: 8px;
+  --r-sm: 6px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --shadow-window: 0 12px 40px rgba(0, 0, 0, 0.18);
+  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.12);
+  --hover: rgba(0, 0, 0, 0.05);
+  --active-row: var(--accent-dim);
+  --scrollbar-thumb: rgba(0, 0, 0, 0.2);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.32);
+
+  /* 空态应用/最近行字母块兜底色（§1.5）：六色轮换，前景为大号图标字形取宽松对比 */
+  --tile-blue-bg: rgba(9, 105, 218, 0.12);
+  --tile-blue-fg: #0969da;
+  --tile-green-bg: rgba(26, 127, 55, 0.12);
+  --tile-green-fg: #1a7f37;
+  --tile-amber-bg: rgba(154, 103, 0, 0.14);
+  --tile-amber-fg: #9a6700;
+  --tile-rose-bg: rgba(207, 34, 46, 0.12);
+  --tile-rose-fg: #cf222e;
+  --tile-violet-bg: rgba(123, 79, 240, 0.12);
+  --tile-violet-fg: #7b4ff0;
+  --tile-teal-bg: rgba(12, 140, 130, 0.12);
+  --tile-teal-fg: #0c8c82;
+}
+
+html[data-theme='dark'] {
+  --bg: #1e1e1e;
+  --bg-raised: #2a2a2c;
+  --fg: #f5f5f5;
+  --fg-dim: #9aa0a6;
+  --accent: #4493f8;
+  --accent-dim: rgba(68, 147, 248, 0.16);
+  --border: #3c3c40;
+  --danger: #f85149;
+  --ok: #3fb950;
+  --warn: #d29922;
+  /* 深色投影减弱扩散、hover 用白色叠层（黑色不可见） */
+  --shadow-window: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --hover: rgba(255, 255, 255, 0.08);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.26);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.4);
+  --tile-blue-bg: rgba(68, 147, 248, 0.24);
+  --tile-blue-fg: #7cb3f9;
+  --tile-green-bg: rgba(63, 185, 80, 0.22);
+  --tile-green-fg: #6fdd82;
+  --tile-amber-bg: rgba(210, 153, 34, 0.24);
+  --tile-amber-fg: #e3b341;
+  --tile-rose-bg: rgba(248, 81, 73, 0.22);
+  --tile-rose-fg: #ff8a84;
+  --tile-violet-bg: rgba(154, 109, 255, 0.22);
+  --tile-violet-fg: #b393ff;
+  --tile-teal-bg: rgba(56, 199, 186, 0.2);
+  --tile-teal-fg: #63d9c9;
+}
+
+/* 玻璃主题：复用 dark 前景色，背景交给窗口原生效果（vibrancy/亚克力） */
+html[data-theme='glass'] {
+  --bg: transparent;
+  --bg-raised: rgba(255, 255, 255, 0.08);
+  --fg: #f5f5f5;
+  --fg-dim: #c5c9cd;
+  --accent: #4493f8;
+  --accent-dim: rgba(68, 147, 248, 0.2);
+  --border: rgba(255, 255, 255, 0.18);
+  --danger: #ff6b62;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --shadow-window: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --hover: rgba(255, 255, 255, 0.08);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.3);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.45);
+  --tile-blue-bg: rgba(68, 147, 248, 0.24);
+  --tile-blue-fg: #7cb3f9;
+  --tile-green-bg: rgba(63, 185, 80, 0.22);
+  --tile-green-fg: #6fdd82;
+  --tile-amber-bg: rgba(210, 153, 34, 0.24);
+  --tile-amber-fg: #e3b341;
+  --tile-rose-bg: rgba(248, 81, 73, 0.22);
+  --tile-rose-fg: #ff8a84;
+  --tile-violet-bg: rgba(154, 109, 255, 0.22);
+  --tile-violet-fg: #b393ff;
+  --tile-teal-bg: rgba(56, 199, 186, 0.2);
+  --tile-teal-fg: #63d9c9;
+}
+

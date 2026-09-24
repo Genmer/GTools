@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="gGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="50%" stop-color="#2563EB"/>
+      <stop offset="100%" stop-color="#6366F1"/>
+    </linearGradient>
+  </defs>
+  <!-- 圆角矩形背景 (macOS App 图标风格) -->
+  <rect width="512" height="512" rx="115" fill="url(#bgGrad)"/>
+  
+  <!-- 字母 G 造型：环形光轨 + 终端横杠指令 -->
+  <path d="M 360 180 A 130 130 0 1 0 370 330 L 260 330 A 25 25 0 0 1 260 280 L 330 280 A 80 80 0 1 1 325 205 L 360 180 Z" fill="url(#gGrad)"/>
+  
+  <!-- 效率光标点 -->
+  <circle cx="260" cy="200" r="18" fill="#38BDF8" opacity="0.85"/>
+</svg>

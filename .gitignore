@@ -1,0 +1,13 @@
+node_modules/
+out/
+release/
+# dist/ 仅存放功能介绍页交付物（html + shots/ 截图），其余内容忽略
+dist/*
+!dist/gtools-intro.html
+!dist/shots/
+*.log
+.DS_Store
+*.tmp
+.env
+*.tsbuildinfo
+.zcode/

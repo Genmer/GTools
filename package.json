@@ -1,0 +1,36 @@
+{
+  "name": "gtools",
+  "version": "0.0.1",
+  "description": "自制类 uTools 的桌面效率启动器（插件化）",
+  "main": "./out/main/index.mjs",
+  "author": "genmer",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "shot": "electron scripts/shot.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && vue-tsc --noEmit -p tsconfig.json",
+    "dist": "electron-vite build && electron-builder --mac",
+    "dist:win": "electron-vite build && electron-builder --win"
+  },
+  "dependencies": {
+    "marked": "^18.0.14",
+    "pdf-lib": "^1.17.1",
+    "pinyin-pro": "^3.29.4",
+    "qrcode": "^1.5.4",
+    "vue": "^3.5.43"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.6",
+    "@vitejs/plugin-vue": "^6.0.9",
+    "electron": "44.4.5",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.0.0",
+    "vitest": "^5.0.1",
+    "vue-tsc": "^3.3.11"
+  }
+}

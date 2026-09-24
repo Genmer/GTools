@@ -1,0 +1,78 @@
+* {
+  box-sizing: border-box;
+}
+.tool {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+}
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.btn {
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+input[type='text'],
+input[type='number'],
+textarea,
+select {
+  background: var(--bg-raised);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: ui-monospace, monospace;
+  outline: none;
+  width: 100%;
+}
+textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+.result {
+  position: relative;
+}
+.result pre {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  overflow: auto;
+  max-height: 240px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+.result .btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+.ok {
+  color: var(--accent);
+}
+.err {
+  color: var(--danger);
+  user-select: text;
+}
+.muted {
+  color: var(--fg-dim);
+  font-size: 12px;
+}

@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "types": ["node", "vite/client"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "paths": { "@sdk/*": ["./sdk/*"] }
+  },
+  "include": [
+    "src/main/**/*.ts",
+    "src/preload/**/*.ts",
+    "sdk/**/*.ts",
+    "src/plugins/*/manifest.ts",
+    "src/plugins/*/views/logic/*.ts",
+    "src/plugins/*/backend/**/*.ts",
+    "src/renderer/src/core/matcher.ts",
+    "src/renderer/src/core/pinyin-index.ts",
+    "src/renderer/src/core/entries.ts",
+    "tests/**/*.ts",
+    "electron.vite.config.ts",
+    "vitest.config.ts"
+  ]
+}
