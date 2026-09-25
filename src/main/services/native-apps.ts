@@ -390,13 +390,59 @@ export class NativeAppsService {
   }
 
   private async scan(): Promise<NativeAppEntry[]> {
-    // win32 接口占位：返回空列表，渲染层回退插件网格（ui-style-guide §1.5 兜底）
+    if (this.deps.platform === 'win32') {
+      const out = new Map<string, NativeAppEntry>()
+      for (const root of this.win32Roots()) {
+        await this.collectWin32Lnk(root, out)
+      }
+      return [...out.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN') || a.path.localeCompare(b.path))
+    }
     if (this.deps.platform !== 'darwin') return []
     const out = new Map<string, NativeAppEntry>()
     // 默认只扫用户自装应用（系统自带应用图标风格杂、稀释常用密度），两处皆空才兜底系统目录
     for (const root of this.darwinRoots()) await this.collect(root, out)
     if (out.size === 0) await this.collect('/System/Applications', out)
     return [...out.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN') || a.path.localeCompare(b.path))
+  }
+
+  private win32Roots(): string[] {
+    const roots: string[] = []
+    if (this.deps.homeDir) {
+      roots.push(join(this.deps.homeDir, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs'))
+    }
+    const programData = process.env.ProgramData || 'C:\\ProgramData'
+    roots.push(join(programData, 'Microsoft', 'Windows', 'Start Menu', 'Programs'))
+    return roots
+  }
+
+  private async collectWin32Lnk(dir: string, out: Map<string, NativeAppEntry>, depth = 0): Promise<void> {
+    if (depth > 4) return
+    let entries
+    try {
+      entries = await this.deps.fs.readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const ent of entries) {
+      const fullPath = join(dir, ent.name)
+      if (ent.isDirectory()) {
+        await this.collectWin32Lnk(fullPath, out, depth + 1)
+      } else if (ent.name.toLowerCase().endsWith('.lnk')) {
+        const baseName = ent.name.slice(0, -'.lnk'.length).trim()
+        if (!baseName) continue
+        const lower = baseName.toLowerCase()
+        if (lower.includes('uninstall') || lower.includes('卸载') || lower.includes('readme') || lower.includes('help')) continue
+        const id = `win32:${lower}`
+        if (!out.has(id)) {
+          out.set(id, {
+            id,
+            name: baseName,
+            path: fullPath,
+            iconPath: fullPath
+          })
+        }
+      }
+    }
   }
 
   private darwinRoots(): string[] {

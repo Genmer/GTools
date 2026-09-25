@@ -1,4 +1,4 @@
-import { clipboard, ClipboardItem, dialog as electronDialog, nativeImage, net, Notification, screen, shell } from 'electron'
+import { app, clipboard, ClipboardItem, dialog as electronDialog, nativeImage, net, Notification, screen, shell } from 'electron'
 import { BrowserWindow } from 'electron'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { randomBytes } from 'node:crypto'
@@ -51,6 +51,16 @@ function toElectronFilters(filters?: DialogFileFilter[]) {
  */
 export function createNativeAppsIconDecoder(size = 64): (iconPath: string) => Promise<string | undefined> {
   return async (iconPath) => {
+    if (process.platform === 'win32') {
+      try {
+        const img = await app.getFileIcon(iconPath, { size: size <= 32 ? 'normal' : 'large' })
+        if (img && !img.isEmpty()) {
+          return img.resize({ width: size, height: size }).toDataURL()
+        }
+      } catch {
+        return undefined
+      }
+    }
     const png = extractIcnsPngForSize(await nodeFs.readFile(iconPath), size)
     const buffer = png ?? (await convertIcnsViaSips(iconPath))
     if (buffer === null) return undefined

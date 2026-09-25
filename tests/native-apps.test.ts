@@ -433,9 +433,9 @@ describe('NativeAppsService（darwin）', () => {
     expect(snap2.pinned).toEqual(['com.x.notes']) // 重启（新实例）后快照仍带置顶序
   })
 
-  it('win32：接口占位返回空列表，不触扫描', async () => {
+  it('linux：接口占位返回空列表，不触扫描', async () => {
     const f = fakeFs()
-    const { svc } = makeService(f, { platform: 'win32' })
+    const { svc } = makeService(f, { platform: 'linux' })
     const snap = await svc.list()
     expect(snap.apps).toEqual([])
     expect(snap.fromCache).toBe(false)
@@ -476,5 +476,41 @@ describe('NativeAppsService（darwin）', () => {
       expect(snap.fromCache).toBe(false)
       expect(snap.apps).not.toHaveLength(0)
     }
+  })
+})
+
+describe('NativeAppsService（win32）', () => {
+  it('扫描：开始菜单 .lnk 递归解析，过滤卸载与帮助，正确提取路径与名称', async () => {
+    const f = fakeFs()
+    const userPrograms = join('C:\\Users\\t', 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs')
+    const commonPrograms = join('C:\\ProgramData', 'Microsoft', 'Windows', 'Start Menu', 'Programs')
+
+    f.dirs.set(userPrograms, [
+      { name: 'WeChat.lnk', isDirectory: () => false },
+      { name: 'Uninstall WeChat.lnk', isDirectory: () => false },
+      { name: 'SubDir', isDirectory: () => true }
+    ])
+    f.dirs.set(join(userPrograms, 'SubDir'), [
+      { name: 'Visual Studio Code.lnk', isDirectory: () => false }
+    ])
+    f.dirs.set(commonPrograms, [
+      { name: 'Google Chrome.lnk', isDirectory: () => false }
+    ])
+
+    const svc = new NativeAppsService({
+      platform: 'win32',
+      homeDir: 'C:\\Users\\t',
+      userDataDir: 'C:\\Users\\t\\AppData\\Roaming\\GTools',
+      fs: f.fs,
+      openPath: async () => ''
+    })
+
+    const snap = await svc.list()
+    expect(snap.fromCache).toBe(false)
+    const names = snap.apps.map((a) => a.name)
+    expect(names).toContain('WeChat')
+    expect(names).toContain('Visual Studio Code')
+    expect(names).toContain('Google Chrome')
+    expect(names).not.toContain('Uninstall WeChat')
   })
 })

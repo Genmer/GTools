@@ -392,8 +392,16 @@ export function setupIpc(deps: {
         }
         case 'apps:open': {
           const path = (req.payload as { path?: unknown } | null)?.path
-          if (typeof path !== 'string' || !path.endsWith('.app')) {
+          if (typeof path !== 'string' || path.trim() === '') {
+            return { ok: false, error: '缺少应用路径' }
+          }
+          const isMacApp = path.endsWith('.app')
+          const isWinApp = path.toLowerCase().endsWith('.lnk') || path.toLowerCase().endsWith('.exe')
+          if (process.platform === 'darwin' && !isMacApp) {
             return { ok: false, error: '缺少 .app 应用路径' }
+          }
+          if (process.platform === 'win32' && !isWinApp) {
+            return { ok: false, error: '缺少 Windows 应用路径 (.lnk / .exe)' }
           }
           const r = await deps.nativeApps.open(path)
           return r.ok ? { ok: true, data: null } : { ok: false, error: r.error ?? '打开失败' }
