@@ -27,6 +27,9 @@ export interface FloatWindowHostOptions {
   title?: string
   resizable: boolean
   alwaysOnTop: boolean
+  /** 外形契约：默认透明，圆角/阴影由插件 html 自画在透明底上（float-image 范式）；
+   *  false = 不透明窗满幅直角底（Win 默认白），html 圆角外必露「直角边」。
+   *  Win32 透明窗不可拖缘拉伸（Electron 约束），要 resizable 的浮窗保持不透明 */
   transparent: boolean
   /** false：创建后不显示 */
   show: boolean
@@ -139,7 +142,8 @@ export class FloatWindowManager implements FloatWindowApi {
       title: opts.title,
       resizable: opts.resizable ?? false,
       alwaysOnTop: opts.alwaysOnTop ?? true,
-      transparent: opts.transparent ?? false,
+      // 默认透明：不透明浮窗是满幅直角底，插件自画的圆角卡会在四角露底色（todo-pomodoro 便签曾因此穿帮）
+      transparent: opts.transparent ?? true,
       show: opts.show !== false,
       focus: opts.focus !== false
     })

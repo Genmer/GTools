@@ -79,12 +79,19 @@ describe('pollOnce 文本与图片记录', () => {
     h.setText('hello')
     await b.pollOnce()
     expect(texts(b.snapshot())).toEqual(['hello'])
-    expect(h.emits).toEqual([{ event: 'history-changed', payload: { count: 1 } }])
+    // commit 成对 emit：history-changed + 主框直推 main-push（最近非敏感文本行）
+    expect(h.emits).toEqual([
+      { event: 'history-changed', payload: { count: 1 } },
+      {
+        event: 'main-push',
+        payload: [{ pluginId: 'clipboard', pushId: (b.snapshot()[0] as { id: string }).id, title: 'hello', subtitle: '剪贴板', payloadText: 'hello' }]
+      }
+    ])
     expect(stateIn(h).records).toHaveLength(1)
 
     await b.pollOnce()
     expect(b.snapshot()).toHaveLength(1)
-    expect(h.emits).toHaveLength(1)
+    expect(h.emits).toHaveLength(2) // 仍停在首轮 commit 的一对 emit，短路轮零 emit
   })
 
   it('文本→图片→文本交替记录，图片含指纹字段', async () => {
@@ -117,7 +124,11 @@ describe('pollOnce 文本与图片记录', () => {
     h.setImage({ width: 5, height: 5, dataUrl: 'data:image/jpeg;base64,QUJD' }) // 前缀不同但字节相同
     await b.pollOnce() // hash 相同 → 短路
     expect(b.snapshot()).toHaveLength(1)
-    expect(h.emits).toHaveLength(1)
+    // 首轮 commit 的一对 emit（图片无文本，main-push 为空组），短路轮零 emit
+    expect(h.emits).toEqual([
+      { event: 'history-changed', payload: { count: 1 } },
+      { event: 'main-push', payload: [] }
+    ])
   })
 
   it('字节不同的图片正常新增为第二条', async () => {
@@ -219,7 +230,7 @@ describe('syncExternal 外部变更', () => {
     await b.pollOnce() // commit 前的 syncExternal 采纳清空，再记录清空后的新内容
     expect(b.snapshot()).toHaveLength(1)
     expect(texts(b.snapshot())).toEqual(['three'])
-    expect(h.emits.at(-1)).toEqual({ event: 'history-changed', payload: { count: 1 } })
+    expect(h.emits.filter((e) => e.event === 'history-changed').at(-1)).toEqual({ event: 'history-changed', payload: { count: 1 } })
     expect(h.emits.some((e) => e.payload !== null && typeof e.payload === 'object' && (e.payload as { count: number }).count === 0)).toBe(true)
     await b.flush()
     expect(texts(stateIn(h).records as ClipboardRecord[])).toEqual(['three'])
@@ -286,7 +297,7 @@ describe('syncExternal 外部变更', () => {
     h.store.delete('state') // PluginStorageService 读失败静默返回 {} → get 为 null
     await b.syncExternal()
     expect(texts(b.snapshot())).toEqual(['a'])
-    expect(h.emits).toHaveLength(1) // 无 count 0 误报
+    expect(h.emits).toHaveLength(2) // 仅首轮 commit 的一对 emit；无 count 0 误报
   })
 
   it('flush 在途（慢盘）时 syncExternal 读到的旧空状态不清内存，旧记录不丢', async () => {
@@ -446,5 +457,88 @@ describe('dispose 退出清理', () => {
     await b.dispose()
     expect(texts(b.snapshot())).toEqual(['keep'])
     expect(stateIn(h).records).toHaveLength(1)
+  })
+})
+
+describe('敏感内容拦截与单条删除', () => {
+  it('skipSensitive 默认开：敏感文本不入库且同内容短路；普通文本恢复记录', async () => {
+    const h = makeCtx()
+    const b = newBackend()
+    await b.init(h.ctx)
+    h.setText('password: hunter2')
+    await b.pollOnce()
+    await b.pollOnce()
+    expect(b.snapshot()).toHaveLength(0)
+    expect(h.emits).toHaveLength(0)
+
+    h.setText('plain')
+    await b.pollOnce()
+    expect(texts(b.snapshot())).toEqual(['plain'])
+
+    h.setText('password: hunter2')
+    await b.pollOnce()
+    expect(texts(b.snapshot())).toEqual(['plain'])
+  })
+
+  it('外部关闭 skipSensitive（applySettings 三字段重建）后敏感内容恢复入库', async () => {
+    const h = makeCtx()
+    const b = newBackend()
+    await b.init(h.ctx)
+    h.setText('one')
+    await b.pollOnce()
+    await b.flush()
+    h.store.set('state', {
+      v: 1,
+      settings: { maxRecords: 50, clearOnExit: false, skipSensitive: false },
+      records: stateIn(h).records
+    })
+    await b.syncExternal()
+    h.setText('secret=abc123')
+    await b.pollOnce()
+    expect(texts(b.snapshot())).toEqual(['secret=abc123', 'one'])
+  })
+
+  it('remove-marker 采纳：内存与落盘同步移除、emit、marker 重写为空 ids、同 ts 幂等', async () => {
+    const h = makeCtx()
+    const b = newBackend()
+    await b.init(h.ctx)
+    for (const t of ['a', 'b', 'c']) {
+      h.setText(t)
+      await b.pollOnce()
+    }
+    await b.flush()
+    const idOf = (t: string): string => {
+      const rec = b.snapshot().find((r) => r.kind === 'text' && r.text === t)
+      if (rec === undefined) throw new Error(`record ${t} not found`)
+      return rec.id
+    }
+    h.store.set('remove-marker', { ts: 1000, ids: [idOf('b')] })
+    await b.syncExternal()
+    expect(texts(b.snapshot())).toEqual(['c', 'a'])
+    expect(texts(stateIn(h).records as ClipboardRecord[])).toEqual(['c', 'a'])
+    expect(h.store.get('remove-marker')).toEqual({ ts: 1000, ids: [] })
+
+    const emitCount = h.emits.length
+    await b.syncExternal()
+    expect(h.emits.length).toBe(emitCount)
+    expect(texts(b.snapshot())).toEqual(['c', 'a'])
+  })
+
+  it('clear-marker 与 remove-marker 同轮并发：清空优先，被删 id 不复活', async () => {
+    const h = makeCtx()
+    const b = newBackend()
+    await b.init(h.ctx)
+    for (const t of ['a', 'b']) {
+      h.setText(t)
+      await b.pollOnce()
+    }
+    await b.flush() // 排干在途写入，否则 syncExternal 按「自己有脏数据」跳过检测（协议行为）
+    const victim = b.snapshot()[1]
+    h.store.set('remove-marker', { ts: 2000, ids: [(victim as { id: string }).id] })
+    h.store.set('clear-marker', 7)
+    await b.syncExternal()
+    expect(b.snapshot()).toHaveLength(0)
+    expect(stateIn(h).records).toHaveLength(0)
+    expect(h.emits.some((e) => (e.payload as { count: number } | null)?.count === 0)).toBe(true)
   })
 })

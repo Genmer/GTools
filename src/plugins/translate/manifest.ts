@@ -12,7 +12,9 @@ const manifest: PluginManifest = {
   // 翻译经全局 API 中心代理（host.apis），不再自持 net；按需最小授权
   permissions: ['apis:translate', 'clipboard:read', 'clipboard:write', 'storage'],
   source: 'builtin',
-  entry: './index.vue'
+  entry: './index.vue',
+  // 宿主推荐行（uTools over 风格）：任意非空查询压底推荐，命中文本经既有 query 通路注入
+  matchers: [{ type: 'text', label: '用聚合翻译翻译' }]
 }
 
 export default manifest

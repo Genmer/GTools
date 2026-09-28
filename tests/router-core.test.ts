@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { enterPlugin, enterSettings, keywordMatch, resetForShow, router, syncMode } from '../src/renderer/src/shell/router-core'
+import type { MatchFile } from '../src/renderer/src/core/recommend'
 import type { PluginManifest } from '@sdk/manifest'
 
 const manifests: PluginManifest[] = [
@@ -109,5 +110,59 @@ describe('resetForShow 现场保留', () => {
     enterSettings()
     resetForShow(true)
     expectState('global', '', null, null)
+  })
+})
+
+describe('initialPayload 生命周期（拖拽携参通道）', () => {
+  const files: MatchFile[] = [{ name: 'a.pdf', path: 'C:/tmp/a.pdf', isFile: true, isDirectory: false }]
+
+  it('enterPlugin 携参写入；不带参时无条件覆盖为 null（覆盖 exitLevel 直改字段留下的残留）', () => {
+    resetForShow(true)
+    enterPlugin('calc', manifests, undefined, '1+1', files)
+    // router 为 reactive，读出的是数组的响应式代理，比对内容而非引用
+    expect(router.initialPayload).toEqual(files)
+    // 不带 payload 的进入（deep-link 4 参调用同型）清掉残留
+    enterPlugin('markdown-notes', manifests)
+    expect(router.initialPayload).toBeNull()
+  })
+
+  it('syncMode 退插件（plugin→global）清 initialPayload', () => {
+    resetForShow(true)
+    enterPlugin('calc', manifests, undefined, '1+1', files)
+    router.query = ''
+    syncMode(manifests)
+    expect(router.mode).toBe('global')
+    expect(router.initialPayload).toBeNull()
+  })
+
+  it('resetForShow 清 initialPayload', () => {
+    resetForShow(true)
+    enterPlugin('calc', manifests, undefined, 'x', files)
+    resetForShow(true)
+    expect(router.initialPayload).toBeNull()
+    // global 态手动残留同样被清
+    router.initialPayload = files
+    resetForShow()
+    expect(router.initialPayload).toBeNull()
+  })
+
+  it('syncMode 命中分支：手输关键字进入（global→plugin）清残留', () => {
+    resetForShow(true)
+    router.initialPayload = files
+    router.mode = 'global'
+    router.query = 'calc 1'
+    syncMode(manifests)
+    expect(router.mode).toBe('plugin')
+    expect(router.initialPayload).toBeNull()
+  })
+
+  it('syncMode 命中分支：enterPlugin 携参后 query watcher 再跑不清（mode 已是 plugin）', () => {
+    resetForShow(true)
+    enterPlugin('calc', manifests, undefined, '1', files)
+    expect(router.initialPayload).toEqual(files)
+    // enterPlugin 已置 mode='plugin'，query 变化触发的 syncMode 命中且不满足清理条件
+    syncMode(manifests)
+    expect(router.mode).toBe('plugin')
+    expect(router.initialPayload).toEqual(files)
   })
 })

@@ -59,9 +59,9 @@ describe('backup 序列化与文件名', () => {
     expect(b.apiServices?.services.translate.providers[0].apiKey).toBe('sk-1')
   })
 
-  it('默认文件名含日期时间与 .json 后缀', () => {
+  it('默认文件名含日期时间与 .gtools 后缀', () => {
     const name = defaultBackupFileName(new Date(2026, 8, 24, 9, 5, 3))
-    expect(name).toBe('gtools-backup-20260924-090503.json')
+    expect(name).toBe('gtools-backup-20260924-090503.gtools')
   })
 })
 

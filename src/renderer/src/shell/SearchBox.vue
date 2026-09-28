@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type { PluginManifest } from '@sdk/manifest'
 import { restOf, router } from './router'
+import { arrowAction } from './searchbox-keys'
+import { resetSubInput, subInput } from '../core/subinput'
 
 const props = defineProps<{ manifests: PluginManifest[] }>()
 const emit = defineEmits<{
@@ -18,19 +20,70 @@ defineExpose({ focus: () => inputRef.value?.focus() })
 const activeManifest = computed(() => props.manifests.find((m) => m.id === router.activePluginId) ?? null)
 // 插件态输入框只承载参数（keyword 由胶囊表达），全局/设置态仍绑定完整 query
 const pluginRest = computed(() => restOf(router.query, props.manifests))
+// manifest 的 subInput 声明归 sdk 车道（尚未落地），先结构化读取，落地后此收窄仍兼容
+const subInputPlaceholder = computed(() => {
+  const m = activeManifest.value as (PluginManifest & { subInput?: { placeholder?: string } }) | null
+  return m?.subInput?.placeholder ?? '输入参数…'
+})
 
 function clearInput(): void {
   router.query = ''
   inputRef.value?.focus()
 }
 
-function onPluginInput(v: string): void {
+function applyPluginValue(v: string): void {
   const m = activeManifest.value
   if (!m) return
   // 沿用当前命中的 keyword 重建 query；v 为空时保留尾部空格维持插件态
   const kw = m.keywords.find((k) => router.query === `${k} ` || router.query.startsWith(`${k} `)) ?? m.keywords[0]
   router.query = `${kw} ${v}`
 }
+
+function onPluginInput(v: string): void {
+  applyPluginValue(v)
+}
+
+// 进出/切换插件态都经 activePluginId 变化，此处统一复位 subInput 桥（清残留值与非 zero nonce）。
+// 复位本身会触发下方 watch：suppress 一拍，防 value 归零把 enterPlugin 刚写入的 rest 抹掉、
+// 陈旧 nonce 归零误触焦点动作
+let suppressSubInputWatch = false
+watch(
+  () => router.activePluginId,
+  () => {
+    suppressSubInputWatch = true
+    resetSubInput()
+    void nextTick(() => {
+      suppressSubInputWatch = false
+    })
+  }
+)
+watch(
+  () => subInput.value,
+  (v) => {
+    if (suppressSubInputWatch) return
+    applyPluginValue(v)
+  }
+)
+watch(
+  () => subInput.focusNonce,
+  () => {
+    if (!suppressSubInputWatch) inputRef.value?.focus()
+  }
+)
+watch(
+  () => subInput.blurNonce,
+  () => {
+    if (!suppressSubInputWatch) inputRef.value?.blur()
+  }
+)
+watch(
+  () => subInput.selectNonce,
+  () => {
+    if (suppressSubInputWatch) return
+    const el = inputRef.value
+    el?.setSelectionRange(0, el.value.length)
+  }
+)
 
 function onKeydown(e: KeyboardEvent): void {
   // 输入法组合态的按键用于选词，不参与导航/选中
@@ -55,10 +108,11 @@ function onKeydown(e: KeyboardEvent): void {
     emit('nav', e.shiftKey ? -1 : 1, 'x')
     return
   }
-  const axis = e.key === 'ArrowUp' || e.key === 'ArrowDown' ? 'y' : e.key === 'ArrowLeft' || e.key === 'ArrowRight' ? 'x' : null
-  if (axis && (axis === 'y' || router.query === '')) {
+  // 方向键让位规则抽在 searchbox-keys.ts：'cursor'/null 放行浏览器默认（移动光标），不拦
+  const action = arrowAction(e.key, router.mode, router.query)
+  if (action !== null && action !== 'cursor') {
     e.preventDefault()
-    emit('nav', e.key === 'ArrowDown' || e.key === 'ArrowRight' ? 1 : -1, axis)
+    emit('nav', action.dir, action.axis)
     return
   }
   if (e.key === 'Enter' && router.mode === 'global') {
@@ -84,7 +138,7 @@ function onKeydown(e: KeyboardEvent): void {
       <input
         ref="inputRef"
         :value="pluginRest"
-        placeholder="输入参数…"
+        :placeholder="subInputPlaceholder"
         @input="onPluginInput(($event.target as HTMLInputElement).value)"
         @keydown="onKeydown"
         spellcheck="false"
@@ -106,7 +160,7 @@ function onKeydown(e: KeyboardEvent): void {
       <input
         ref="inputRef"
         :value="router.query"
-        :placeholder="router.mode === 'settings' ? '设置' : '搜索插件、工具，或输入插件关键字…'"
+        :placeholder="router.mode === 'settings' ? '设置' : '搜索插件、工具，或输入插件关键字，或直接输入算式…'"
         @input="router.query = ($event.target as HTMLInputElement).value"
         @keydown="onKeydown"
         spellcheck="false"
@@ -139,15 +193,26 @@ function onKeydown(e: KeyboardEvent): void {
 </template>
 
 <style scoped>
+/* 导航玻璃胶囊（Regular 档）：单色 tint + 受控模糊，无投影无边环；
+   内部控件不挂自身材质（玻璃不叠玻璃），悬停只用半透明 --hover 区隔 */
 .searchbox {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 0 14px;
-  height: 52px;
-  border-radius: var(--r-lg);
-  background: var(--bg-raised);
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-filter);
   -webkit-app-region: no-drag;
+}
+/* L2 折射：SVG feDisplacementMap 位移滤镜只挂这一枚固定几何胶囊（主进程探针通过才置 html[data-lens='1']）；
+   只在清透档挂载（磨砂档 blur(14px) 会抹平折射），且 backdrop-filter 只能裸 url()——
+   url() 与 filter 函数混写实测整条失效（清晰无折射无模糊），模糊/提饱和/提亮已并入滤镜本体；
+   回退行在前、url 行在后（后行胜出，滤镜失效时回退纯 blur 不跳变） */
+html[data-lens='1'][data-blur='off'] .searchbox {
+  backdrop-filter: url(#gt-lens-pill);
 }
 .magnifier {
   flex: none;
@@ -174,7 +239,7 @@ input::placeholder {
   max-width: 45%;
   height: 28px;
   padding: 0 var(--sp-1) 0 var(--sp-2);
-  border-radius: var(--r-md);
+  border-radius: var(--r-pill); /* 28px 高取半圆胶囊，与外胶囊同心 */
   background: var(--accent-dim);
   color: var(--accent);
   user-select: none;
@@ -200,7 +265,7 @@ input::placeholder {
   height: 18px;
   padding: 0;
   border: none;
-  border-radius: var(--r-sm);
+  border-radius: 50%;
   background: transparent;
   color: var(--accent);
   cursor: pointer;
@@ -218,7 +283,7 @@ input::placeholder {
   height: 22px;
   padding: 0;
   border: none;
-  border-radius: var(--r-sm);
+  border-radius: calc(var(--r-pill) - 16px); /* 同轴圆角：外半径 − 垂直留白 (54−22)/2 */
   background: transparent;
   color: var(--fg-dim);
   cursor: pointer;
@@ -237,7 +302,7 @@ input::placeholder {
   height: 22px;
   padding: 0;
   border: none;
-  border-radius: var(--r-sm);
+  border-radius: calc(var(--r-pill) - 16px); /* 同轴圆角：外半径 − 垂直留白 (54−22)/2 */
   background: transparent;
   color: var(--fg-dim);
   cursor: pointer;

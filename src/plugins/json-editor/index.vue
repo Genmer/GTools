@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { PluginContext } from '@sdk/api'
+import type { MatchFile, PluginContext } from '@sdk/api'
 import { countLines, parseJson, reformat, type JsonError } from './logic/json'
 import { highlightJson } from './logic/highlight'
 import {
@@ -14,7 +14,7 @@ import {
 } from './logic/tree'
 import { SAMPLE_JSON } from './logic/sample'
 
-const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string }>()
+const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string; initialPayload?: MatchFile[] }>()
 
 const DRAFT_KEY = 'draft'
 const PARSE_DEBOUNCE_MS = 250
@@ -106,6 +106,30 @@ function loadSample(): void {
   expanded.value = defaultExpanded(parsed.value)
 }
 
+// 拖 .json 入主窗经 files 匹配推荐进入：插件自行授权后读入内容预填（单文件失败不阻塞其余）
+const payloadFiles = props.initialPayload ?? []
+
+async function loadPayloadFiles(): Promise<string> {
+  if (payloadFiles.length === 0) return ''
+  try {
+    await props.ctx.host.fs.grant(payloadFiles.map((f) => f.path))
+  } catch (err) {
+    flash(`文件授权失败：${err instanceof Error ? err.message : String(err)}`)
+    return ''
+  }
+  const chunks: string[] = []
+  const failed: string[] = []
+  for (const f of payloadFiles) {
+    try {
+      chunks.push(await props.ctx.host.fs.read(f.path, { encoding: 'utf-8' }))
+    } catch {
+      failed.push(f.name)
+    }
+  }
+  if (failed.length > 0) flash(`无法读取：${failed.join('、')}`)
+  return chunks.join('\n')
+}
+
 async function persist(): Promise<void> {
   if (demoMode) return
   const t = text.value
@@ -123,7 +147,7 @@ onMounted(async () => {
     loadSample()
     return
   }
-  // query 深链内容追加到旧草稿之后（calc 同款语义），绝不覆盖既有草稿；
+  // query 深链内容与拖入文件内容追加到旧草稿之后（calc 同款语义），绝不覆盖既有草稿；
   // 无草稿无输入给空编辑器（placeholder 引导 + 工具栏「载入示例」），不预填示例避免被当草稿落盘
   let base = ''
   try {
@@ -133,7 +157,8 @@ onMounted(async () => {
     base = ''
   }
   const q = props.query.trim()
-  text.value = q === '' ? base : base === '' ? q : base + '\n' + q
+  const fileText = await loadPayloadFiles()
+  text.value = [base, q, fileText].filter((s) => s !== '').join('\n')
   applyParse()
   expanded.value = defaultExpanded(parsed.value)
   void nextTick(() => editorEl.value?.focus())

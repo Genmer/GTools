@@ -4,6 +4,7 @@ import type { PluginContext } from '@sdk/api'
 import {
   CLEAR_MARKER_KEY,
   DEFAULT_SETTINGS,
+  appendRemoveId,
   clampMaxRecords,
   filterRecords,
   previewOf,
@@ -42,7 +43,8 @@ const statusText = ref('')
 const clearArmed = ref(false)
 const showSettings = ref(false)
 const maxDraft = ref(String(DEFAULT_SETTINGS.maxRecords))
-const exitClearDraft = ref(false)
+const exitClearDraft = ref(DEFAULT_SETTINGS.clearOnExit)
+const skipSensitiveDraft = ref(DEFAULT_SETTINGS.skipSensitive)
 const loading = ref(true)
 
 // 来源应用只有 demo 才有值（Electron 剪贴板不暴露来源应用，真实条目该槽位显示类型标签）
@@ -75,10 +77,13 @@ async function load(): Promise<void> {
       if (raw.settings !== undefined) {
         settings.value = {
           maxRecords: clampMaxRecords(raw.settings.maxRecords),
-          clearOnExit: raw.settings.clearOnExit === true
+          clearOnExit: raw.settings.clearOnExit === true,
+          // 缺省视为 true，兼容 backend/旧版本写入的无 skipSensitive 状态
+          skipSensitive: raw.settings.skipSensitive !== false
         }
         maxDraft.value = String(settings.value.maxRecords)
         exitClearDraft.value = settings.value.clearOnExit
+        skipSensitiveDraft.value = settings.value.skipSensitive
       }
     }
     ui.value = parseUiState(await props.ctx.host.storage.get(UI_STATE_KEY))
@@ -163,9 +168,17 @@ function onTogglePin(rec: ClipboardRecord): void {
   flash(ui.value.pinned.includes(rec.id) ? '已固定，将置顶显示' : '已取消固定')
 }
 
-function onDelete(rec: ClipboardRecord): void {
+async function onDelete(rec: ClipboardRecord): Promise<void> {
+  // hideRecord 仅即时视觉反馈；真删除经 remove-marker 由 backend 采纳后统一落盘（不直写 state 防互相覆盖）
   setUi(hideRecord(ui.value, rec.id))
-  flash('已删除')
+  if (isDemo.value) return
+  try {
+    // 读-改-写在 logic 侧经 promise 链互斥串行，快速连删不丢 id
+    await appendRemoveId(props.ctx.host.storage, rec.id, Date.now())
+    flash('已删除')
+  } catch {
+    flash('删除失败')
+  }
 }
 
 async function persistState(): Promise<void> {
@@ -203,7 +216,8 @@ function saveSettings(): void {
   const n = Number.parseInt(maxDraft.value, 10)
   settings.value = {
     maxRecords: clampMaxRecords(Number.isFinite(n) ? n : settings.value.maxRecords),
-    clearOnExit: exitClearDraft.value
+    clearOnExit: exitClearDraft.value,
+    skipSensitive: skipSensitiveDraft.value
   }
   maxDraft.value = String(settings.value.maxRecords)
   showSettings.value = false
@@ -306,6 +320,9 @@ onUnmounted(() => {
         条
       </label>
       <label class="field"><input v-model="exitClearDraft" class="check" type="checkbox" /> 退出应用时清空历史</label>
+      <label class="field">
+        <input v-model="skipSensitiveDraft" class="check" type="checkbox" /> 跳过敏感内容（密码 / 密钥不入库）
+      </label>
       <button class="btn-text primary" @click="saveSettings">保存</button>
     </div>
 

@@ -74,6 +74,7 @@ defineExpose({ focusContent })
         :ctx="ctx"
         :query="rest"
         :initial-command="router.initialCommand"
+        :initial-payload="router.initialPayload ?? undefined"
       />
       <div v-else class="plugin-error"><p>插件视图未找到</p></div>
     </div>
@@ -91,8 +92,13 @@ defineExpose({ focusContent })
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--sp-4);
-  background: var(--bg);
+  /* 顶部 80px 让位悬浮玻璃胶囊（64px 栏 + 16px 原留白），插件内容滚入其下 */
+  padding: 80px var(--sp-4) var(--sp-4);
+  scroll-padding-top: 80px;
+  background: var(--bg-content); /* 内容层实色面板，与导航玻璃分层 */
+  /* 顶部溶解：内容滚入玻璃下方渐隐（#000 为 alpha 蒙版形状色，非 UI 颜色） */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 64px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 64px);
   outline: none;
 }
 /* §1.7 细滚动条：槽 9px，拇指视觉 6px 且右缘留 3px 间隙不贴死窗边 */

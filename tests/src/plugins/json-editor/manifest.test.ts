@@ -73,8 +73,8 @@ describe('json-editor manifest', () => {
     for (const k of manifest.keywords) expect(taken.has(k)).toBe(false)
   })
 
-  it('permissions 只声明用到的能力（storage 草稿 + clipboard:write 复制）', () => {
-    expect(manifest.permissions).toEqual(['storage', 'clipboard:write'])
+  it('permissions 只声明用到的能力（storage 草稿 + clipboard:write 复制 + fs 拖入文件授权读取）', () => {
+    expect(new Set(manifest.permissions)).toEqual(new Set(['storage', 'clipboard:write', 'fs']))
     for (const p of manifest.permissions) expect((ALL_PERMISSIONS as readonly string[]).includes(p)).toBe(true)
   })
 })

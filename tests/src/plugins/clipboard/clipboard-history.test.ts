@@ -5,18 +5,22 @@ import {
   MAX_MAX_RECORDS,
   MAX_TEXT_CHARS,
   MIN_MAX_RECORDS,
+  REMOVE_MARKER_KEY,
   appendRecord,
+  appendRemoveId,
   clampMaxRecords,
   enforceCap,
   enforceImageBudget,
   filterRecords,
   parsePersistedState,
+  parseRemoveMarker,
   previewOf,
   sameRecordContent,
   toPersisted,
   type ClipboardImageRecord,
   type ClipboardRecord,
-  type ClipboardTextRecord
+  type ClipboardTextRecord,
+  type RemoveMarkerStore
 } from '../../../../src/plugins/clipboard/logic/history'
 import { dataUrlBytes, fnv1a32, imageFingerprint } from '../../../../src/plugins/clipboard/logic/image-hash'
 import manifest from '../../../../src/plugins/clipboard/manifest'
@@ -162,15 +166,30 @@ describe('history 搜索与预览', () => {
 describe('history 持久化', () => {
   it('toPersisted → parsePersistedState 往返一致', () => {
     const state = toPersisted(
-      { maxRecords: 50, clearOnExit: true },
+      { maxRecords: 50, clearOnExit: true, skipSensitive: false },
       [textRec({ text: 'a', ts: 2 }), imgRec({ hash: 'h', ts: 1 })]
     )
     const parsed = parsePersistedState(JSON.parse(JSON.stringify(state)))
     expect(parsed).not.toBeNull()
-    expect(parsed?.settings).toEqual({ maxRecords: 50, clearOnExit: true })
+    expect(parsed?.settings).toEqual({ maxRecords: 50, clearOnExit: true, skipSensitive: false })
     expect(parsed?.records).toHaveLength(2)
     expect(parsed?.records[0]).toMatchObject({ kind: 'text', text: 'a' })
     expect(parsed?.records[1]).toMatchObject({ kind: 'image', hash: 'h' })
+  })
+
+  it('skipSensitive 往返：关闭过滤落盘重载后偏好保持；旧 kv.json 缺省回 true', () => {
+    const off = parsePersistedState(
+      JSON.parse(JSON.stringify(toPersisted({ maxRecords: 100, clearOnExit: false, skipSensitive: false }, [])))
+    )
+    expect(off?.settings.skipSensitive).toBe(false)
+    const legacy = parsePersistedState({
+      v: 1,
+      settings: { maxRecords: 100, clearOnExit: false },
+      records: []
+    })
+    expect(legacy?.settings.skipSensitive).toBe(true)
+    const bad = parsePersistedState({ v: 1, settings: { maxRecords: 100, clearOnExit: false, skipSensitive: 'no' }, records: [] })
+    expect(bad?.settings.skipSensitive).toBe(true)
   })
 
   it('非对象 / 版本不符返回 null', () => {
@@ -204,10 +223,10 @@ describe('history 持久化', () => {
       records: Array.from({ length: 15 }, (_, i) => ({ id: `r${i}`, kind: 'text', ts: i, text: `t${i}` }))
     })
     const tooBig = parsePersistedState(mkRaw(99999))
-    expect(tooBig?.settings).toEqual({ maxRecords: MAX_MAX_RECORDS, clearOnExit: false })
+    expect(tooBig?.settings).toEqual({ maxRecords: MAX_MAX_RECORDS, clearOnExit: false, skipSensitive: true })
     expect(tooBig?.records).toHaveLength(15)
     const tooSmall = parsePersistedState(mkRaw(5))
-    expect(tooSmall?.settings).toEqual({ maxRecords: MIN_MAX_RECORDS, clearOnExit: false })
+    expect(tooSmall?.settings).toEqual({ maxRecords: MIN_MAX_RECORDS, clearOnExit: false, skipSensitive: true })
     expect(tooSmall?.records).toHaveLength(MIN_MAX_RECORDS)
   })
 })
@@ -249,13 +268,57 @@ describe('image-hash', () => {
   })
 })
 
+describe('appendRemoveId 删除标记读-改-写', () => {
+  // get 延迟到下一轮宏任务：无互斥时并发调用会都先读到旧 ids 再互相覆盖，恰好复现丢 id 窗口
+  class FakeStore implements RemoveMarkerStore {
+    private readonly map = new Map<string, unknown>()
+    readonly writes: unknown[] = []
+    failNextGet = false
+    async get(key: string): Promise<unknown> {
+      if (this.failNextGet) {
+        this.failNextGet = false
+        throw new Error('get failed')
+      }
+      await new Promise((r) => setTimeout(r, 0))
+      return this.map.get(key) ?? null
+    }
+    async set(key: string, value: unknown): Promise<void> {
+      this.map.set(key, value)
+      this.writes.push(value)
+    }
+    read(): unknown {
+      return this.map.get(REMOVE_MARKER_KEY) ?? null
+    }
+  }
+
+  it('并发两次删除串行追加：两个 id 都在最终标记里，ts 严格递增', async () => {
+    const store = new FakeStore()
+    await Promise.all([appendRemoveId(store, 'id-a', 1000), appendRemoveId(store, 'id-b', 1000)])
+    const marker = parseRemoveMarker(store.read())
+    expect(marker?.ids).toEqual(['id-a', 'id-b'])
+    // 模块级 ts 下限跨用例保留，故断言相对递进而非绝对值
+    expect(store.writes).toHaveLength(2)
+    const [w1, w2] = store.writes as { ts: number; ids: string[] }[]
+    expect(w1?.ids).toEqual(['id-a'])
+    expect(w2).toEqual({ ts: (w1?.ts ?? 0) + 1, ids: ['id-a', 'id-b'] })
+  })
+
+  it('链上前一次读写失败不阻塞后续：首投 reject，次次照常入库', async () => {
+    const store = new FakeStore()
+    store.failNextGet = true
+    await expect(appendRemoveId(store, 'lost', 1000)).rejects.toThrow('get failed')
+    await appendRemoveId(store, 'kept', 1000)
+    expect(parseRemoveMarker(store.read())?.ids).toEqual(['kept'])
+  })
+})
+
 describe('clipboard-history manifest', () => {
   it('通过协议校验，resident 且声明 backend 与所需权限', () => {
     const errors = validateManifest(manifest, { existingIds: new Set(), activeKeywords: new Map() })
     expect(errors).toEqual([])
     expect(manifest.activation).toBe('resident')
     expect(typeof manifest.backend).toBe('string')
-    expect([...manifest.permissions].sort()).toEqual(['clipboard:read', 'clipboard:write', 'storage'])
+    expect([...manifest.permissions].sort()).toEqual(['clipboard:read', 'clipboard:write', 'mainPush', 'storage'])
   })
 
   it('keyword 与已启用插件冲突时被校验拒绝', () => {

@@ -12,6 +12,7 @@ import { ApiCenterService, migrateLegacyTranslate } from './services/api-center'
 import { createBackendContext } from './services/dispatch'
 import { setupIpc } from './services/ipc'
 import {
+  applyHideOnBlur,
   createSearchWindow,
   createDetachedWindow,
   detachedEntryUrl,
@@ -23,6 +24,7 @@ import {
 import { DetachedWindowManager } from './detached-window-manager'
 import { registerHotkey, unregisterAllHotkeys } from './shortcut'
 import { createTray } from './tray'
+import { syncLoginItem } from './login-item'
 
 // 构建期展开为实际存在的插件目录：移除 src/plugins/<id>/ 即从产物消失，宿主零改动
 const manifestModules = import.meta.glob<{ default: PluginManifest }>('../plugins/*/manifest.ts', { eager: true })
@@ -93,8 +95,21 @@ async function bootstrap(): Promise<void> {
   })
   await loader.load(settingsStore.settings.disabledPlugins)
 
+  applyHideOnBlur(settingsStore.settings.hideOnBlur)
+  // 先镜像主题/透明/玻璃材质再建窗（透明标志/材质依赖当前设置），建窗后自身完成材质应用
+  applyThemeToWindow(
+    settingsStore.settings.theme,
+    settingsStore.settings.transparency,
+    settingsStore.settings.glassMaterial
+  )
   createSearchWindow()
-  applyThemeToWindow(settingsStore.settings.theme)
+
+  // 登录项失败不阻断主功能（区别于快捷键失败弹通知），只留日志
+  try {
+    syncLoginItem(app, settingsStore.settings.launchAtLogin)
+  } catch (err) {
+    console.error('GTools 开机启动设置失败：', err)
+  }
 
   // 插件独立窗口管理器（每插件单实例，禁用插件/退出时统一回收）
   const detached = new DetachedWindowManager({

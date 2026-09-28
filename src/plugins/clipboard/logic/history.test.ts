@@ -53,7 +53,7 @@ describe('clampMaxRecords 收敛规则', () => {
   it('默认常量关系成立', () => {
     expect(MIN_MAX_RECORDS).toBeLessThan(DEFAULT_MAX_RECORDS)
     expect(DEFAULT_MAX_RECORDS).toBeLessThan(MAX_MAX_RECORDS)
-    expect(DEFAULT_SETTINGS).toEqual({ maxRecords: DEFAULT_MAX_RECORDS, clearOnExit: false })
+    expect(DEFAULT_SETTINGS).toEqual({ maxRecords: DEFAULT_MAX_RECORDS, clearOnExit: false, skipSensitive: true })
   })
 })
 
@@ -153,7 +153,7 @@ describe('previewOf 预览', () => {
 describe('持久化解析与独立性', () => {
   it('toPersisted 是深拷贝：后续改原件不影响落盘快照', () => {
     const rec = textRec({ text: 'a' })
-    const settings = { maxRecords: 20, clearOnExit: false }
+    const settings = { maxRecords: 20, clearOnExit: false, skipSensitive: true }
     const persisted = toPersisted(settings, [rec])
     rec.text = 'changed'
     settings.maxRecords = 999
@@ -179,7 +179,7 @@ describe('持久化解析与独立性', () => {
   it('records 非数组按空处理；ts 非有限数丢弃；settings 缺省回落默认', () => {
     const parsed = parsePersistedState({ v: 1, settings: undefined, records: 'nope' })
     expect(parsed?.records).toEqual([])
-    expect(parsed?.settings).toEqual({ maxRecords: DEFAULT_MAX_RECORDS, clearOnExit: false })
+    expect(parsed?.settings).toEqual({ maxRecords: DEFAULT_MAX_RECORDS, clearOnExit: false, skipSensitive: true })
 
     const badTs = parsePersistedState({ v: 1, records: [{ id: 'x', kind: 'text', ts: Number.NaN, text: 'a' }] })
     expect(badTs?.records).toEqual([])

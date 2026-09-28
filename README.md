@@ -50,7 +50,7 @@ export ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-b
 | **网页快开** | `web` / `快开` / `wykk` | 常用站点一键打开、带参快捷直达搜索 |
 | **批量重命名** | `rename` / `重命名` | 文本替换、序号自增、扩展名转换、前后缀添加与实时预览 |
 | **PDF 工具箱** | `pdf` / `pdf-tools` | PDF 合并、拆分、旋转、重排与提取 |
-| **时间工具箱** | `time` / `时间戳` | Unix 时间戳互转、世界时钟、Cron 表达式解析与倒计时 |
+| **时间工具箱** | `time` / `时间戳` | Unix 时间戳互转、世界时钟、倒计时提醒（Cron 解析后续版本） |
 | **待办与番茄钟** | `todo` / `pomodoro` / `番茄` | 任务清单、优先级管理、番茄工作法时钟与浮窗提醒 |
 | **变量命名神器** | `var` / `命名` / `codelf` | 中文转小驼峰、大驼峰、下划线、常量命名与缩写引擎 |
 | **开发者工具集** | `dev` / `开发者` / `kfz` | Base64、URL 编解码、UUID、正则测试、颜色转换、JWT 解码 |

@@ -22,17 +22,43 @@ html[data-theme='light'] {
   --r-lg: 12px;
   --r-md: 8px;
   --r-sm: 6px;
+  /* 同心半径阶梯：窗口 12 / 浮层 16 / 胶囊 27（54px 高的半圆）／卡 12／格 8／控件 6；
+     嵌套取「外半径 − 内边距」，见 EmptyState 的 .cell-actions 按钮 */
+  --r-window: 12px;
+  --r-xl: 16px;
+  --r-pill: 27px;
   --sp-1: 4px;
   --sp-2: 8px;
   --sp-3: 12px;
   --sp-4: 16px;
   --sp-5: 24px;
+  /* 投影分两级：--shadow-window 只挂窗口根（透明窗落 OS 边距），--shadow-glass 给独立玻璃件（胶囊） */
   --shadow-window: 0 12px 40px rgba(0, 0, 0, 0.18);
-  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.12);
+  /* 窗口外圈投影的可见形态：亚克力满窗时 CSS 外投影被窗口边界裁掉，用内缘晕圈勾轮廓 */
+  --window-ring: inset 0 1px 2px rgba(15, 23, 42, 0.14), inset 0 0 0 1px rgba(15, 23, 42, 0.05),
+    inset 0 0 26px rgba(15, 23, 42, 0.1);
+  /* conic 受光环四站点（.app::before 1.2px 环），未定义处 transparent 不可见 */
+  --rim-c1: transparent;
+  --rim-c2: transparent;
+  --rim-c3: transparent;
+  --rim-c4: transparent;
   --hover: rgba(0, 0, 0, 0.05);
   --active-row: var(--accent-dim);
   --scrollbar-thumb: rgba(0, 0, 0, 0.2);
   --scrollbar-thumb-hover: rgba(0, 0, 0, 0.32);
+  /* 两层层级：导航玻璃浮于内容之上（内容永不与玻璃平级） */
+  --z-content: 0;
+  --z-nav: 100;
+  --bg-shell: var(--bg-raised);
+  --bg-content: var(--bg-raised);
+
+  /* 玻璃材质族：透明关闭时取惰性值（无玻璃外观），开启后由下方 transparency 块按主题覆盖。
+     Regular = 导航胶囊/底栏 tint + 受控模糊；Clear = 贴内容的滚动溶解条 */
+  --glass-bg: var(--bg-raised);
+  --glass-filter: none;
+  --fill-well: var(--bg-raised);
+  --strip-tint: transparent;
+  --strip-filter: none;
 
   /* 空态应用/最近行字母块兜底色（§1.5）：六色轮换，前景为大号图标字形取宽松对比 */
   --tile-blue-bg: rgba(9, 105, 218, 0.12);
@@ -62,52 +88,211 @@ html[data-theme='dark'] {
   --warn: #d29922;
   /* 深色投影减弱扩散、hover 用白色叠层（黑色不可见） */
   --shadow-window: 0 12px 32px rgba(0, 0, 0, 0.45);
-  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.3);
+  --window-ring: inset 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+    inset 0 0 26px rgba(0, 0, 0, 0.3);
   --hover: rgba(255, 255, 255, 0.08);
   --scrollbar-thumb: rgba(255, 255, 255, 0.26);
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.4);
-  --tile-blue-bg: rgba(68, 147, 248, 0.24);
+  --tile-blue-bg: rgba(68, 147, 248, 0.2);
   --tile-blue-fg: #7cb3f9;
-  --tile-green-bg: rgba(63, 185, 80, 0.22);
+  --tile-green-bg: rgba(63, 185, 80, 0.2);
   --tile-green-fg: #6fdd82;
-  --tile-amber-bg: rgba(210, 153, 34, 0.24);
+  --tile-amber-bg: rgba(210, 153, 34, 0.2);
   --tile-amber-fg: #e3b341;
-  --tile-rose-bg: rgba(248, 81, 73, 0.22);
+  --tile-rose-bg: rgba(248, 81, 73, 0.2);
   --tile-rose-fg: #ff8a84;
-  --tile-violet-bg: rgba(154, 109, 255, 0.22);
+  --tile-violet-bg: rgba(154, 109, 255, 0.2);
   --tile-violet-fg: #b393ff;
   --tile-teal-bg: rgba(56, 199, 186, 0.2);
   --tile-teal-fg: #63d9c9;
 }
 
-/* 玻璃主题：复用 dark 前景色，背景交给窗口原生效果（vibrancy/亚克力） */
+/* 透明效果（通用设置，所有主题可开，html[data-transparency='on'] + --tx(0-1 透明度) 由宿主注入）：
+   实时模糊由 Win11 亚克力 / macOS vibrancy 在窗口层担纲，CSS 只做薄 tint 补色，
+   alpha = 基数 + (1 - --tx) × 系数：--tx 越大越透；饱和度来自透进来的壁纸，blur/saturate 补偿 */
+html[data-transparency='on'][data-theme='dark'] {
+  /* 窗口 tint 取 Fluent dark TintColor #2C2C2C 中性灰（亮度透传交给原生层），禁蓝黑/近黑基色 */
+  --bg: rgba(44, 44, 44, calc(0.15 + (1 - var(--tx, 0.55)) * 0.2));
+  --bg-raised: rgba(44, 44, 46, calc(0.25 + (1 - var(--tx, 0.55)) * 0.25));
+  --border: rgba(255, 255, 255, 0.09);
+  /* 三段式外投影（接触+悬浮+环境，延伸量按透明窗边距 48/32 预算）：alpha 随 --tx 线性上调 */
+  --shadow-window: 0 1px 2px rgba(0, 0, 0, calc(0.16 + var(--tx, 0.55) * 0.04)),
+    0 10px 24px rgba(0, 0, 0, calc(0.28 + var(--tx, 0.55) * 0.06)),
+    0 18px 28px rgba(0, 0, 0, calc(0.16 + var(--tx, 0.55) * 0.04));
+  --window-ring: inset 0 1px 2px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.07),
+    inset 0 0 30px rgba(0, 0, 0, calc(0.22 + var(--tx, 0.55) * 0.14));
+  --bg-shell: var(--bg);
+  --bg-content: rgba(28, 28, 30, calc(0.45 + (1 - var(--tx, 0.55)) * 0.25));
+  /* Regular：导航胶囊/底栏 tint + 受控模糊提饱和（tint 下调让 DWM 亚克力透进感可见）；Clear：溶解条 */
+  --glass-bg: rgba(40, 40, 42, calc(0.3 + (1 - var(--tx, 0.55)) * 0.2));
+  --glass-filter: blur(16px) saturate(1.4) brightness(1.03);
+  --strip-tint: rgba(255, 255, 255, 0.08);
+  --strip-filter: blur(12px) saturate(1.2);
+  /* 凹陷输入域厚填充；黑不做面板底，禁 alpha>0.7 的 overlay */
+  --fill-well: rgba(0, 0, 0, calc(0.2 + (1 - var(--tx, 0.55)) * 0.1));
+  /* 暗色系 rim 白 alpha 减半 */
+  --rim-c1: rgba(255, 255, 255, 0.47);
+  --rim-c2: rgba(255, 255, 255, 0.06);
+  --rim-c3: rgba(255, 255, 255, 0.025);
+  --rim-c4: rgba(255, 255, 255, 0.15);
+}
+
+html[data-transparency='on'][data-theme='light'] {
+  --bg: rgba(255, 255, 255, calc(0.3 + (1 - var(--tx, 0.55)) * 0.3));
+  --bg-raised: rgba(255, 255, 255, calc(0.45 + (1 - var(--tx, 0.55)) * 0.3));
+  --border: rgba(0, 0, 0, 0.07);
+  --shadow-window: 0 1px 2px rgba(15, 23, 42, calc(0.1 + var(--tx, 0.55) * 0.04)),
+    0 10px 24px rgba(15, 23, 42, calc(0.14 + var(--tx, 0.55) * 0.06)),
+    0 18px 28px rgba(15, 23, 42, calc(0.08 + var(--tx, 0.55) * 0.04));
+  --window-ring: inset 0 1px 2px rgba(15, 23, 42, 0.12), inset 0 0 0 1px rgba(15, 23, 42, 0.05),
+    inset 0 0 30px rgba(15, 23, 42, calc(0.08 + var(--tx, 0.55) * 0.06));
+  --bg-shell: var(--bg);
+  --bg-content: rgba(255, 255, 255, calc(0.4 + (1 - var(--tx, 0.55)) * 0.25));
+  --glass-bg: rgba(255, 255, 255, calc(0.3 + (1 - var(--tx, 0.55)) * 0.2));
+  --glass-filter: blur(16px) saturate(1.4) brightness(1.03);
+  --strip-tint: rgba(255, 255, 255, 0.15);
+  --strip-filter: blur(12px) saturate(1.2);
+  --fill-well: rgba(255, 255, 255, calc(0.55 + (1 - var(--tx, 0.55)) * 0.2));
+  --rim-c1: rgba(255, 255, 255, 0.95);
+  --rim-c2: rgba(255, 255, 255, 0.12);
+  --rim-c3: rgba(255, 255, 255, 0.05);
+  --rim-c4: rgba(255, 255, 255, 0.3);
+}
+
+/* 玻璃主题层叠纪律（防 backdrop 断链回归，动壳层前必读）：
+   1. 玻璃面（搜索胶囊/溶解条）到壁纸层（body::before）的祖先链禁 filter/opacity<1/mask/clip-path
+      ——含 clip-path:inset(0) 这类无操作裁剪，任何一处都会切断 backdrop 采样；
+   2. 玻璃显隐动画用 visibility/display，不用容器 opacity；玻璃面内禁 position:fixed 后代；
+   3. 面板内部行/按钮/徽标只用 rgba(255,255,255,0.06~0.12) tint，不做二次 blur（嵌套玻璃只能采到外层过滤输出）；
+   4. 壁纸层静止不动画（任何重绘都令位移链整链重跑），胶囊下/上禁常驻动画；
+   5. 胶囊折射是 L2（主进程探针通过才置 html[data-lens='1']），探针不过自动落 L1 纯 blur。 */
 html[data-theme='glass'] {
-  --bg: transparent;
-  --bg-raised: rgba(255, 255, 255, 0.08);
-  --fg: #f5f5f5;
-  --fg-dim: #c5c9cd;
-  --accent: #4493f8;
-  --accent-dim: rgba(68, 147, 248, 0.2);
-  --border: rgba(255, 255, 255, 0.18);
-  --danger: #ff6b62;
-  --ok: #3fb950;
-  --warn: #d29922;
-  --shadow-window: 0 12px 32px rgba(0, 0, 0, 0.45);
-  --shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.3);
-  --hover: rgba(255, 255, 255, 0.08);
-  --scrollbar-thumb: rgba(255, 255, 255, 0.3);
-  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.45);
-  --tile-blue-bg: rgba(68, 147, 248, 0.24);
-  --tile-blue-fg: #7cb3f9;
-  --tile-green-bg: rgba(63, 185, 80, 0.22);
-  --tile-green-fg: #6fdd82;
-  --tile-amber-bg: rgba(210, 153, 34, 0.24);
-  --tile-amber-fg: #e3b341;
-  --tile-rose-bg: rgba(248, 81, 73, 0.22);
-  --tile-rose-fg: #ff8a84;
-  --tile-violet-bg: rgba(154, 109, 255, 0.22);
-  --tile-violet-fg: #b393ff;
-  --tile-teal-bg: rgba(56, 199, 186, 0.2);
-  --tile-teal-fg: #63d9c9;
+  /* 清玻璃（ref1 Clear lens）：近全透 tint，可读性 dimming 由内容面板 --bg-content 承担，
+     折射源是页内壁纸层（window.ts 对 glass 不设原生材质）；--tx 调玻璃密度 */
+  --bg: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.1));
+  --bg-raised: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.1));
+  --fg: #16202e;
+  --fg-dim: rgba(22, 32, 46, 0.62);
+  --accent: #0a6bd4;
+  --accent-dim: rgba(10, 107, 212, 0.14);
+  --border: rgba(255, 255, 255, 0.55);
+  --danger: #c2342c;
+  --ok: #157f3c;
+  --warn: #96650a;
+  /* 三段式外投影（接触+悬浮+环境），延伸量按透明窗边距（下 48/侧 32）预算 */
+  --shadow-window: 0 1px 2px rgba(20, 32, 52, 0.14), 0 14px 34px rgba(20, 32, 52, 0.22),
+    0 24px 48px rgba(20, 32, 52, 0.18);
+  /* 壳缘受光=玻璃厚度光：上缘亮线/下缘暗线/侧缘弱光/内部微光（ref1 玻璃板边缘光学） */
+  --window-ring: inset 0 1px 1px rgba(255, 255, 255, 0.65), inset 0 -1px 1px rgba(255, 255, 255, 0.22),
+    inset 1px 0 0 rgba(255, 255, 255, 0.28), inset -1px 0 0 rgba(255, 255, 255, 0.28),
+    inset 0 0 10px rgba(255, 255, 255, 0.1);
+  --glass-inset: var(--window-ring);
+  /* 独立玻璃件（胶囊）下的真实软投影 */
+  --shadow-glass: 0 1px 2px rgba(15, 23, 42, 0.12), 0 8px 24px rgba(15, 23, 42, 0.16);
+  /* conic 受光环：左上强受光绕一圈明暗变化（窗缘「弯折桌面」CSS 做不到，此环是光学近似） */
+  --rim-c1: rgba(255, 255, 255, 0.95);
+  --rim-c2: rgba(255, 255, 255, 0.12);
+  --rim-c3: rgba(255, 255, 255, 0.05);
+  --rim-c4: rgba(255, 255, 255, 0.3);
+  --hover: rgba(255, 255, 255, 0.35);
+  --active-row: rgba(10, 107, 212, 0.16);
+  --scrollbar-thumb: rgba(30, 42, 60, 0.25);
+  --scrollbar-thumb-hover: rgba(30, 42, 60, 0.4);
+  --bg-shell: var(--bg-raised);
+  /* 内容面板背板：白 alpha 预算上限 = 壳 0.105 + 本层 0.134 ≤ 0.32（终审 B 断言），
+     可读性 dimming 靠 --tx 滑杆与磨砂档兜底，不靠整层白纱 */
+  --bg-content: rgba(255, 255, 255, calc(0.08 + (1 - var(--tx, 0.55)) * 0.12));
+  /* 近全透玻璃面：tx=0.55 时 alpha≈0.08（与白霜档 0.48 拉开数量级差） */
+  --glass-bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.07));
+  /* 磨砂档（模糊开）；模糊关走下方清透档覆写 */
+  --glass-filter: blur(14px) saturate(1.5) brightness(1.05);
+  --fill-well: rgba(255, 255, 255, calc(0.3 + (1 - var(--tx, 0.55)) * 0.22));
+  --strip-tint: rgba(255, 255, 255, 0.1);
+  --strip-filter: blur(10px) saturate(1.3);
+  --tile-blue-bg: rgba(9, 105, 218, 0.16);
+  --tile-blue-fg: #0969da;
+  --tile-green-bg: rgba(26, 127, 55, 0.16);
+  --tile-green-fg: #1a7f37;
+  --tile-amber-bg: rgba(154, 103, 0, 0.18);
+  --tile-amber-fg: #9a6700;
+  --tile-rose-bg: rgba(207, 34, 46, 0.16);
+  --tile-rose-fg: #cf222e;
+  --tile-violet-bg: rgba(123, 79, 240, 0.16);
+  --tile-violet-fg: #7b4ff0;
+  --tile-teal-bg: rgba(12, 140, 130, 0.16);
+  --tile-teal-fg: #0c8c82;
+}
+html[data-theme='glass'][data-blur='off'] {
+  /* 清透档：近不模糊+高提饱和，壁纸折射与 rim 可见（磨砂档 blur 会抹平折光） */
+  --glass-filter: blur(1.5px) saturate(1.6) brightness(1.05);
 }
 
+/* 亚克力玻璃模式：身景=系统材质实时模糊（window.ts setBackgroundMaterial），页内壁纸折射层整体不画，
+   让近全透 tint 直接透出系统霜面；白层同步减薄——霜面已承担可读性 dimming，再叠满额白纱就成白塑料板 */
+html[data-theme='glass'][data-glass-material='acrylic'] body::before {
+  display: none;
+}
+html[data-theme='glass'][data-glass-material='acrylic'] {
+  --bg: rgba(255, 255, 255, calc(0.02 + (1 - var(--tx, 0.55)) * 0.04));
+  --bg-raised: rgba(255, 255, 255, calc(0.02 + (1 - var(--tx, 0.55)) * 0.04));
+  --bg-shell: var(--bg-raised);
+  --bg-content: rgba(255, 255, 255, calc(0.03 + (1 - var(--tx, 0.55)) * 0.07));
+  --glass-bg: rgba(255, 255, 255, calc(0.03 + (1 - var(--tx, 0.55)) * 0.05));
+  --border: rgba(255, 255, 255, 0.4);
+}
+
+/* 清玻璃模式：身景=窗口真透明直透桌面（DWM 实时合成，页面合成器的滤镜够不到窗后内容），页内折射层不画。
+   图层沿用玻璃默认值——身后内容与 wallpaper 档同源（都是桌面画面），可读性同参；代价是无页内磨霜/胶囊折射 */
+html[data-theme='glass'][data-glass-material='clear'] body::before {
+  display: none;
+}
+
+/* 壁纸折射层（glass 专用）：--wp-* 由 App.vue 按主进程下发的原图尺寸+显示器几何写入，
+   位置平移 dx/dy 后与桌面壁纸逐像素对齐，供胶囊 backdrop 位移滤镜采样。
+   无壁纸（读取全败/macOS TCC 拒绝）回退饱和渐变+假网格：回退态必须有折射源，
+   且与白色主题一眼区分（近白回退是上轮「白纱」判定的成因之一，禁改回） */
+html[data-theme='glass'] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  border-radius: var(--r-window);
+  background-image: var(
+    --wp-image,
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.13) 0 2px, transparent 2px 40px),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.09) 0 2px, transparent 2px 40px),
+    linear-gradient(118deg, #274a86 0%, #2e6ca4 32%, #3f93ac 60%, #7cc0b4 82%, #c9e2d4 100%)
+  );
+  background-size: var(--wp-size, cover);
+  background-position: var(--wp-pos, center);
+  background-repeat: var(--wp-repeat, no-repeat);
+  pointer-events: none;
+}
+
+/* 窗口根 conic 受光环（1.2px）：token 未定义处 transparent 不可见；mask 挖环是装饰叶子节点，
+   不在玻璃面的祖先链上（层叠纪律只约束 .searchbox 的祖先） */
+.app::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.2px;
+  background: conic-gradient(
+    from -45deg,
+    var(--rim-c1),
+    var(--rim-c2) 25%,
+    var(--rim-c3) 50%,
+    var(--rim-c4) 75%,
+    var(--rim-c1)
+  );
+  -webkit-mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* 玻璃胶囊（ref2 浮岛）：厚度光受光 + 下方软投影，与内容拉开层次 */
+html[data-theme='glass'] .searchbox {
+  box-shadow: var(--glass-inset), var(--shadow-glass);
+}

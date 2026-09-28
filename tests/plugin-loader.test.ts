@@ -47,6 +47,7 @@ const ctxFactory = (): BackendContext =>
     notification: {} as never,
     shell: {} as never,
     window: {} as never,
+    screenshot: { capture: async () => ({ action: 'cancel' as const }), handleOverlayEvent: () => {}, overlayWebContentsId: () => null },
     dialog: {} as never,
     fs: {} as never,
     app: { platform: 'test', version: '0' },

@@ -24,10 +24,10 @@ export function validateAccelerator(accel: string, platform: string): Accelerato
   return { ok: true }
 }
 
-/** space 单修饰组合平台分化：win32 上 Alt+Space 是窗口菜单键、Ctrl+Space 是输入法切换，全拒；darwin 上仅 Cmd(Spotlight)/Ctrl(输入源) 被占，Alt+Space 是 mac 默认键必须放行 */
+/** space 单修饰组合平台分化：win32 放行 Alt+Space（globalShortcut 的 RegisterHotKey 先于窗口菜单拦截，PowerToys Run/uTools 先例），仍拒 Ctrl(输入法切换)/Shift(全半角)；darwin 仅拒 Cmd(Spotlight)/Ctrl(输入源) */
 function isReservedSingleMod(mod: string, key: string, platform: string): boolean {
   if (key.toLowerCase() === 'space') {
-    if (platform === 'win32') return true
+    if (platform === 'win32') return mod !== 'Alt'
     return mod === 'Cmd' || mod === 'Ctrl'
   }
   return SINGLE_MOD_BLACKLIST.has(key.toLowerCase())

@@ -190,8 +190,28 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings(null)).toEqual(DEFAULT_SETTINGS)
     expect(normalizeSettings('x')).toEqual(DEFAULT_SETTINGS)
   })
-  it('合法字段全保留', () => {
-    const s = normalizeSettings({ theme: 'glass', hotkey: { darwin: 'Cmd+Shift+P', win32: 'Ctrl+Alt+Space' }, disabledPlugins: ['hello'] })
-    expect(s).toEqual({ theme: 'glass', hotkey: { darwin: 'Cmd+Shift+P', win32: 'Ctrl+Alt+Space' }, disabledPlugins: ['hello'] })
+  it('合法字段全保留（glass 为合法主题，transparency/glassMaterial 合法段收录）', () => {
+    const s = normalizeSettings({
+      theme: 'glass',
+      glassMaterial: 'acrylic',
+      transparency: { enabled: true, opacity: 80, blur: false },
+      hotkey: { darwin: 'Cmd+Shift+P', win32: 'Ctrl+Alt+Space' },
+      disabledPlugins: ['hello'],
+      // 偏好/机器相关字段不从备份读取（sdk/settings.ts：导入恢复不覆盖），保持本机默认
+      launchAtLogin: true,
+      clipboardSuggest: false,
+      hideOnBlur: false
+    })
+    expect(s).toEqual({
+      theme: 'glass',
+      glassMaterial: 'acrylic',
+      transparency: { enabled: true, opacity: 80, blur: false },
+      hotkey: { darwin: 'Cmd+Shift+P', win32: 'Ctrl+Alt+Space' },
+      disabledPlugins: ['hello'],
+      launchAtLogin: false,
+      clipboardSuggest: true,
+      hideOnBlur: true,
+      commandHotkeys: []
+    })
   })
 })

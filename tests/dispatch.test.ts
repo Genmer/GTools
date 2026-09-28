@@ -22,7 +22,7 @@ function manifest(id: string, permissions: PluginManifest['permissions']): Plugi
 
 function makeRegistry(): PluginRegistry {
   const reg = new PluginRegistry()
-  reg.register(manifest('full', ['window:float', 'dialog', 'fs', 'net', 'shell:open', 'storage', 'apis:translate']), true)
+  reg.register(manifest('full', ['window:float', 'dialog', 'fs', 'net', 'shell:open', 'storage', 'apis:translate', 'screenshot']), true)
   reg.register(manifest('bare', ['storage']), true)
   reg.register(manifest('off', ['fs', 'apis:translate']), false)
   return reg
@@ -74,6 +74,7 @@ function makeServices(): ServiceBag & {
         infoByWebContents: () => null
       }
     },
+    screenshot: { capture: async () => ({ action: 'cancel' as const }), handleOverlayEvent: () => {}, overlayWebContentsId: () => null },
     dialog: {
       openFile: rec('dialog.openFile'),
       saveFile: rec('dialog.saveFile')
@@ -123,7 +124,8 @@ describe('dispatchApi 新增能力面的权限校验', () => {
       'shell.openExternal',
       'net.lanAddresses',
       'apis.translate',
-      'apis.translate.status'
+      'apis.translate.status',
+      'screenshot.capture'
     ]) {
       const r = await dispatchApi(makeRegistry(), services, 'bare', api, [])
       expect(r, api).toMatchObject({ ok: false, error: 'PERMISSION_DENIED' })
@@ -137,6 +139,7 @@ describe('dispatchApi 新增能力面的权限校验', () => {
     await dispatchApi(makeRegistry(), services, 'full', 'dialog.openFile', [{ directory: true }])
     await dispatchApi(makeRegistry(), services, 'full', 'fs.grant', [['/tmp/a.txt']])
     await dispatchApi(makeRegistry(), services, 'full', 'fs.write', ['/tmp/a.txt', 'data', { encoding: 'base64' }])
+    const shot = await dispatchApi(makeRegistry(), services, 'full', 'screenshot.capture', [])
     const ext = await dispatchApi(makeRegistry(), services, 'full', 'shell.openExternal', ['https://example.com'])
     const lan = await dispatchApi(makeRegistry(), services, 'full', 'net.lanAddresses', [])
     expect(services.calls).toEqual([
@@ -145,6 +148,7 @@ describe('dispatchApi 新增能力面的权限校验', () => {
       { api: 'fs.grant', pluginId: 'full', args: [['/tmp/a.txt']] },
       { api: 'fs.write', pluginId: 'full', args: ['/tmp/a.txt', 'data', { encoding: 'base64' }] }
     ])
+    expect(shot).toMatchObject({ ok: true, data: { action: 'cancel' } })
     expect(ext).toMatchObject({ ok: true })
     expect(lan).toMatchObject({ ok: true, data: [{ name: 'en0', address: '192.168.1.5' }] })
   })

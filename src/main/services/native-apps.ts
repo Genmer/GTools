@@ -51,10 +51,13 @@ export interface NativeAppsDeps {
   now?(): number
   memoryTtlMs?: number
   diskTtlMs?: number
+  /** 提取失败后的重试冷却；启动压力期的瞬时失败靠它下次打开自愈 */
+  iconRetryMs?: number
 }
 
 const DEFAULT_MEMORY_TTL_MS = 10 * 60 * 1000
 const DEFAULT_DISK_TTL_MS = 24 * 60 * 60 * 1000
+const DEFAULT_ICON_RETRY_MS = 30 * 1000
 
 const PLIST_KEYS = ['CFBundleDisplayName', 'CFBundleName', 'CFBundleIconFile', 'CFBundleIdentifier'] as const
 
@@ -181,6 +184,34 @@ export function resolveIconPath(appPath: string, iconFile: string): string {
   return join(appPath, 'Contents', 'Resources', hasExt ? iconFile : `${iconFile}.icns`)
 }
 
+/**
+ * win32 .lnk 图标源候选序：getFileIcon 对 .lnk 本体常返回系统默认白板图标（含左下角快捷方式箭头），
+ * 须先解析快捷方式——按「自带 iconPath（原样/去索引/环境变量展开）→ target → lnk 兜底」取真图标。
+ * 非绝对路径（相对/shell 命名空间）不可用，直接剔除；expand 用于展开 icon 字段里的 %VAR%。
+ */
+export function lnkIconCandidates(
+  lnk: { target?: string; iconPath?: string },
+  lnkPath: string,
+  isAbsolute: (p: string) => boolean,
+  expand: (p: string) => string = (p) => p
+): string[] {
+  const out: string[] = []
+  const push = (p: string | undefined): void => {
+    if (typeof p === 'string' && p !== '' && isAbsolute(p) && !out.includes(p)) out.push(p)
+  }
+  if (typeof lnk.iconPath === 'string' && lnk.iconPath !== '') {
+    push(lnk.iconPath)
+    // 常见带索引形态「foo.exe,0」：getFileIcon 按字面路径找不到文件，剥掉索引再试
+    const m = lnk.iconPath.match(/^(.+),\s*-?\d+$/)
+    if (m) push(m[1])
+    if (lnk.iconPath.includes('%')) push(expand(lnk.iconPath))
+    if (m) push(expand(m[1]))
+  }
+  push(lnk.target)
+  push(lnkPath)
+  return out
+}
+
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47])
 
 /**
@@ -267,8 +298,9 @@ export function parseNativeAppsCache(raw: unknown): NativeAppsCacheFile | null {
 
 export class NativeAppsService {
   private memory: NativeAppsCacheFile | null = null
-  /** dataURL 会话缓存；undefined 为负缓存（已试过、无可用图标），防反复重解 */
-  private readonly icons = new Map<string, string | undefined>()
+  /** dataURL 会话缓存（只存成功值）；失败走 iconFails 短 TTL，自动重试 */
+  private readonly icons = new Map<string, string>()
+  private readonly iconFails = new Map<string, number>()
   private pinned: string[] | null = null
 
   constructor(private readonly deps: NativeAppsDeps) {}
@@ -306,9 +338,9 @@ export class NativeAppsService {
     return this.snapshot(this.memory, false)
   }
 
-  /** 打开应用：路径须为 .app；结果回传 UI 反馈 */
+  /** 打开应用：darwin .app / win32 .lnk/.exe（ipc 层已按平台先行校验，此处大小写不敏感兜底） */
   async open(path: string): Promise<{ ok: boolean; error?: string }> {
-    if (!path.endsWith('.app')) return { ok: false, error: `仅接受 .app 路径：${path}` }
+    if (!/\.(app|lnk|exe)$/i.test(path)) return { ok: false, error: `仅接受 .app/.lnk/.exe 应用路径：${path}` }
     const err = await this.deps.openPath(path)
     return err === '' ? { ok: true } : { ok: false, error: err }
   }
@@ -367,16 +399,26 @@ export class NativeAppsService {
   private async snapshot(c: NativeAppsCacheFile, fromCache: boolean): Promise<NativeAppsSnapshot> {
     const pinned = await this.pinnedIds()
     const apps = orderApps(c.apps, pinned)
-    const views: NativeAppView[] = []
-    for (const a of apps) {
-      const icon = await this.iconOf(a)
-      views.push(icon === undefined ? { ...a } : { ...a, icon })
-    }
+    // 图标提取并行化：串行 150+ 应用可达十几秒，首批打开明显等待；共享游标的 worker 池保持输出有序
+    const views: NativeAppView[] = new Array(apps.length)
+    let next = 0
+    const workers = Array.from({ length: Math.min(8, apps.length) }, async () => {
+      while (next < apps.length) {
+        const i = next++
+        const icon = await this.iconOf(apps[i])
+        views[i] = icon === undefined ? { ...apps[i] } : { ...apps[i], icon }
+      }
+    })
+    await Promise.all(workers)
     return { apps: views, scannedAt: c.scannedAt, fromCache, pinned }
   }
 
   private async iconOf(app: NativeAppEntry): Promise<string | undefined> {
-    if (this.icons.has(app.id)) return this.icons.get(app.id)
+    const cached = this.icons.get(app.id)
+    if (cached !== undefined) return cached
+    // 提取失败短 TTL 内不重试（启动压力期的瞬时失败下次打开自愈），不写永久负缓存
+    const failedAt = this.iconFails.get(app.id)
+    if (failedAt !== undefined && this.now - failedAt < (this.deps.iconRetryMs ?? DEFAULT_ICON_RETRY_MS)) return undefined
     let url: string | undefined
     if (app.iconPath && this.deps.loadIcon) {
       try {
@@ -385,7 +427,11 @@ export class NativeAppsService {
         url = undefined
       }
     }
-    this.icons.set(app.id, url)
+    if (url === undefined) this.iconFails.set(app.id, this.now)
+    else {
+      this.icons.set(app.id, url)
+      this.iconFails.delete(app.id)
+    }
     return url
   }
 

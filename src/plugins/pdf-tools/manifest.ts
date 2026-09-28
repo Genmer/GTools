@@ -11,7 +11,9 @@ const manifest: PluginManifest = {
   activation: 'trigger',
   permissions: ['dialog', 'fs'],
   source: 'builtin',
-  entry: './index.vue'
+  entry: './index.vue',
+  // 拖 .pdf 入主窗即推荐进主入口（commandId 缺省），授权与预填由插件视图 initialPayload 自理
+  matchers: [{ type: 'files', extensions: ['pdf'], label: '处理 PDF 文件' }]
 }
 
 export default manifest

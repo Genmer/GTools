@@ -99,6 +99,7 @@ async function makeHarness(seed?: Record<string, unknown>): Promise<Harness> {
       }
     },
     shell: { openApp: async () => {}, openPath: async () => {}, openExternal: async () => {} },
+    screenshot: { capture: async () => ({ action: 'cancel' as const }) },
     window: {
       hide: async () => {},
       float: {

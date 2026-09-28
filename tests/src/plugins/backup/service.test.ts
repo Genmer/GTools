@@ -169,7 +169,7 @@ describe('service：exportToFile', () => {
 describe('service：executeImport（跨 win/mac 迁移）', () => {
   function macBackupContent() {
     return serializeBackup({
-      settings: { ...DEFAULT_SETTINGS, theme: 'glass', hotkey: { darwin: 'Cmd+Shift+P', win32: 'Ctrl+Alt+J' } },
+      settings: { ...DEFAULT_SETTINGS, theme: 'dark', transparency: { enabled: true, opacity: 55, blur: false }, hotkey: { darwin: 'Cmd+Shift+P', win32: 'Ctrl+Alt+J' } },
       pluginStorage: {
         clipboard: { state: { last: USER_DATA_TOKEN + '/notes/a.md' } },
         translate: { provider: 'new-provider' },
@@ -207,7 +207,7 @@ describe('service：executeImport（跨 win/mac 迁移）', () => {
     expect((api.services as { translate?: { activeProviderId?: string } }).translate?.activeProviderId).toBe('u-1')
 
     const settings = JSON.parse(port.files.get(`${WIN_DIR}\\settings.json`) ?? '') as typeof DEFAULT_SETTINGS
-    expect(settings.theme).toBe('glass')
+    expect(settings.theme).toBe('dark') // glass 备份迁移
     expect(settings.hotkey.win32).toBe('Ctrl+Alt+J')
 
     const clipboard = JSON.parse(port.files.get(`${WIN_DIR}\\storage\\clipboard\\kv.json`) ?? '') as {

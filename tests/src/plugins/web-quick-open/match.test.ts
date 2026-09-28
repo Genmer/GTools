@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildQuickSearchMatcherSource,
   filterSites,
   indexText,
   matchSite,
@@ -125,5 +126,35 @@ describe('resolvePin「缩写 关键词」直达', () => {
   it('自定义站点别名撞内置库时不锁定（回退列表过滤）', () => {
     const clash = site({ id: 'c2', name: '我的站', url: 'https://mine.com', aliases: ['bd'] })
     expect(resolvePin('bd 天气', [...BUILTIN_SITES, clash])).toBeNull()
+  })
+})
+
+describe('buildQuickSearchMatcherSource 全局快搜正则源', () => {
+  it('别名去重排序、元字符转义、锚定「别名 + 空格 + 非空」形态', () => {
+    expect(buildQuickSearchMatcherSource(['b', 'a b', 'a', 'b', 'c.d'])).toBe('^(a|a b|b|c\\.d)\\s+\\S')
+    expect(buildQuickSearchMatcherSource([' bd ', 'bd'])).toBe('^(bd)\\s+\\S')
+  })
+
+  it('生成源行为：放行「别名 关键词」，拒单词条与未转义误配', () => {
+    const re = new RegExp(buildQuickSearchMatcherSource(['a', 'a b', 'b', 'c.d']))
+    expect(re.test('a 天气')).toBe(true)
+    expect(re.test('a b  多词')).toBe(true)
+    expect(re.test('b')).toBe(false)
+    expect(re.test('c.d x')).toBe(true)
+    expect(re.test('cxd x')).toBe(false) // . 未被转义就会误配
+  })
+
+  it('损坏输入：空/全空白别名集返回永不匹配正则（防空分组退化成「空格开头即命中」）', () => {
+    expect(buildQuickSearchMatcherSource([])).toBe('(?!)')
+    expect(buildQuickSearchMatcherSource(['  ', ''])).toBe('(?!)')
+    expect(new RegExp(buildQuickSearchMatcherSource([])).test('a b')).toBe(false)
+    expect(new RegExp(buildQuickSearchMatcherSource([])).test(' x')).toBe(false)
+  })
+
+  it('内置站点别名全集生成的正则对宿主任意匹配探针不全命中', () => {
+    const re = new RegExp(buildQuickSearchMatcherSource(BUILTIN_SITES.flatMap((s) => s.aliases ?? [])))
+    for (const probe of ['x', '1', '中', 'a b']) expect(re.test(probe)).toBe(false)
+    expect(re.test('bd 天气')).toBe(true)
+    expect(re.test('b站 番茄')).toBe(true)
   })
 })

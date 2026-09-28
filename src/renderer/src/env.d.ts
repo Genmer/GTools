@@ -3,6 +3,7 @@ import type { AppSettings } from '@sdk/settings'
 import type { ApiCallError } from '@sdk/api'
 
 export interface HostInitResult {
+  version: string
   settings: AppSettings
   plugins: { manifest: PluginManifest; enabled: boolean }[]
   loadIssues: { pluginId: string; message: string }[]
@@ -15,7 +16,8 @@ export interface GtoolsBridge {
     api: string,
     payload: unknown[]
   ): Promise<{ ok: boolean; data?: unknown; error?: ApiCallError; message?: string }>
-  host(api: string, payload?: unknown): Promise<{ ok: boolean; data?: unknown; error?: string }>
+  /** warnings 为信封顶层附带的部分生效警告（settings:set 热键注册失败时），仅在非空时存在 */
+  host(api: string, payload?: unknown): Promise<{ ok: boolean; data?: unknown; error?: string; warnings?: string[] }>
   on(channel: string, listener: (payload: unknown) => void): (() => void) | undefined
   /** 拖拽取路径：drop 事件里对 File 对象调用（Electron 44 无 File.path） */
   pathForFile(file: File): string

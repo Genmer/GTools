@@ -4,7 +4,24 @@ import type { PluginManifest } from '@sdk/manifest'
 import type { AppSettings } from '@sdk/settings'
 import type { HostInitResult } from '../env'
 import { buildAppEntries, buildEntries } from '../core/entries'
+import { calc } from '../core/calc'
 import { matchEntryBest } from '../core/pinyin-index'
+import { buildRecommendations, fileMatcherHits, type MatchFile, type RecItem } from '../core/recommend'
+import {
+  mergePushedItems,
+  normalizePushedItem,
+  pushedItemsToRecItems,
+  replacePushedItems,
+  type PushedItem
+} from '../core/main-push'
+import { navStep, type NavSection } from '../core/result-nav'
+// 空态扁平目标与段界组装在 core/empty-targets.ts（纯逻辑，单测锁定段序）
+import {
+  buildEmptyTargets,
+  emptySegmentOffsets,
+  type EmptyTarget,
+  type EmptyTargetsInput
+} from '../core/empty-targets'
 import { applyDeepLink, parseDeepLink } from './deep-link'
 import { enterPlugin, enterSettings, exitLevel, isSettingsEntry, resetForShow, restOf, router, syncMode } from './router'
 import {
@@ -17,6 +34,7 @@ import {
   type NativeAppItem
 } from './app-grid'
 import { buildRecentTiles, parseRecentRecords, pushRecent, type RecentRecord } from './recent-records'
+import { parseQueryHistory, pushQueryHistory } from './query-history'
 import SearchBox from './SearchBox.vue'
 import ResultList from './ResultList.vue'
 import EmptyState from './EmptyState.vue'
@@ -40,17 +58,15 @@ interface RecentRow {
   commandId?: string
 }
 
-// 空态键盘导航的扁平目标：appsMode 时 = 最近行图标 + 可见应用（折叠切片）+ 抽屉开关格
-type EmptyTarget =
-  | { kind: 'plugin'; pluginId: string; commandId?: string }
-  | { kind: 'app'; appId: string }
-  | { kind: 'apps-toggle' }
-
 // 最近使用属外壳 UI 状态（非插件数据），走 localStorage 不动设置与插件存储协议
 const RECENT_KEY = 'gtools:recent-entries'
+// 搜索历史同理走 localStorage（外壳 UI 状态不新开 IPC）
+const HISTORY_KEY = 'gtools:query-history'
 const APP_GRID_COLS = 9
-// 常规窗口高度与主进程 WINDOW_H 对齐；空态高度由 EmptyState 实测内容上报（§1.5），不再用魔法数字
+// 全局态兜底窗口高度（内容口径，与主进程 CONTENT_H 对齐）；空态高度由 EmptyState 实测内容上报（§1.5）
 const WINDOW_NORMAL_H = 560
+// 透明窗（data-wintx=1）下 #app 有 32+48 透明边距：报高按内容口径扣掉，主进程 window.ts 负责加回
+const WIN_TX_MARGIN = 80
 
 const plugins = ref<PluginState[]>([])
 const settings = ref<AppSettings | null>(null)
@@ -59,6 +75,7 @@ const emptyIndex = ref(0)
 const searchBox = ref<InstanceType<typeof SearchBox> | null>(null)
 const pluginHost = ref<InstanceType<typeof PluginViewHost> | null>(null)
 const recentRecords = ref<RecentRecord[]>([])
+const queryHistory = ref<string[]>([])
 // 独立窗口分流：#detached=true 深链时只渲染轻量宿主，不渲染主窗外壳
 const isDetachedWindow = ref(false)
 
@@ -71,6 +88,8 @@ const appError = ref<string | null>(null)
 const opError = ref<{ id: string; name: string; error: string } | null>(null)
 const isDemo = ref(false)
 let appsRequestId = 0
+// window.gtools.on 返回的退订函数统一在此收集，卸载时逐个调用
+const offFns: (() => void)[] = []
 
 const enabledManifests = computed(() => plugins.value.filter((p) => p.enabled).map((p) => p.manifest))
 const pluginEntries = computed(() => buildEntries(plugins.value))
@@ -84,7 +103,13 @@ const results = computed(() => {
     const s = matchEntryBest(q, e)
     if (s !== null) scored.push({ entry: e, score: s })
   }
-  return scored.sort((a, b) => a.score - b.score)
+  scored.sort((a, b) => a.score - b.score)
+  // 内联计算器合成词条置顶；无 pluginId，推荐区 keyword 路与词条池天然不沾
+  const c = calc(q)
+  if (c !== null) {
+    scored.unshift({ entry: { key: 'host:calc', kind: 'plugin', title: `= ${c}`, subtitle: 'Enter 复制', icon: '🧮' }, score: -1 })
+  }
+  return scored
 })
 const visibleResults = computed(() => results.value.slice(0, 50))
 
@@ -125,31 +150,154 @@ function toggleAppsExpanded(): void {
   appsExpanded.value = !appsExpanded.value
 }
 
-const emptyTargets = computed<EmptyTarget[]>(() => {
-  if (appsMode.value) {
-    const targets: EmptyTarget[] = [
-      ...recentTiles.value.map((t) =>
-        t.kind === 'app' ? { kind: 'app' as const, appId: t.appId! } : { kind: 'plugin' as const, pluginId: t.pluginId!, commandId: t.commandId }
-      ),
-      ...visibleApps.value.map((a) => ({ kind: 'app' as const, appId: a.id }))
-    ]
-    if (hasAppsToggle.value) targets.push({ kind: 'apps-toggle' })
-    return targets
+// 剪贴板推荐（C2）：每次唤起单次 peek，无轮询不订阅剪贴板变化；仅存内存，主进程不落盘不缓存。
+// clipboardSuggest 由设置链路（sdk/settings.ts）提供，这里宽松读取保持两侧改动解耦，缺省视为开
+const clipboardText = ref('')
+const clipboardSuggestOn = computed(
+  () => (settings.value as (AppSettings & { clipboardSuggest?: boolean }) | null)?.clipboardSuggest !== false
+)
+
+// 拖入集（文件/图片推荐源）与常驻插件推送行；两者都只存内存，激活/清空输入/窗口隐藏时释放
+const dropFiles = ref<MatchFile[]>([])
+const hasDropImage = ref(false)
+const pushedItems = ref<PushedItem[]>([])
+
+function releaseDrop(): void {
+  dropFiles.value = []
+  hasDropImage.value = false
+}
+
+// 常驻插件推送订阅（main-push）：plugin-event: 前缀已在 preload 白名单，on 返回退订函数。
+// 订阅随启用集合变化精确增减（只在挂载建一次会让后启用的 resident 插件永远收不到推送）；
+// 禁用生效到退订之间到达的推送由 merge/replace 的 mainPush 权限闸丢弃（enabledManifests 同步更新）
+const pushOffs = new Map<string, () => void>()
+
+function subscribeResidentPush(m: PluginManifest): void {
+  if (pushOffs.has(m.id)) return
+  const off = window.gtools.on(`plugin-event:${m.id}`, (raw) => {
+    const w = raw as { event?: string; payload?: unknown } | null
+    if (!w || w.event !== 'main-push') return
+    // 数组 = backend 全量重推的整组替换语义（空组即清除该插件全部行）；单对象 = 单条并入（旧协议）
+    if (Array.isArray(w.payload)) {
+      const items = w.payload
+        .map((x) => normalizePushedItem(x, m.id, { name: m.name, icon: m.icon }))
+        .filter((x): x is PushedItem => x !== null)
+      pushedItems.value = replacePushedItems(pushedItems.value, items, m.id, enabledManifests.value)
+      return
+    }
+    const p = (w.payload ?? {}) as Partial<PushedItem>
+    // pluginId 以通道归属为准（channel 已限定插件），不信任 payload 自带值
+    pushedItems.value = mergePushedItems(
+      pushedItems.value,
+      [
+        {
+          pluginId: m.id,
+          commandId: p.commandId,
+          title: p.title ?? m.name,
+          subtitle: p.subtitle ?? '',
+          icon: p.icon ?? m.icon,
+          payloadText: p.payloadText
+        }
+      ],
+      enabledManifests.value
+    )
+  })
+  if (off) pushOffs.set(m.id, off)
+}
+
+function syncPushSubscriptions(manifests: PluginManifest[]): void {
+  const residents = new Set<string>()
+  for (const m of manifests) {
+    if (m.activation !== 'resident') continue
+    residents.add(m.id)
+    subscribeResidentPush(m)
   }
-  return [
-    ...enabledManifests.value.map((m) => ({ kind: 'plugin' as const, pluginId: m.id })),
-    ...recentRows.value.map((r) => ({ kind: 'plugin' as const, pluginId: r.pluginId, commandId: r.commandId }))
-  ]
-})
+  for (const [id, off] of pushOffs) {
+    if (residents.has(id)) continue
+    off()
+    pushOffs.delete(id)
+    // 退订同时清该插件残留推送行，不等下一次 merge 才被权限闸过滤
+    pushedItems.value = pushedItems.value.filter((x) => x.pluginId !== id)
+  }
+}
+
+watch(enabledManifests, (v) => syncPushSubscriptions(v))
+
+// 常驻推送行并入两处推荐 computed 最前；拼接按 key 去重先到先得，防推送行与 matcher/拖入行同 key 重复渲染
+const pushedRecs = computed(() => pushedItemsToRecItems(pushedItems.value))
+
+function dedupeRecs(items: RecItem[]): RecItem[] {
+  const seen = new Set<string>()
+  const out: RecItem[] = []
+  for (const it of items) {
+    if (seen.has(it.key)) continue
+    seen.add(it.key)
+    out.push(it)
+  }
+  return out
+}
+
+const clipboardRecs = computed(() =>
+  dedupeRecs([
+    ...pushedRecs.value,
+    ...buildRecommendations({ query: '', clipboardText: clipboardText.value, manifests: enabledManifests.value, enabled: clipboardSuggestOn.value }),
+    // 空 query 下 buildRecommendations 不产出 files/img（只认剪贴板 json），空态拖入行直调 fileMatcherHits 补上
+    ...fileMatcherHits(dropFiles.value, enabledManifests.value, hasDropImage.value)
+  ])
+)
+const resultKeys = computed(() => new Set(visibleResults.value.map((i) => i.entry.key)))
+// query 态推荐区（ResultList 推荐段）；空 query 恒空（空态推荐落 EmptyState 顶部行）
+const recommendations = computed(() =>
+  router.query.trim() === ''
+    ? []
+    : dedupeRecs([
+        ...pushedRecs.value,
+        ...buildRecommendations({
+          query: router.query,
+          entries: entries.value,
+          resultKeys: resultKeys.value,
+          manifests: enabledManifests.value,
+          clipboardText: clipboardText.value,
+          files: dropFiles.value,
+          hasImage: hasDropImage.value
+        })
+      ])
+)
+
+// 剪贴板推荐前置（C2-5a）：两分支均占扁平序最前 K 位；搜索历史 chips 为第二段；
+// 拖入行（files/img 源）激活时把拖入集经 initialPayload 通道带给插件
+const emptyInput = computed<EmptyTargetsInput>(() =>
+  appsMode.value
+    ? {
+        appsMode: true,
+        clipRecs: clipboardRecs.value,
+        dropFiles: dropFiles.value,
+        history: queryHistory.value,
+        recentTiles: recentTiles.value,
+        appIds: visibleApps.value.map((a) => a.id),
+        hasAppsToggle: hasAppsToggle.value
+      }
+    : {
+        appsMode: false,
+        clipRecs: clipboardRecs.value,
+        dropFiles: dropFiles.value,
+        history: queryHistory.value,
+        pluginIds: enabledManifests.value.map((m) => m.id),
+        recentRows: recentRows.value
+      }
+)
+const emptyTargets = computed<EmptyTarget[]>(() => buildEmptyTargets(emptyInput.value))
 
 const emptyVisible = computed(() => router.mode === 'global' && router.query.trim() === '')
 
 watch(
   () => router.query,
-  () => {
+  (q, prev) => {
     syncMode(enabledManifests.value)
     activeIndex.value = 0
     emptyIndex.value = 0
+    // 拖入集在 query 清空时释放（激活时的释放见 activateEntry）
+    if (prev !== undefined && q.trim() === '' && prev.trim() !== '') releaseDrop()
   }
 )
 watch(enabledManifests, () => {
@@ -173,9 +321,10 @@ watch(emptyVisible, (visible) => {
 })
 watch(
   () => {
-    if (router.mode !== 'global') return WINDOW_NORMAL_H
+    if (router.mode !== 'global') return WINDOW_NORMAL_H // 已是内容口径，主进程负责加边距
     if (measuredH.value <= 0) return WINDOW_NORMAL_H
-    return measuredH.value
+    // 实测值含透明窗边距（视口坐标），按内容口径扣掉
+    return document.documentElement.dataset.wintx === '1' ? measuredH.value - WIN_TX_MARGIN : measuredH.value
   },
   (h) => {
     if (h === lastSentHeight) return
@@ -208,6 +357,43 @@ async function loadApps(force = false): Promise<void> {
   appsLoaded.value = true
 }
 
+// 剪贴板单次读取（C2-1）：仅设置开启时进行，读完仅存内存 ref；隐藏窗口不读、无轮询、不订阅变化
+async function peekClipboard(): Promise<void> {
+  if (!clipboardSuggestOn.value) return
+  const r = await window.gtools.host('clipboard:peek')
+  if (r.ok && typeof r.data === 'string') clipboardText.value = r.data
+}
+
+// ---- 拖入文件/图片（推荐源 files/img）----
+
+const DROP_IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'])
+
+function extOf(name: string): string {
+  return (name.split('.').pop() ?? '').toLowerCase()
+}
+
+function onDrop(e: DragEvent): void {
+  const dt = e.dataTransfer
+  if (!dt || dt.files.length === 0) return
+  // pathForFile 与 webkitGetAsEntry 都必须在 drop 的同步上下文里调用（webUtils/条目句柄限制）
+  const paths = Array.from(dt.files).map((f) => window.gtools.pathForFile(f))
+  const dtEntries = Array.from(dt.items).map((it) => {
+    try {
+      return it.webkitGetAsEntry()
+    } catch {
+      return null
+    }
+  })
+  const dropped: MatchFile[] = paths.map((p, i) => {
+    // 条目与文件列表按下标配对；取不到条目句柄时按文件处理
+    const isDirectory = dtEntries[i]?.isDirectory === true
+    const name = p.split(/[\\/]+/).pop() ?? p
+    return { path: p, name, isDirectory, isFile: !isDirectory }
+  })
+  dropFiles.value = dropped
+  hasDropImage.value = dropped.some((f) => f.isFile && DROP_IMAGE_EXTS.has(extOf(f.name)))
+}
+
 async function openAppById(appId: string): Promise<void> {
   const a = apps.value.find((x) => x.id === appId)
   if (!a) return
@@ -215,15 +401,18 @@ async function openAppById(appId: string): Promise<void> {
     opError.value = { id: '', name: a.name, error: `「${a.name}」为示例应用，不可打开` }
     return
   }
+  pushRecentApp(a.id)
+  router.query = ''
+  // 先藏窗再异步打开：shell.openPath 可达数百 ms，串行等待会显得「点了没反应」
+  void window.gtools.host('window:hide')
   const r = await window.gtools.host('apps:open', { path: a.path })
   if (!r.ok) {
+    // 打开失败把窗口带回来当面报错，否则用户只觉得没反应
+    void window.gtools.host('window:show')
     opError.value = { id: a.id, name: a.name, error: `打开「${a.name}」失败：${r.error ?? '未知错误'}` }
     return
   }
   opError.value = null
-  pushRecentApp(a.id)
-  router.query = ''
-  void window.gtools.host('window:hide')
 }
 
 async function toggleAppPin(appId: string): Promise<void> {
@@ -273,29 +462,38 @@ function pushRecentApp(appId: string): void {
   persistRecent()
 }
 
-function activateEntry(pluginId: string, commandId?: string): void {
+function activateEntry(pluginId: string, commandId?: string, rest?: string, payload?: MatchFile[]): void {
+  // 拖入集生命周期到激活为止；先进入（enterPlugin 已持有数组引用）再释放 ref
   if (isSettingsEntry(pluginId)) {
+    releaseDrop()
     enterSettings()
     void nextTick(() => searchBox.value?.focus())
     return
   }
-  enterPlugin(pluginId, enabledManifests.value, commandId)
+  // rest 为推荐命中文本（超限已被 recommend 层剥离），经既有 "kw rest" 通路进插件 query；
+  // payload 为拖入文件列表，走 initialPayload 通道
+  enterPlugin(pluginId, enabledManifests.value, commandId, rest ?? '', payload)
   // trigger 型带 backend 的插件（如 app-launcher）在首次进入时启动
   void window.gtools.host('plugin:enter', { id: pluginId })
   pushRecentPlugin(pluginId, commandId)
+  releaseDrop()
 }
 
 function activateEmptyTarget(t: EmptyTarget): void {
   if (t.kind === 'app') void openAppById(t.appId)
   else if (t.kind === 'apps-toggle') toggleAppsExpanded()
-  else activateEntry(t.pluginId, t.commandId)
+  else if (t.kind === 'history') onHistorySelect(t.query)
+  else activateEntry(t.pluginId, t.commandId, t.payload, t.files)
 }
 
-// appsMode 键盘导航：扁平序 = 最近行（1×N）→ 可见应用网格（9 列）→ 抽屉开关格；横向循环，纵向按列对齐跨行/进最近行，边界停住
+// appsMode 键盘导航：扁平序 = 剪贴板推荐行 + 搜索历史 chips + 最近行（三段合并为一个 1×N 前缀）→ 可见应用网格（9 列）→ 抽屉开关格；
+// 横向循环，纵向按列对齐跨行/进前缀行，边界停住
 function navEmptyGrid(dir: 1 | -1, axis: 'x' | 'y'): void {
-  const R = recentTiles.value.length
-  const A = visibleApps.value.length + (hasAppsToggle.value ? 1 : 0)
-  const n = R + A
+  // R/A 从与 emptyTargets 同一输入的段界偏移取，不再手写累加
+  const off = emptySegmentOffsets(emptyInput.value)
+  const R = off.middleEnd
+  const A = off.total - R
+  const n = off.total
   if (n === 0) return
   const i = emptyIndex.value
   if (axis === 'x') {
@@ -320,35 +518,55 @@ function onNav(dir: 1 | -1, axis: 'x' | 'y'): void {
     }
     const n = emptyTargets.value.length
     if (n === 0) return
-    // 兜底网格区上下按列距 4 跨行，其余步长 1；整体循环导航
-    const step = axis === 'y' && emptyIndex.value < enabledManifests.value.length ? 4 : 1
+    // 兜底网格区上下按列距 4 跨行，其余步长 1；整体循环导航（插件中段 [histEnd, middleEnd) y 步长 4）
+    const off = emptySegmentOffsets(emptyInput.value)
+    const step = axis === 'y' && emptyIndex.value >= off.histEnd && emptyIndex.value < off.middleEnd ? 4 : 1
     emptyIndex.value = (emptyIndex.value + dir * step + n) % n
     return
   }
-  const n = visibleResults.value.length
-  if (n === 0) return
-  if (axis === 'x') {
-    activeIndex.value = (activeIndex.value + dir + n) % n
-  } else {
-    const next = activeIndex.value + dir * APP_GRID_COLS
-    if (next >= 0 && next < n) {
-      activeIndex.value = next
-    } else if (dir === 1 && activeIndex.value < n - 1) {
-      activeIndex.value = n - 1
-    } else if (dir === -1 && activeIndex.value > 0) {
-      activeIndex.value = 0
-    }
-  }
+  // 结果态分区扁平导航（B/C）：主结果区 + 推荐区；两区合计为 0 时方向键 no-op，不回退输入框光标
+  const sections: NavSection[] = [
+    { start: 0, count: visibleResults.value.length, cols: APP_GRID_COLS },
+    { start: visibleResults.value.length, count: recommendations.value.length, cols: APP_GRID_COLS }
+  ]
+  const total = sections.reduce((sum, s) => sum + s.count, 0)
+  if (total === 0) return
+  // 推荐区/结果区收缩后 activeIndex 可能越界（navStep 找不到所属区会原地踏步），先夹回
+  if (activeIndex.value >= total) activeIndex.value = total - 1
+  activeIndex.value = navStep(activeIndex.value, sections, dir, axis)
 }
 
 function onSelect(index: number): void {
+  if (index >= visibleResults.value.length) {
+    const rec = recommendations.value[index - visibleResults.value.length]
+    if (rec) activateRec(rec)
+    return
+  }
   const item = visibleResults.value[index]
   if (!item) return
+  // 计算器词条：展示与激活同源（按当前 query 现算），复制结果文本后隐藏窗口
+  if (item.entry.key === 'host:calc') {
+    const result = calc(router.query.trim())
+    if (result !== null) void navigator.clipboard.writeText(result)
+    void window.gtools.host('window:hide')
+    return
+  }
   if (item.entry.kind === 'app' && item.entry.appId) {
     void openAppById(item.entry.appId)
   } else if (item.entry.pluginId) {
     activateEntry(item.entry.pluginId, item.entry.commandId)
   }
+}
+
+function activateRec(rec: RecItem): void {
+  // matcher 命中型带命中文本进插件既有 query 通路；keyword 沾边型无 payload 只进入；
+  // 拖入行（files/img 源）把拖入集经 initialPayload 通道带给插件
+  activateEntry(
+    rec.pluginId,
+    rec.commandId,
+    rec.payload,
+    rec.source === 'files' || rec.source === 'img' ? dropFiles.value : undefined
+  )
 }
 
 function onEnter(): void {
@@ -357,7 +575,43 @@ function onEnter(): void {
     if (t) activateEmptyTarget(t)
     return
   }
+  recordHistory(router.query.trim())
   onSelect(activeIndex.value)
+}
+
+// ---- 搜索历史（localStorage，外壳 UI 状态）----
+
+function loadHistory(): void {
+  queryHistory.value = parseQueryHistory(localStorage.getItem(HISTORY_KEY))
+}
+
+function persistHistory(): void {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(queryHistory.value))
+  } catch {
+    // 存不进去只影响下次启动的历史 chips，静默降级
+  }
+}
+
+function recordHistory(q: string): void {
+  queryHistory.value = pushQueryHistory(queryHistory.value, q)
+  persistHistory()
+}
+
+// chip 点击回填：keyword 后必须跟空格才进插件态（router-core），裸词恒留 global 出结果
+function onHistorySelect(q: string): void {
+  router.query = q
+  void nextTick(() => searchBox.value?.focus())
+}
+
+function onHistoryRemove(q: string): void {
+  queryHistory.value = queryHistory.value.filter((x) => x !== q)
+  persistHistory()
+}
+
+function onHistoryClear(): void {
+  queryHistory.value = []
+  persistHistory()
 }
 
 function onEmptySelect(index: number): void {
@@ -437,14 +691,289 @@ watch(
   }
 )
 
+function applyVisualSettings(s: AppSettings): void {
+  document.documentElement.dataset.theme = s.theme
+  // 玻璃主题自身即玻璃面板，透明属性强制开启（透明度滑杆仍调节玻璃密度）
+  document.documentElement.dataset.transparency = s.transparency.enabled || s.theme === 'glass' ? 'on' : 'off'
+  document.documentElement.dataset.blur = s.transparency.blur ? 'on' : 'off'
+  // 玻璃风格：wallpaper=透明窗+页内折射源（壁纸/快照），acrylic=系统材质实时身景，clear=透明窗直透桌面（都不画页内图）
+  if (s.theme === 'glass') document.documentElement.dataset.glassMaterial = s.glassMaterial ?? 'wallpaper'
+  else delete document.documentElement.dataset.glassMaterial
+  if (!isGlassWallpaper()) clearWallpaperVars()
+  document.documentElement.style.setProperty('--tx', (s.transparency.opacity / 100).toFixed(2))
+}
+
+// ---- 玻璃折射（L2）：壁纸对齐 + 胶囊位移滤镜。折射源与几何由主进程下发，探针通过才置 data-lens ----
+
+interface WallpaperPayload {
+  dataUrl: string | null
+  image: boolean
+  style: 'fill' | 'stretch' | 'fit' | 'center' | 'tile' | 'span'
+  dx: number
+  dy: number
+  dpr: number
+  imgW: number
+  imgH: number
+  dispW: number
+  dispH: number
+}
+
+let wallpaperActive = false
+let lastWallpaper: WallpaperPayload | null = null
+let backdropActive = false
+
+function clearWallpaperVars(): void {
+  const s = document.documentElement.style
+  s.removeProperty('--wp-image')
+  s.removeProperty('--wp-size')
+  s.removeProperty('--wp-pos')
+  s.removeProperty('--wp-repeat')
+  wallpaperActive = false
+  backdropActive = false
+}
+
+function applyWallpaper(p: WallpaperPayload): void {
+  // 页内折射源只属于 wallpaper 档；acrylic=系统身景、clear=窗口直透桌面，画了反而盖住真实身景
+  if (!isGlassWallpaper()) {
+    clearWallpaperVars()
+    return
+  }
+  lastWallpaper = p
+  // 实时背景优先：抓取链可用时壁纸几何不覆盖背景帧（壁纸降级为抓取失败兜底）
+  if (backdropActive) return
+  const s = document.documentElement.style
+  if (p.image) {
+    wallpaperActive = !!(p.dataUrl && p.imgW > 0 && p.imgH > 0)
+    if (wallpaperActive) s.setProperty('--wp-image', `url("${p.dataUrl}")`)
+    else s.removeProperty('--wp-image')
+  }
+  if (!wallpaperActive) {
+    s.removeProperty('--wp-size')
+    s.removeProperty('--wp-pos')
+    s.removeProperty('--wp-repeat')
+    return
+  }
+  // 原图按显示区精确缩放后平移 dx/dy，与桌面壁纸逐像素对齐（窗口移动时内容跟着桌面走）
+  const nativeW = p.imgW / (p.dpr || 1)
+  const nativeH = p.imgH / (p.dpr || 1)
+  let size: string
+  switch (p.style) {
+    case 'stretch':
+      size = `${p.dispW}px ${p.dispH}px`
+      break
+    case 'center':
+    case 'tile':
+      size = `${nativeW}px ${nativeH}px`
+      break
+    case 'fit': {
+      const k = Math.min(p.dispW / p.imgW, p.dispH / p.imgH)
+      size = `${p.imgW * k}px ${p.imgH * k}px`
+      break
+    }
+    default: {
+      // fill/span：cover 级缩放
+      const k = Math.max(p.dispW / p.imgW, p.dispH / p.imgH)
+      size = `${p.imgW * k}px ${p.imgH * k}px`
+    }
+  }
+  s.setProperty('--wp-size', size)
+  s.setProperty('--wp-pos', `${-p.dx}px ${-p.dy}px`)
+  s.setProperty('--wp-repeat', p.style === 'tile' ? 'repeat' : 'no-repeat')
+}
+
+async function refreshWallpaper(): Promise<void> {
+  if (isDetachedWindow.value) return
+  if (!isGlassWallpaper()) return
+  const r = await window.gtools.host('wallpaper:get')
+  if (r.ok && r.data) applyWallpaper(r.data as WallpaperPayload)
+}
+
+interface BackdropPayload {
+  dataUrl: string | null
+  width?: number
+  height?: number
+}
+
+// 抓到帧 = 窗口区域 1:1 铺满；抓不到（非玻璃/捕获失败）回退壁纸桥
+function applyBackdrop(p: BackdropPayload): void {
+  if (!isGlassWallpaper()) {
+    clearWallpaperVars()
+    return
+  }
+  const s = document.documentElement.style
+  if (p.dataUrl) {
+    backdropActive = true
+    s.setProperty('--wp-image', `url("${p.dataUrl}")`)
+    s.setProperty('--wp-size', '100% 100%')
+    s.setProperty('--wp-pos', '0 0')
+    s.setProperty('--wp-repeat', 'no-repeat')
+    return
+  }
+  backdropActive = false
+  if (lastWallpaper) applyWallpaper(lastWallpaper)
+}
+
+async function refreshBackdrop(): Promise<void> {
+  if (isDetachedWindow.value) return
+  if (!isGlassWallpaper()) return
+  const r = await window.gtools.host('glassbackdrop:get')
+  if (r.ok && r.data) applyBackdrop(r.data as BackdropPayload)
+}
+
+// ---- win32 玻璃壁纸快照流：隐藏期养桌面媒体流，弹窗瞬间取当前帧 ----
+// 流中帧全摄于窗口不可见期（天然无自摄入套娃），不用防捕获标志、不用主进程截屏循环，
+// 躲开「透明窗+WDA+显隐循环」的 DWM 渲黑矩阵；desktopCapturer 单调 ~350ms 太慢，常驻流取帧 <10ms。
+// 取帧只许发生在可见事件当口（帧摄于隐藏期），禁止可见期延后补取（会摄入自身）；取完停流省 GPU，下次隐藏再养
+
+interface SnapshotStreamGeo {
+  sourceId: string
+  winBounds: { x: number; y: number; width: number; height: number }
+  displayBounds: { x: number; y: number; width: number; height: number }
+  scaleFactor: number
+}
+
+let snapStream: MediaStream | null = null
+let snapVideo: HTMLVideoElement | null = null
+let snapGeo: SnapshotStreamGeo | null = null
+let snapStarting = false
+
+/** 页内折射源（壁纸桥/快照流）只在玻璃 wallpaper 档存在；acrylic/clear 的身景不经页面，非玻璃更无折射层 */
+function isGlassWallpaper(): boolean {
+  const el = document.documentElement
+  return el.dataset.theme === 'glass' && el.dataset.glassMaterial === 'wallpaper'
+}
+
+async function startSnapStream(): Promise<void> {
+  if (isDetachedWindow.value || snapStream || snapStarting || !isGlassWallpaper()) return
+  if (!navigator.mediaDevices?.getUserMedia) return
+  snapStarting = true
+  try {
+    const r = await window.gtools.host('glassbackdrop:snapshot-stream')
+    if (!r.ok || !r.data) return
+    const geo = r.data as SnapshotStreamGeo
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      // Electron 桌面捕获的 legacy 约束形态（DOM 类型无 mandatory，运行时支持）
+      video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: geo.sourceId } }
+    } as unknown as MediaStreamConstraints)
+    const v = document.createElement('video')
+    v.muted = true
+    v.playsInline = true
+    v.srcObject = stream
+    await v.play().catch(() => undefined)
+    snapStream = stream
+    snapVideo = v
+    snapGeo = geo
+  } catch {
+    // 取源/开流失败：弹窗时无新鲜帧，壁纸桥兜底
+  } finally {
+    snapStarting = false
+  }
+}
+
+function stopSnapStream(): void {
+  snapStream?.getTracks().forEach((t) => t.stop())
+  snapStream = null
+  snapVideo = null
+  snapGeo = null
+}
+
+/** 弹窗瞬间取流中当前帧铺折射源（裁窗口区域，2x 超采样），编码与铺设全在渲染层完成 */
+function grabSnapshotFrame(): void {
+  if (isDetachedWindow.value) return
+  const v = snapVideo
+  const geo = snapGeo
+  if (!v || !geo || v.readyState < 2 || !v.videoWidth || !v.videoHeight) return
+  const cvs = document.createElement('canvas')
+  const outW = Math.round(geo.winBounds.width * 2)
+  const outH = Math.round(geo.winBounds.height * 2)
+  cvs.width = outW
+  cvs.height = outH
+  const ctx = cvs.getContext('2d')
+  if (!ctx) return
+  // 流分辨率可能被引擎缩放而非屏幕物理像素原尺寸：按视频实际尺寸换算裁剪区
+  const kx = v.videoWidth / (geo.displayBounds.width * geo.scaleFactor)
+  const ky = v.videoHeight / (geo.displayBounds.height * geo.scaleFactor)
+  const sx = (geo.winBounds.x - geo.displayBounds.x) * geo.scaleFactor * kx
+  const sy = (geo.winBounds.y - geo.displayBounds.y) * geo.scaleFactor * ky
+  const sw = geo.winBounds.width * geo.scaleFactor * kx
+  const sh = geo.winBounds.height * geo.scaleFactor * ky
+  ctx.drawImage(v, sx, sy, sw, sh, 0, 0, outW, outH)
+  // DRM/独占全屏等场景流会短暂只出全黑帧：拒收保住上一张折射源（无上一张则维持壁纸兜底），别把黑屏铺进窗口
+  const probe = document.createElement('canvas')
+  probe.width = 16
+  probe.height = 9
+  const pctx = probe.getContext('2d')
+  if (!pctx) return
+  pctx.drawImage(v, sx, sy, sw, sh, 0, 0, 16, 9)
+  const px = pctx.getImageData(0, 0, 16, 9).data
+  let maxCh = 0
+  for (let i = 0; i < px.length; i += 4) maxCh = Math.max(maxCh, px[i], px[i + 1], px[i + 2])
+  if (maxCh < 12) return
+  applyBackdrop({ dataUrl: cvs.toDataURL('image/jpeg', 0.85) })
+}
+
+const LENS_BAND = 20
+let lensW = 0
+let lensH = 0
+let lensRo: ResizeObserver | null = null
+
+/**
+ * 位移图：到边距离 e 经 k^1.5 曲线衰减，最外 3px 硬归零躲 backdrop 采样钳制，峰值 0.8×band 保证全程内采样。
+ * 滤镜链本体静态放在 index.html（脚本创建的 <filter> 实测不能作 backdrop url() 引用目标），
+ * 这里只对静态元素注入位移图 dataURL 与几何
+ */
+function rebuildLensMap(): void {
+  const el = searchBox.value?.$el as HTMLElement | undefined
+  const w = Math.round(el?.clientWidth ?? 0)
+  const h = Math.round(el?.clientHeight ?? 0)
+  if (w < 80 || h < 24) return
+  if (w === lensW && h === lensH) return
+  const map = document.getElementById('gt-lens-map')
+  const filter = document.getElementById('gt-lens-pill')
+  const dm = document.getElementById('gt-lens-dm')
+  if (!map || !filter || !dm) return
+  const max = LENS_BAND * 0.8
+  const cvs = document.createElement('canvas')
+  cvs.width = w
+  cvs.height = h
+  const ctx = cvs.getContext('2d')
+  if (!ctx) return
+  const img = ctx.createImageData(w, h)
+  const d = img.data
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const e = Math.min(x, y, w - 1 - x, h - 1 - y)
+      const m = e < 3 ? 0 : Math.pow(Math.min(e / LENS_BAND, 1), 1.5) * max
+      const dx = x < w / 2 ? -m : m
+      const dy = y < h / 2 ? -m : m
+      const i = (y * w + x) * 4
+      d[i] = 128 + (dx / max) * 127
+      d[i + 1] = 128 + (dy / max) * 127
+      d[i + 2] = 128
+      d[i + 3] = 255
+    }
+  }
+  ctx.putImageData(img, 0, 0)
+  map.setAttribute('href', cvs.toDataURL('image/png'))
+  map.setAttribute('width', String(w))
+  map.setAttribute('height', String(h))
+  filter.setAttribute('width', String(w))
+  filter.setAttribute('height', String(h))
+  dm.setAttribute('scale', String(Math.round(max)))
+  lensW = w
+  lensH = h
+}
+
 onMounted(async () => {
   loadRecent()
+  loadHistory()
   const r = await window.gtools.host('app:init')
   if (r.ok) {
     const init = r.data as HostInitResult
     plugins.value = init.plugins
     settings.value = init.settings
-    document.documentElement.dataset.theme = init.settings.theme
+    applyVisualSettings(init.settings)
     // 深度链接初始化（#plugin=<id>&q=… / #demo=1 / 独立窗口 #detached=true&plugin=…&query=…），仅启动时生效
     const link = parseDeepLink(location.hash)
     if (link?.isDetached) isDetachedWindow.value = true
@@ -462,9 +991,16 @@ onMounted(async () => {
     }
     if (!isDemo.value && !isDetachedWindow.value) void loadApps()
   }
+  // win32 玻璃壁纸：装载即养快照流（页面 hidden 在 show:false 窗口上不可靠，见 host:win-visibility 订阅处）
+  void startSnapStream()
   window.gtools.on('settings-changed', (p) => {
     settings.value = p as AppSettings
-    document.documentElement.dataset.theme = (p as AppSettings).theme
+    applyVisualSettings(p as AppSettings)
+    // 切进玻璃主题时首次拉壁纸（主进程有缓存，重复调用廉价）
+    void refreshWallpaper()
+    // 材质/主题切换联动快照流：离开玻璃壁纸即停，处于隐藏态则开养（可见态等下次隐藏）
+    if (!isGlassWallpaper()) stopSnapStream()
+    else if (document.hidden) void startSnapStream()
   })
   window.gtools.on('plugin-state-changed', (p) => {
     const d = p as { id: string; enabled: boolean; plugins: PluginState[] }
@@ -474,14 +1010,67 @@ onMounted(async () => {
     enterSettings()
     void nextTick(() => searchBox.value?.focus())
   })
+  // 主进程窗口显隐驱动快照流（首次弹出前 visibilitychange 因页面可见性卡 visible 不触发）；
+  // 与 visibilitychange 分支重复触发无害：养流有 snapStarting/snapStream 守卫，抓帧后流已停
+  const offWinVis = window.gtools.on('host:win-visibility', (p) => {
+    if (p !== true && p !== false) return
+    if (!p) {
+      void startSnapStream()
+      return
+    }
+    if (isGlassWallpaper()) {
+      grabSnapshotFrame()
+      stopSnapStream()
+    }
+  })
+  if (offWinVis) offFns.push(offWinVis)
+  // 常驻插件推送订阅初始建立（此后由 enabledManifests watch 随启用集合增减，Map 去重防重订阅）
+  syncPushSubscriptions(enabledManifests.value)
+  // 指令热键直达：主进程侧已先 showSearchWindow（P7 车道），渲染层只负责进入插件命令态；
+  // 通道白名单条目由 P7 在 preload 增补，缺省时 on 返回 undefined（订阅静默不生效）
+  const offHotkey = window.gtools.on('command-hotkey', (p) => {
+    const d = (p ?? {}) as { pluginId?: string; commandId?: string }
+    if (typeof d.pluginId === 'string' && d.pluginId !== '') activateEntry(d.pluginId, d.commandId)
+  })
+  if (offHotkey) offFns.push(offHotkey)
+  // 玻璃折射：订阅壁纸推送（move/focus/display/resume 触发）+ 实时背景帧（抓窗口背后真实屏幕）+ 按胶囊实际几何建位移图
+  const offWallpaper = window.gtools.on('wallpaper:changed', (p) => applyWallpaper(p as WallpaperPayload))
+  if (offWallpaper) offFns.push(offWallpaper)
+  const offBackdrop = window.gtools.on('glassbackdrop:changed', (p) => applyBackdrop((p ?? { dataUrl: null }) as BackdropPayload))
+  if (offBackdrop) offFns.push(offBackdrop)
+  void refreshWallpaper()
+  void refreshBackdrop()
+  if (!isDetachedWindow.value) {
+    const pill = searchBox.value?.$el as HTMLElement | undefined
+    if (pill && typeof ResizeObserver === 'function') {
+      lensRo = new ResizeObserver(() => rebuildLensMap())
+      lensRo.observe(pill)
+    }
+    rebuildLensMap()
+  }
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'visible') return
+    if (document.visibilityState !== 'visible') {
+      // 隐私默认：推送与拖入集只在窗口可见会话内保留，隐藏即清（对齐 dropFiles 声明处注释）
+      pushedItems.value = []
+      releaseDrop()
+      // win32 玻璃壁纸：隐藏期开始养快照流，供下次弹窗瞬间取帧
+      void startSnapStream()
+      return
+    }
+    // win32 玻璃壁纸：此刻流中最新帧摄于隐藏期（干净），当场取帧铺折射源后停流；可见期绝不补取（会摄入自身）
+    if (isGlassWallpaper()) {
+      grabSnapshotFrame()
+      stopSnapStream()
+    }
     if (router.mode === 'global') {
+      // resetForShow 的推送清理点（router-core 不持有推送态，外壳侧同步清）
+      pushedItems.value = []
       resetForShow()
       emptyIndex.value = 0
       searchBox.value?.focus()
       // 重新唤起时低成本刷新（宿主内存缓存命中即回），顺带收敛 TTL 过期与新装应用
       void loadApps()
+      void peekClipboard()
     } else if (router.mode === 'plugin') {
       // 插件/设置态唤醒保留现场：焦点交回插件内容区首个输入控件
       pluginHost.value?.focusContent()
@@ -496,13 +1085,18 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onWindowKeydown)
+  stopSnapStream()
+  lensRo?.disconnect()
+  lensRo = null
+  for (const off of pushOffs.values()) off()
+  for (const off of offFns) off()
 })
 </script>
 
 <template>
   <!-- 独立窗口：轻量宿主全屏承接插件视图，主窗外壳（空态/结果/设置）不渲染 -->
   <DetachedHost v-if="isDetachedWindow" :manifests="enabledManifests" />
-  <div v-else class="app">
+  <div v-else class="app" @dragover.prevent @drop.prevent="onDrop">
     <header class="topbar">
       <SearchBox
         ref="searchBox"
@@ -522,6 +1116,8 @@ onBeforeUnmount(() => {
           :plugins="enabledManifests"
           :recents="recentRows"
           :recent-tiles="recentTiles"
+          :clipboard-recs="clipboardRecs"
+          :query-history="queryHistory"
           :apps="visibleApps"
           :apps-total="apps.length"
           :apps-expanded="appsExpanded"
@@ -540,10 +1136,14 @@ onBeforeUnmount(() => {
           @resize="onContentResize"
           @refresh-apps="onRefreshApps"
           @retry-open="onRetryOpen"
+          @history-select="onHistorySelect"
+          @history-remove="onHistoryRemove"
+          @history-clear="onHistoryClear"
         />
         <ResultList
           v-else-if="router.mode === 'global'"
           :items="visibleResults"
+          :recommendations="recommendations"
           :active-index="activeIndex"
           :query="router.query"
           @select="onSelect"
@@ -573,34 +1173,108 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .app {
+  position: relative;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  border-radius: var(--r-lg);
+  border: 1px solid transparent;
   overflow: hidden;
-  background: var(--bg-raised); /* 外壳统一取 raised 底色（对齐 uTools 全窗统一软灰），无白边/白框 */
+  /* 全工程唯一投影，只挂窗口根（系统 DWM 影为主，此值为兜底轮廓） */
+  box-shadow: var(--window-ring, none), var(--shadow-window);
+  /* 只铺 padding-box 单层：受光边绝不能走 border-box 层——透明窗 shell 是半透明白，
+     border-box 渐变（edge-hi 0.95→0.3）会透过它漏满整窗，即终审实测的 75-80% 白纱；
+     窗缘受光全部由 --window-ring 的 inset shadow 承担（分主题定义） */
+  background: linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
 }
+/* 圆角按窗口透明性分治（真实标志由 window.ts 经 html[data-wintx] 同步）：
+   不透明窗（亚克力/实色）内容满幅、圆角交 OS 裁剪（Win11 DWM/macOS 系统弧）——
+   CSS 再画弧会与 OS 弧夹出露底色的环带，即「圆角主体+直角边」穿帮根因；
+   透明窗靠 CSS 圆角透空四角。默认不画：同步未达时退化为 OS 弧，绝不露直角边 */
+.app {
+  border-radius: 0;
+}
+html[data-wintx='1'] .app {
+  border-radius: var(--r-window);
+  /* 透明窗：#app 有 32/32/48 透明边距（base.css），.app 只满 padding-box，外圈投影落进边距 */
+  height: 100%;
+}
+/* 导航层：搜索胶囊绝对定位浮于内容之上，内容滚入其下；z 两层只有 --z-nav / --z-content */
 .topbar {
-  flex: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: var(--z-nav);
   height: 64px;
-  padding: 12px 16px 0;
+  padding: 10px 10px 0;
   -webkit-app-region: drag; /* 顶栏拖动移动窗口，搜索框自身 no-drag */
 }
+/* 滚动边缘溶解（Clear 档窄条）：内容滚入胶囊下方时渐显的实时模糊带，静止即隐 */
+.topbar::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 10px;
+  right: 10px;
+  z-index: -1;
+  height: 26px;
+  border-radius: 0 0 var(--r-pill) var(--r-pill);
+  background: var(--strip-tint);
+  backdrop-filter: var(--strip-filter);
+  /* mask 里 #000 只是 alpha 蒙版形状色，非 UI 颜色 */
+  -webkit-mask-image: linear-gradient(to bottom, #000 30%, transparent);
+  mask-image: linear-gradient(to bottom, #000 30%, transparent);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  pointer-events: none;
+}
 .content {
+  position: relative;
+  z-index: var(--z-content);
   flex: 1;
   min-height: 0;
   overflow: hidden;
 }
+/* 内容滚动中（app.ts 已挂 is-scrolling）溶解条渐显，纯 CSS 跟随 */
+.app:has(.empty-state.is-scrolling, .result-view.is-scrolling, .settings.is-scrolling, .plugin-body.is-scrolling) .topbar::after {
+  opacity: 1;
+}
+/* 设置态底栏：--bg-content 厚背板压在内容上 + 顶部 hairline 分界，无投影 */
 .footbar {
-  flex: none;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: var(--z-nav);
   display: flex;
   align-items: center;
   justify-content: space-between;
   height: 30px;
   padding: 0 var(--sp-2) 0 var(--sp-4);
-  background: transparent;
+  border-top: 1px solid var(--border);
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  background: var(--bg-content);
+  backdrop-filter: var(--glass-filter);
   color: var(--fg-dim);
   font-size: var(--fs-foot);
+}
+/* 底栏上缘溶解条：内容行滚入底栏下方时渐隐，不再被硬切（常显：裁切在静止态就存在） */
+.footbar::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 100%;
+  z-index: -1;
+  height: 26px;
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  background: var(--strip-tint);
+  backdrop-filter: var(--strip-filter);
+  /* mask 里 #000 只是 alpha 蒙版形状色，非 UI 颜色 */
+  -webkit-mask-image: linear-gradient(to top, #000 30%, transparent);
+  mask-image: linear-gradient(to top, #000 30%, transparent);
+  opacity: 1;
+  pointer-events: none;
 }
 .settings-btn {
   display: flex;

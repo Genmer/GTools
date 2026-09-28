@@ -14,7 +14,12 @@ export function pinyinIndex(title: string): PinyinIndexed {
     nonZh: 'consecutive'
   }) as string[]
   const initials = (pinyin(title, { pattern: 'first', toneType: 'none', type: 'array' }) as string[]).join('')
-  const indexed: PinyinIndexed = { lower: title.toLowerCase(), syllables, initials: initials.toLowerCase() }
+  const indexed: PinyinIndexed = {
+    lower: title.toLowerCase(),
+    compact: title.toLowerCase().replace(/\s+/g, ''),
+    syllables,
+    initials: initials.toLowerCase()
+  }
   cache.set(title, indexed)
   return indexed
 }

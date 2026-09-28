@@ -8,6 +8,7 @@ import {
   parseNativeAppsCache,
   parsePlistMeta,
   parseXmlPlistStrings,
+  lnkIconCandidates,
   resolveIconPath,
   sanitizePinnedIds,
   type NativeAppEntry,
@@ -316,7 +317,8 @@ describe('NativeAppsService（darwin）', () => {
     }))
     regApp(f, '/Applications', 'Weird.app') // 无 Info.plist → 目录名兜底、id 回退路径
     regApp(f, '/Applications', 'Utilities') // 分组目录 → 深度 2
-    regApp(f, '/Applications/Utilities', 'Terminal.app', Buffer.from(
+    // 服务层 readdir 的键是 node:path join 出来的，fixture 注册键须同构
+    regApp(f, join('/Applications', 'Utilities'), 'Terminal.app', Buffer.from(
       buildBinaryPlist(
         [
           bpDict([1, 2], [3, 4]),
@@ -328,7 +330,7 @@ describe('NativeAppsService（darwin）', () => {
         0
       )
     ))
-    regApp(f, '/Users/t/Applications', 'Dup.app', xmlPlist({ CFBundleName: 'Dup', CFBundleIdentifier: 'com.x.notes' }))
+    regApp(f, join('/Users/t', 'Applications'), 'Dup.app', xmlPlist({ CFBundleName: 'Dup', CFBundleIdentifier: 'com.x.notes' }))
     regApp(f, '/System/Applications', 'Calc.app', xmlPlist({ CFBundleName: '计算器', CFBundleIdentifier: 'com.x.calc' }))
     return f
   }
@@ -341,15 +343,17 @@ describe('NativeAppsService（darwin）', () => {
     const byId = new Map(snap.apps.map((a) => [a.id, a]))
     expect(byId.get('com.x.notes')).toMatchObject({
       name: 'Notes',
-      path: '/Applications/Notes.app',
+      path: join('/Applications', 'Notes.app'),
       iconPath: join('/Applications/Notes.app', 'Contents', 'Resources', 'AppIcon.icns'),
       icon: `data:image/png;base64,${'AppIcon.icns'}`
     })
-    expect(byId.get('/Applications/Weird.app')).toMatchObject({ name: 'Weird', bundleId: undefined })
-    expect(byId.get('/Applications/Weird.app')!.icon).toBeUndefined()
+    // 服务层用 node:path join 拼 app 路径/id，期望值须同构（win 反斜杠 / posix 正斜杠）
+    const weirdPath = join('/Applications', 'Weird.app')
+    expect(byId.get(weirdPath)).toMatchObject({ name: 'Weird', bundleId: undefined })
+    expect(byId.get(weirdPath)!.icon).toBeUndefined()
     // 系统目录默认排除（只扫用户自装应用），Dup 与 Notes 同 bundleId 只留先扫的
     expect(snap.apps).toHaveLength(3)
-    expect(byId.has('/Users/t/Applications/Dup.app')).toBe(false)
+    expect(byId.has(join('/Users/t/Applications', 'Dup.app'))).toBe(false)
     expect(byId.has('com.x.calc')).toBe(false)
   })
 
@@ -393,39 +397,72 @@ describe('NativeAppsService（darwin）', () => {
     expect(f.state.readdirCalls).toBe(before + 3) // 一次扫描 = 2 个用户根 + Utilities 二层（系统根已默认排除）
   })
 
-  it('图标：解码失败为 undefined 且负缓存（两轮 list 只解码一次）', async () => {
+  it('图标：解码失败短 TTL 负缓存，冷却后下次 list 自动重试', async () => {
     const f = fakeFs()
     regApp(f, '/Applications', 'Bad.app', xmlPlist({ CFBundleName: 'Bad', CFBundleIdentifier: 'com.x.bad', CFBundleIconFile: 'broken' }))
-    const { svc, iconCalls } = makeService(f)
+    const { svc, iconCalls, tick } = makeService(f, { iconRetryMs: 5000 })
     const s1 = await svc.list()
     expect(s1.apps[0].icon).toBeUndefined()
     await svc.list({ refresh: true })
-    expect(iconCalls).toHaveLength(1)
+    expect(iconCalls).toHaveLength(1) // 冷却期内不重试（瞬时失败防打爆）
+    tick(5001)
+    const s2 = await svc.list({ refresh: true })
+    expect(iconCalls).toHaveLength(2) // 冷却后自愈重试（启动压力期失败不 permanent 化）
+    expect(s2.apps[0].icon).toBeUndefined()
   })
 
-  it('open：成功/失败回传，非法路径拒绝', async () => {
+  it('图标并行提取：完成顺序乱仍一一对应各自应用', async () => {
+    const f = fakeFs()
+    for (let i = 0; i < 20; i++) {
+      regApp(f, '/Applications', `App${i}.app`, xmlPlist({ CFBundleName: `App${i}`, CFBundleIdentifier: `com.x.a${i}`, CFBundleIconFile: `i${i}` }))
+    }
+    const svc = new NativeAppsService({
+      platform: 'darwin',
+      homeDir: '/Users/t',
+      userDataDir: '/data',
+      fs: f.fs,
+      openPath: async () => '',
+      // 序号越大完成越快，人为制造乱序返回
+      loadIcon: async (p) => {
+        const i = Number(basename(p).slice(1, -'.icns'.length))
+        await new Promise((r) => setTimeout(r, 30 - i))
+        return `data:image/png;base64,${basename(p)}`
+      }
+    })
+    const snap = await svc.list()
+    expect(snap.apps).toHaveLength(20)
+    for (const a of snap.apps) {
+      const i = a.name.slice('App'.length)
+      expect(a.icon).toBe(`data:image/png;base64,i${i}.icns`)
+    }
+  })
+
+  it('open：成功/失败回传，非应用扩展名拒绝；win 常见 .lnk/.exe 大小写不敏感放行', async () => {
     const f = fakeFs()
     const { svc, opened } = makeService(f)
     expect(await svc.open('/Applications/Notes.app')).toEqual({ ok: true })
     expect(await svc.open('/Applications/bad.app')).toEqual({ ok: false, error: '打开失败：未知错误' })
     expect(await svc.open('/etc/passwd')).toMatchObject({ ok: false })
-    expect(opened).toEqual(['/Applications/Notes.app', '/Applications/bad.app'])
+    expect(await svc.open('C:\\Start Menu\\X.LNK')).toEqual({ ok: true })
+    expect(await svc.open('C:\\Program Files\\app\\tool.EXE')).toEqual({ ok: true })
+    expect(opened).toEqual(['/Applications/Notes.app', '/Applications/bad.app', 'C:\\Start Menu\\X.LNK', 'C:\\Program Files\\app\\tool.EXE'])
   })
 
   it('置顶：增删查 + 落盘（新实例读回）+ 影响输出排序', async () => {
     const f = standardFixture()
     const { svc } = makeService(f)
+    const weird = join('/Applications', 'Weird.app')
     expect(await svc.pinnedIds()).toEqual([])
-    expect(await svc.pin('/Applications/Weird.app')).toEqual(['/Applications/Weird.app'])
-    expect(await svc.pin('com.x.notes')).toEqual(['/Applications/Weird.app', 'com.x.notes'])
-    expect(await svc.pin('/Applications/Weird.app')).toEqual(['/Applications/Weird.app', 'com.x.notes']) // 重复 pin 不变
+    expect(await svc.pin(weird)).toEqual([weird])
+    expect(await svc.pin('com.x.notes')).toEqual([weird, 'com.x.notes'])
+    expect(await svc.pin(weird)).toEqual([weird, 'com.x.notes']) // 重复 pin 不变
 
     const snap = await svc.list()
-    expect(snap.apps.map((a) => a.id).slice(0, 2)).toEqual(['/Applications/Weird.app', 'com.x.notes'])
+    expect(snap.apps.map((a) => a.id).slice(0, 2)).toEqual([weird, 'com.x.notes'])
     // 渲染层 parseAppsSnapshot 靠 snapshot.pinned 画角标（App.vue 不从 apps 反推），字段缺失=重启后角标丢失
-    expect(snap.pinned).toEqual(['/Applications/Weird.app', 'com.x.notes'])
+    expect(snap.pinned).toEqual([weird, 'com.x.notes'])
 
-    expect(await svc.unpin('/Applications/Weird.app')).toEqual(['com.x.notes'])
+    expect(await svc.unpin(weird)).toEqual(['com.x.notes'])
     const again = makeService(f)
     expect(await again.svc.pinnedIds()).toEqual(['com.x.notes']) // 从 pinned-apps.json 读回
     const snap2 = await again.svc.list()
@@ -512,5 +549,44 @@ describe('NativeAppsService（win32）', () => {
     expect(names).toContain('Visual Studio Code')
     expect(names).toContain('Google Chrome')
     expect(names).not.toContain('Uninstall WeChat')
+  })
+})
+
+
+describe('lnkIconCandidates（win32 快捷方式图标源候选序）', () => {
+  const abs = (p: string) => p.startsWith('C:\\')
+
+  it('顺序：自带 iconPath → target → lnk 兜底，去重', () => {
+    expect(
+      lnkIconCandidates({ target: 'C:\\app\\x.exe', iconPath: 'C:\\app\\ico.dll' }, 'C:\\menu\\x.lnk', abs)
+    ).toEqual(['C:\\app\\ico.dll', 'C:\\app\\x.exe', 'C:\\menu\\x.lnk'])
+    expect(lnkIconCandidates({ target: 'C:\\app\\x.exe' }, 'C:\\menu\\x.lnk', abs)).toEqual([
+      'C:\\app\\x.exe',
+      'C:\\menu\\x.lnk'
+    ])
+  })
+
+  it('非绝对路径与空串剔除；lnk 自身始终兜底', () => {
+    expect(lnkIconCandidates({ target: 'x.exe', iconPath: '' }, 'C:\\menu\\x.lnk', abs)).toEqual(['C:\\menu\\x.lnk'])
+    expect(lnkIconCandidates({}, 'C:\\menu\\x.lnk', abs)).toEqual(['C:\\menu\\x.lnk'])
+  })
+
+  it('带索引的 icon 字段剥「,数字」变体；%VAR% 经 expand 展开；去重保序', () => {
+    const expand = (p: string) => p.replace(/%SYSDIR%/g, 'C:\\Windows\\System32')
+    expect(
+      lnkIconCandidates({ iconPath: 'C:\\app\\ico.dll,0' }, 'C:\\menu\\x.lnk', abs)
+    ).toEqual(['C:\\app\\ico.dll,0', 'C:\\app\\ico.dll', 'C:\\menu\\x.lnk'])
+    expect(
+      lnkIconCandidates({ iconPath: '%SYSDIR%\\shell32.dll,-16767' }, 'C:\\menu\\x.lnk', abs, expand)
+    ).toEqual([
+      'C:\\Windows\\System32\\shell32.dll,-16767',
+      'C:\\Windows\\System32\\shell32.dll',
+      'C:\\menu\\x.lnk'
+    ])
+    // 无 % 时 expand 注入也不产生重复变体
+    expect(lnkIconCandidates({ iconPath: 'C:\\a\\i.dll' }, 'C:\\menu\\x.lnk', abs, expand)).toEqual([
+      'C:\\a\\i.dll',
+      'C:\\menu\\x.lnk'
+    ])
   })
 })

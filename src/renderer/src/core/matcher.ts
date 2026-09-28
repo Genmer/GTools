@@ -12,6 +12,8 @@ export interface SearchEntry {
 
 export interface PinyinIndexed {
   lower: string
+  /** 去全部空白的小写原文，供「英文/拼音+中文」无空格混排 query 的字面路（缓存键仍为原 title） */
+  compact: string
   syllables: string[]
   initials: string
 }
@@ -58,6 +60,17 @@ export function matchEntry(query: string, _e: SearchEntry, idx: PinyinIndexed): 
   const pos = idx.lower.indexOf(q)
   if (pos >= 0) {
     return RULE_BASE.literal + pos * 10 + (pos === 0 ? 0 : 500)
+  }
+
+  // 1.5 去空白字面：query 去空白后命中 compact（如 json格式化 ⊆ "JSON 格式化"）。
+  // min 钳到 syllable-100：分值域 [2000, 9900] 与长尾 literal 有重叠（同属弱字面档，可接受），
+  // 但恒低于 syllable 带，DESIGN §2.4 的 syllable < initial 关系不翻转
+  const qc = q.replace(/\s+/g, '')
+  if (qc !== '') {
+    const pos2 = idx.compact.indexOf(qc)
+    if (pos2 >= 0) {
+      return Math.min(RULE_BASE.syllable - 100, RULE_BASE.literal + 2000 + pos2 * 10 + (pos2 === 0 ? 0 : 500))
+    }
   }
 
   // 2. 全拼音节串，起点对齐音节边界

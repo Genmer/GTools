@@ -14,6 +14,19 @@ import {
   toIso,
   zoneRows
 } from './logic/time'
+import {
+  COUNTDOWN_CMD_KEY,
+  COUNTDOWN_EVENT,
+  COUNTDOWN_STATE_KEY,
+  IDLE_COUNTDOWN,
+  formatDuration,
+  formatRemaining,
+  parseCountdownState,
+  parseDuration,
+  remaining,
+  type CountdownCommand,
+  type CountdownState
+} from './logic/countdown'
 
 const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string }>()
 
@@ -27,6 +40,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   if (tick !== undefined) clearInterval(tick)
+  offCountdown?.()
 })
 
 const baseMs = computed(() => (demo.value ? DEMO_MS : nowMs.value))
@@ -95,7 +109,7 @@ const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 tsInput.value = demo.value ? String(Math.floor(DEMO_MS / 1000)) : String(Math.floor(Date.now() / 1000))
 resetDateInput()
 
-// 深链/搜索框剩余输入直达：纯数字填②，日期时间填③
+// 深链/搜索框剩余输入直达：纯数字填②，日期时间填③，时长填⑥
 watch(
   () => props.query,
   (q) => {
@@ -103,9 +117,72 @@ watch(
     if (s === '') return
     if (parseTimestamp(s) !== null) tsInput.value = s
     else if (parseLocalDateTime(s) !== null) dateInput.value = s.replace(' ', 'T')
+    else if (parseDuration(s) !== null) cdInput.value = s
   },
   { immediate: true }
 )
+
+// ⑥ 倒计时：backend 驱动计时与到点通知，本组件只展示 + 下发命令（demo 态用冻结示例不写 storage）
+const CD_PRESETS: readonly { label: string; ms: number }[] = [
+  { label: '1m', ms: 60_000 },
+  { label: '5m', ms: 300_000 },
+  { label: '25m', ms: 1_500_000 }
+]
+const DEMO_COUNTDOWN: CountdownState = { status: 'paused', endAt: 0, remainingMs: 1_500_000, totalMs: 1_500_000 }
+
+const cdInput = ref('25m')
+const cdState = ref<CountdownState>({ ...IDLE_COUNTDOWN })
+let cdSeq = 0
+let offCountdown: (() => void) | null = null
+
+const cdView = computed<CountdownState>(() => (demo.value ? DEMO_COUNTDOWN : cdState.value))
+const cdInvalid = computed(() => cdInput.value.trim() !== '' && parseDuration(cdInput.value) === null)
+const cdClock = computed(() => {
+  const s = cdView.value
+  if (s.status === 'running') return formatRemaining(remaining(s.endAt, baseMs.value))
+  if (s.status === 'paused') return formatRemaining(s.remainingMs)
+  return '00:00'
+})
+
+function applyPreset(p: { label: string; ms: number }): void {
+  cdInput.value = p.label
+  if (!demo.value) void sendCd({ type: 'start', ms: p.ms })
+}
+
+function startFromInput(): void {
+  const ms = parseDuration(cdInput.value)
+  if (ms !== null) void sendCd({ type: 'start', ms })
+}
+
+function nextCdSeq(): number {
+  cdSeq = Math.max(Date.now(), cdSeq + 1)
+  return cdSeq
+}
+
+async function sendCd(cmd: CountdownCommand): Promise<void> {
+  if (demo.value) return
+  try {
+    await props.ctx.host.storage.set(COUNTDOWN_CMD_KEY, { seq: nextCdSeq(), cmd })
+  } catch {
+    flash.value = { key: 'cd', msg: '发送失败' }
+  }
+}
+
+onMounted(() => {
+  if (demo.value) return
+  offCountdown = props.ctx.host.events.on(COUNTDOWN_EVENT, (p) => {
+    const s = parseCountdownState(p)
+    if (s !== null) cdState.value = s
+  })
+  void (async () => {
+    try {
+      const persisted = parseCountdownState(await props.ctx.host.storage.get(COUNTDOWN_STATE_KEY))
+      if (persisted !== null) cdState.value = persisted
+    } catch {
+      // 读失败按空闲展示
+    }
+  })()
+})
 </script>
 
 <template>
@@ -278,6 +355,61 @@ watch(
             <em v-if="stateOf(`zone-${z.id}`) !== ''">{{ stateOf(`zone-${z.id}`) }}</em>
           </span>
         </button>
+      </div>
+    </section>
+
+    <section class="card">
+      <header class="card-head">
+        <span class="idx">6</span>
+        <h3 class="card-title">倒计时</h3>
+        <span v-if="demo" class="chip">示例</span>
+        <span class="spacer"></span>
+        <span class="hint">到点发系统通知，窗口隐藏也在计时</span>
+      </header>
+      <div class="controls">
+        <button
+          v-for="p in CD_PRESETS"
+          :key="p.label"
+          type="button"
+          class="btn"
+          :class="{ 'preset-on': cdInput === p.label }"
+          :disabled="demo"
+          @click="applyPreset(p)"
+        >
+          {{ p.label }}
+        </button>
+        <input
+          v-model="cdInput"
+          class="input num mono"
+          type="text"
+          placeholder="25m / 1h30m / 90s"
+          spellcheck="false"
+          :disabled="demo"
+          @keydown.enter="startFromInput"
+        />
+        <template v-if="cdView.status === 'running'">
+          <button type="button" class="btn" :disabled="demo" @click="sendCd({ type: 'pause' })">暂停</button>
+          <button type="button" class="btn" :disabled="demo" @click="sendCd({ type: 'stop' })">取消</button>
+        </template>
+        <template v-else-if="cdView.status === 'paused'">
+          <button type="button" class="btn" :disabled="demo" @click="sendCd({ type: 'resume' })">继续</button>
+          <button type="button" class="btn" :disabled="demo" @click="sendCd({ type: 'stop' })">取消</button>
+        </template>
+        <template v-else>
+          <button type="button" class="btn" :disabled="demo" @click="startFromInput">开始</button>
+        </template>
+      </div>
+      <p v-if="cdInvalid" class="error">时长无法识别：支持 90s / 25m / 1h30m，或纯数字（按分钟）</p>
+      <div v-if="cdView.status === 'expired'" class="cd-banner">
+        <span>⏰ 时间到！设定的 {{ formatDuration(cdView.totalMs) }} 已到</span>
+        <button type="button" class="btn" :disabled="demo" @click="sendCd({ type: 'stop' })">知道了</button>
+      </div>
+      <div v-else-if="cdView.status === 'running' || cdView.status === 'paused'" class="cd-remain">
+        <span class="mono cd-clock">{{ cdClock }}</span>
+        <span class="hint">
+          {{ cdView.status === 'paused' ? '已暂停' : '运行中' }} · 共 {{ formatDuration(cdView.totalMs) }}
+          <em v-if="stateOf('cd') !== ''">{{ stateOf('cd') }}</em>
+        </span>
       </div>
     </section>
   </div>
@@ -494,6 +626,41 @@ button.zone-row:hover {
   color: var(--fg-dim);
 }
 .zone-delta em {
+  font-style: normal;
+  color: var(--accent);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.btn.preset-on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+.cd-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 8px var(--sp-3);
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sub);
+  font-weight: 600;
+}
+.cd-remain {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+}
+.cd-clock {
+  font-size: 34px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.cd-remain .hint em {
   font-style: normal;
   color: var(--accent);
 }

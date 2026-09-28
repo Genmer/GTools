@@ -22,7 +22,7 @@ export function demoNotesState(): NotesState {
 
 - [x] 主窗宽度提到 800px，圆角 12px
 - [x] 列表行高 46px，hover 才显底色
-- [ ] 三主题（light / dark / glass）逐一走查
+- [ ] 两主题（light / dark）× 透明开关注逐一走查
 - [ ] 截图产物归档到 \`.zcode/screenshots/\`
 
 ## 遗留问题

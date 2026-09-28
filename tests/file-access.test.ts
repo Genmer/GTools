@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { join, resolve } from 'node:path'
 import { FileAccessService, PathGuard } from '../src/main/services/file-access'
 import type { FileAccessFs } from '../src/main/services/file-access'
 
@@ -98,22 +99,23 @@ function fakeFs(files: Record<string, string | Buffer> = {}): FileAccessFs & {
 }
 
 describe('FileAccessService', () => {
-  const ROOT = '/tmp/gtools-fa'
+  // resolve/join 让测试路径跟随平台分隔符，与服务层 resolve() 归一化结果一致（win 反斜杠 / posix 正斜杠）
+  const ROOT = resolve('/tmp/gtools-fa')
 
   it('grant 后可读：utf-8 与 base64 两种编码', async () => {
-    const fs = fakeFs({ [`${ROOT}/a.txt`]: 'hello' })
+    const fs = fakeFs({ [join(ROOT, 'a.txt')]: 'hello' })
     const svc = new FileAccessService(fs)
-    await svc.grant('p', [`${ROOT}/a.txt`])
-    expect(await svc.read('p', `${ROOT}/a.txt`)).toBe('hello')
-    expect(await svc.read('p', `${ROOT}/a.txt`, { encoding: 'base64' })).toBe(Buffer.from('hello').toString('base64'))
+    await svc.grant('p', [join(ROOT, 'a.txt')])
+    expect(await svc.read('p', join(ROOT, 'a.txt'))).toBe('hello')
+    expect(await svc.read('p', join(ROOT, 'a.txt'), { encoding: 'base64' })).toBe(Buffer.from('hello').toString('base64'))
   })
 
   it('未授权路径读写抛错（含 .. 逃逸归一化后判定）', async () => {
-    const fs = fakeFs({ [`${ROOT}/a.txt`]: 'x', ['/etc/passwd']: 'secret' })
+    const fs = fakeFs({ [join(ROOT, 'a.txt')]: 'x', [resolve('/etc/passwd')]: 'secret' })
     const svc = new FileAccessService(fs)
-    await svc.grant('p', [`${ROOT}/a.txt`])
-    await expect(svc.read('p', '/etc/passwd')).rejects.toThrow(/未授权/)
-    await expect(svc.write('p', `${ROOT}/../evil.txt`, 'x')).rejects.toThrow(/未授权/)
+    await svc.grant('p', [join(ROOT, 'a.txt')])
+    await expect(svc.read('p', resolve('/etc/passwd'))).rejects.toThrow(/未授权/)
+    await expect(svc.write('p', join(ROOT, '../evil.txt'), 'x')).rejects.toThrow(/未授权/)
     // grant 只接受绝对路径
     await expect(svc.grant('p', ['relative/x.txt'])).rejects.toThrow(/绝对路径/)
   })
@@ -121,62 +123,62 @@ describe('FileAccessService', () => {
   it('write：base64 二进制 / append / createDir', async () => {
     const fs = fakeFs()
     const svc = new FileAccessService(fs)
-    await svc.grant('p', [`${ROOT}/out`])
-    await svc.write('p', `${ROOT}/out/img.png`, 'aGVsbG8=', { encoding: 'base64' })
+    await svc.grant('p', [join(ROOT, 'out')])
+    await svc.write('p', join(ROOT, 'out', 'img.png'), 'aGVsbG8=', { encoding: 'base64' })
     expect(fs.writeFileCalls[0].data).toEqual(Buffer.from('hello'))
-    await svc.write('p', `${ROOT}/out/log.txt`, 'line1\n', { append: true })
+    await svc.write('p', join(ROOT, 'out', 'log.txt'), 'line1\n', { append: true })
     expect(fs.writeFileCalls[1].opts).toEqual({ flag: 'a' })
-    await svc.write('p', `${ROOT}/out/new/d.txt`, 'x', { createDir: true })
-    expect(fs.mkdirCalls).toContain(`${ROOT}/out/new`)
+    await svc.write('p', join(ROOT, 'out', 'new', 'd.txt'), 'x', { createDir: true })
+    expect(fs.mkdirCalls).toContain(join(ROOT, 'out', 'new'))
   })
 
   it('rename：同目录放行、跨目录未授权拒绝', async () => {
     const fs = fakeFs()
     const svc = new FileAccessService(fs)
-    await svc.grant('p', [`${ROOT}/a.txt`])
-    await svc.rename('p', `${ROOT}/a.txt`, `${ROOT}/a(1).txt`)
-    expect(fs.renameCalls).toEqual([{ from: `${ROOT}/a.txt`, to: `${ROOT}/a(1).txt` }])
-    await expect(svc.rename('p', `${ROOT}/a.txt`, '/tmp/elsewhere/a.txt')).rejects.toThrow(/重命名/)
+    await svc.grant('p', [join(ROOT, 'a.txt')])
+    await svc.rename('p', join(ROOT, 'a.txt'), join(ROOT, 'a(1).txt'))
+    expect(fs.renameCalls).toEqual([{ from: join(ROOT, 'a.txt'), to: join(ROOT, 'a(1).txt') }])
+    await expect(svc.rename('p', join(ROOT, 'a.txt'), resolve('/tmp/elsewhere/a.txt'))).rejects.toThrow(/重命名/)
   })
 
   it('stat 不存在返回 null 而非抛错', async () => {
     const fs = fakeFs()
     const svc = new FileAccessService(fs)
-    await svc.grant('p', [`${ROOT}/gone.txt`])
-    expect(await svc.stat('p', `${ROOT}/gone.txt`)).toMatchObject({ exists: false })
+    await svc.grant('p', [join(ROOT, 'gone.txt')])
+    expect(await svc.stat('p', join(ROOT, 'gone.txt'))).toMatchObject({ exists: false })
   })
 
   it('list 目录授权后可列（含递归与 size 探测）', async () => {
-    const fs = fakeFs({ [`${ROOT}/d/b.txt`]: '12345' })
-    fs.dirs[`${ROOT}/d`] = [
+    const fs = fakeFs({ [join(ROOT, 'd', 'b.txt')]: '12345' })
+    fs.dirs[join(ROOT, 'd')] = [
       { name: 'sub', isDirectory: () => true },
       { name: 'b.txt', isDirectory: () => false }
     ]
-    fs.dirs[`${ROOT}/d/sub`] = [{ name: 'c.md', isDirectory: () => false }]
+    fs.dirs[join(ROOT, 'd', 'sub')] = [{ name: 'c.md', isDirectory: () => false }]
     const svc = new FileAccessService(fs)
-    await svc.grant('p', [`${ROOT}/d`])
-    const flat = await svc.list('p', `${ROOT}/d`)
+    await svc.grant('p', [join(ROOT, 'd')])
+    const flat = await svc.list('p', join(ROOT, 'd'))
     expect(flat.map((e) => e.name)).toEqual(['b.txt', 'sub'])
     expect(flat.find((e) => e.name === 'b.txt')).toMatchObject({ size: 5, isDirectory: false })
-    const deep = await svc.list('p', `${ROOT}/d`, { recursive: true })
-    expect(deep.map((e) => e.path)).toEqual([`${ROOT}/d/b.txt`, `${ROOT}/d/sub`, `${ROOT}/d/sub/c.md`])
+    const deep = await svc.list('p', join(ROOT, 'd'), { recursive: true })
+    expect(deep.map((e) => e.path)).toEqual([join(ROOT, 'd', 'b.txt'), join(ROOT, 'd', 'sub'), join(ROOT, 'd', 'sub', 'c.md')])
   })
 
   it('mkdir 要求父目录已授权', async () => {
     const fs = fakeFs()
     const svc = new FileAccessService(fs)
-    await svc.grant('p', [`${ROOT}/d`])
-    await svc.mkdir('p', `${ROOT}/d/new/sub`)
-    expect(fs.mkdirCalls).toEqual([`${ROOT}/d/new/sub`])
-    await expect(svc.mkdir('p', '/tmp/elsewhere/x')).rejects.toThrow(/未授权/)
+    await svc.grant('p', [join(ROOT, 'd')])
+    await svc.mkdir('p', join(ROOT, 'd', 'new', 'sub'))
+    expect(fs.mkdirCalls).toEqual([join(ROOT, 'd', 'new', 'sub')])
+    await expect(svc.mkdir('p', resolve('/tmp/elsewhere/x'))).rejects.toThrow(/未授权/)
   })
 
   it('remove 走递归 rm 且要求授权', async () => {
     const fs = fakeFs()
     const svc = new FileAccessService(fs)
-    await svc.grant('p', [`${ROOT}/d`])
-    await svc.remove('p', `${ROOT}/d/sub`)
-    expect(fs.rmCalls).toEqual([`${ROOT}/d/sub`])
-    await expect(svc.remove('p', '/tmp/elsewhere')).rejects.toThrow(/未授权/)
+    await svc.grant('p', [join(ROOT, 'd')])
+    await svc.remove('p', join(ROOT, 'd', 'sub'))
+    expect(fs.rmCalls).toEqual([join(ROOT, 'd', 'sub')])
+    await expect(svc.remove('p', resolve('/tmp/elsewhere'))).rejects.toThrow(/未授权/)
   })
 })

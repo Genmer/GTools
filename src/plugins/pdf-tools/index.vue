@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import type { PluginContext } from '@sdk/api'
+import type { MatchFile, PluginContext } from '@sdk/api'
 import {
   baseName,
   fileNameOf,
@@ -22,7 +22,7 @@ import {
   type ImageKind
 } from './logic/pdf-ops'
 
-const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string }>()
+const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string; initialPayload?: MatchFile[] }>()
 
 type FileKind = 'pdf' | 'image'
 
@@ -252,6 +252,14 @@ async function addPaths(paths: string[], needsGrant: boolean): Promise<void> {
     if (selectedId.value === null && kind === 'pdf' && item.error === '') selectedId.value = item.id
   }
   if (skipped.length > 0) flash('warn', `已跳过不支持的文件：${skipped.join('、')}`)
+}
+
+// 拖 .pdf 入主窗经 files 匹配推荐进入：宿主传来的文件走既有拖入通路（授权 + 预填 + 示例卡片让位）
+if (props.initialPayload !== undefined && props.initialPayload.length > 0) {
+  void addPaths(
+    props.initialPayload.map((f) => f.path),
+    true
+  )
 }
 
 async function pickFiles(): Promise<void> {

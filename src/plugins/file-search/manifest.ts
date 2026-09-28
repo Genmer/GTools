@@ -13,7 +13,11 @@ const manifest: PluginManifest = {
   permissions: ['storage', 'shell:open', 'window:hide', 'clipboard:write', 'notification'],
   source: 'builtin',
   entry: './index.vue',
-  backend: './backend/index.ts'
+  backend: './backend/index.ts',
+  // 路径沾边（盘符/UNC/POSIX 前缀）即推荐本地搜索，命中文本注入搜索框
+  matchers: [{ type: 'regex', match: '(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/)[^\\s]{2,}', label: '本地搜索' }],
+  // 激活后主框进入子输入态（视文本为文件名过滤词），占位归插件声明
+  subInput: { placeholder: '输入文件名…' }
 }
 
 export default manifest

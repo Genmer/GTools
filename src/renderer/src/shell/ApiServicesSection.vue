@@ -295,6 +295,13 @@ async function test(p?: ApiProviderView): Promise<void> {
 section {
   width: 100%;
 }
+/* 与 SettingsPage 的 section 标题同款：无此规则 h3 会落 UA 默认（黑字大号） */
+h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--fg-dim);
+  font-weight: 600;
+}
 .row {
   display: flex;
   align-items: center;
@@ -328,7 +335,7 @@ section {
 }
 .panel {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-md);
   padding: 10px 12px;
   margin-bottom: 8px;
 }
@@ -371,7 +378,7 @@ select {
   background: var(--bg-raised);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   padding: 6px 10px;
   font-size: 13px;
   font-family: ui-monospace, monospace;
@@ -390,7 +397,7 @@ select {
   background: var(--bg-raised);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   padding: 5px 12px;
   font-size: 13px;
   cursor: pointer;

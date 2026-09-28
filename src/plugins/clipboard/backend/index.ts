@@ -2,22 +2,61 @@ import type { BackendContext, PluginBackend } from '@sdk/api'
 import {
   DEFAULT_SETTINGS,
   MAX_TEXT_CHARS,
+  REMOVE_MARKER_KEY,
   appendRecord,
+  adoptRemoveRecords,
   clampMaxRecords,
   enforceCap,
   parsePersistedState,
+  parseRemoveMarker,
   toPersisted,
   type ClipboardRecord,
   type ClipboardSettings,
-  type PersistedClipboardState
+  type PersistedClipboardState,
+  type RemoveMarker
 } from '../logic/history'
 import { imageFingerprint } from '../logic/image-hash'
+import { isSensitiveText } from '../logic/sensitive'
 import { CLEAR_MARKER_KEY } from '../logic/history'
 
 export const POLL_INTERVAL_MS = 1000
 /** 外部变更（渲染层清空/改设置）检测周期；提交前的同步兜底覆盖更小窗口 */
 export const SYNC_INTERVAL_MS = 5000
 const STATE_KEY = 'state'
+
+/** 主框直推行数上限：最近 ≤3 条文本 */
+export const MAIN_PUSH_MAX_ITEMS = 3
+/** payloadText 必须在 emit 侧截断：单条记录本体上限 200_000，不截会塞爆主输入框（2000 对齐渲染层注入通路） */
+export const MAIN_PUSH_PAYLOAD_CHARS = 2000
+const MAIN_PUSH_TITLE_CHARS = 40
+
+/** 渲染层主框直推行（main-push 事件负载）：走既有 plugin-event 通道，不经 dispatchApi，无 dispatch 校验面 */
+export interface MainPushItem {
+  pluginId: string
+  /** 记录 id：渲染层按此去重多行推送，无它 3 行会被同键去重塌成 1 行 */
+  pushId: string
+  title: string
+  subtitle: string
+  payloadText: string
+}
+
+/** 最近 ≤3 条非敏感文本记录映射为推送行；敏感过滤独立于入库 skipSensitive（推送面更暴露，宁缺勿推） */
+export function mainPushItems(records: readonly ClipboardRecord[]): MainPushItem[] {
+  const items: MainPushItem[] = []
+  for (const r of records) {
+    if (items.length >= MAIN_PUSH_MAX_ITEMS) break
+    if (r.kind !== 'text' || isSensitiveText(r.text)) continue
+    const head = r.text.split('\n', 1)[0] ?? ''
+    items.push({
+      pluginId: 'clipboard',
+      pushId: r.id,
+      title: head.length > MAIN_PUSH_TITLE_CHARS ? head.slice(0, MAIN_PUSH_TITLE_CHARS) : head,
+      subtitle: '剪贴板',
+      payloadText: r.text.length > MAIN_PUSH_PAYLOAD_CHARS ? r.text.slice(0, MAIN_PUSH_PAYLOAD_CHARS) : r.text
+    })
+  }
+  return items
+}
 
 type ContentSig = { kind: 'text'; text: string } | { kind: 'image'; hash: string }
 
@@ -46,6 +85,7 @@ export class ClipboardHistoryBackend implements PluginBackend {
   private lastSig: ContentSig | null = null
   private lastImageDataUrl = ''
   private clearMarker = 0
+  private removeMarker = 0
   private pollTimer: unknown = null
   private syncTimer: unknown = null
   private dirty = false
@@ -89,6 +129,11 @@ export class ClipboardHistoryBackend implements PluginBackend {
     return this.records
   }
 
+  /** 历史每次变化随 history-changed 同步重推全量推送行（渲染层按最新一组整组替换，空组即清除） */
+  private emitMainPush(): void {
+    this.ctx?.emit('main-push', mainPushItems(this.records))
+  }
+
   /** 单轮轮询：文本优先，仅文本为空才读图（省解码）；内容指纹未变则跳过 */
   async pollOnce(): Promise<void> {
     const ctx = this.ctx
@@ -99,6 +144,10 @@ export class ClipboardHistoryBackend implements PluginBackend {
         if (this.lastSig !== null && this.lastSig.kind === 'text' && this.lastSig.text === text) return
         if (text.length > MAX_TEXT_CHARS) {
           this.lastSig = { kind: 'text', text }
+          return
+        }
+        if (this.settings.skipSensitive && isSensitiveText(text)) {
+          this.lastSig = { kind: 'text', text } // 记指纹防同内容每秒反复过正则
           return
         }
         await this.syncExternal()
@@ -133,16 +182,18 @@ export class ClipboardHistoryBackend implements PluginBackend {
 
   /**
    * 同步渲染层对 storage 的外部变更；records 非空时内存为准（渲染层副本可能落后）。
-   * 清空的唯一信号是 clear-marker 标记变新（渲染层不直写 state），
+   * 清空/单条删除的唯一信号是相应标记变新（渲染层不直写 state），
    * 自己的写入（dirty/saving）未落盘时跳过检测，避免用旧值误判。
    */
   async syncExternal(): Promise<void> {
     if (this.ctx === null) return
     if (this.dirty || this.saving) return
     let marker = 0
+    let remove: RemoveMarker | null = null
     let persisted: PersistedClipboardState | null = null
     try {
       marker = parseClearMarker(await this.ctx.storage.get(CLEAR_MARKER_KEY))
+      remove = parseRemoveMarker(await this.ctx.storage.get(REMOVE_MARKER_KEY))
       if (marker <= this.clearMarker) {
         persisted = parsePersistedState(await this.ctx.storage.get(STATE_KEY))
       }
@@ -150,6 +201,11 @@ export class ClipboardHistoryBackend implements PluginBackend {
       return
     }
     if (marker > this.clearMarker) {
+      // 清空优先：并发时清空胜出、被删 id 不复活，只需消费掉删除标记防滞后重复采纳
+      if (remove !== null && remove.ts > this.removeMarker) {
+        this.removeMarker = remove.ts
+        await this.rewriteRemoveMarker(remove)
+      }
       try {
         await this.adoptClear(marker)
       } catch {
@@ -157,7 +213,29 @@ export class ClipboardHistoryBackend implements PluginBackend {
       }
       return
     }
+    if (remove !== null && remove.ts > this.removeMarker) {
+      this.removeMarker = remove.ts
+      const kept = adoptRemoveRecords(this.records, remove.ids)
+      if (kept !== this.records) {
+        this.records = kept
+        this.dirty = true
+        void this.flush()
+        this.ctx.emit('history-changed', { count: this.records.length })
+        this.emitMainPush()
+      }
+      // 已采纳的 id 清空：同 ts 不重复采纳 = 幂等，标记自身不随删除次数膨胀
+      await this.rewriteRemoveMarker(remove)
+    }
     if (persisted !== null) this.applySettings(persisted.settings)
+  }
+
+  /** 采纳后的删除标记重写为空 id 集；失败无实害（同 ts 幂等，顶多下轮重复采纳一次无变化） */
+  private async rewriteRemoveMarker(remove: RemoveMarker): Promise<void> {
+    try {
+      await this.ctx!.storage.set(REMOVE_MARKER_KEY, { ts: remove.ts, ids: [] })
+    } catch {
+      // 放弃本轮重写
+    }
   }
 
   /** 采纳清空：清内存指纹并落盘空状态（杀掉可能被在途写入复活的历史），再通知渲染层 */
@@ -168,19 +246,29 @@ export class ClipboardHistoryBackend implements PluginBackend {
     this.lastImageDataUrl = ''
     await this.ctx!.storage.set(STATE_KEY, toPersisted(this.settings, []))
     this.ctx?.emit('history-changed', { count: 0 })
+    this.emitMainPush()
   }
 
   private applySettings(next: ClipboardSettings): void {
     const maxRecords = clampMaxRecords(next.maxRecords)
     const clearOnExit = next.clearOnExit === true
-    if (maxRecords === this.settings.maxRecords && clearOnExit === this.settings.clearOnExit) return
-    this.settings = { maxRecords, clearOnExit }
+    const skipSensitive = next.skipSensitive === true
+    if (
+      maxRecords === this.settings.maxRecords &&
+      clearOnExit === this.settings.clearOnExit &&
+      skipSensitive === this.settings.skipSensitive
+    ) {
+      return
+    }
+    // 整体重建三字段：漏字段会让 skipSensitive 在每轮 syncExternal→applySettings 后静默归 false
+    this.settings = { maxRecords, clearOnExit, skipSensitive }
     const capped = enforceCap(this.records, maxRecords)
     if (capped !== this.records) {
       this.records = capped
       this.dirty = true
       void this.flush()
       this.ctx?.emit('history-changed', { count: this.records.length })
+      this.emitMainPush()
     }
   }
 
@@ -190,6 +278,7 @@ export class ClipboardHistoryBackend implements PluginBackend {
     this.dirty = true
     void this.flush()
     this.ctx?.emit('history-changed', { count: this.records.length })
+    this.emitMainPush()
   }
 
   private async reloadFromStorage(): Promise<void> {

@@ -473,11 +473,21 @@ backend/index.ts（主进程）：
 
 ### 5.1 主题（T2.1）
 
-- **机制**：`themes.css` 定义 CSS 变量全集（--bg / --bg-glass / --fg / --fg-dim / --accent / --border / --danger 等），`<html data-theme="light|dark|glass">` 切换；全部 UI（含 4 插件视图）只允许取变量，禁止硬编码色值（判据 4 的静态检查项）。glass 复用 dark 的前景变量 + 透明背景变量（--bg: transparent）。
-- **原生窗口效果联动**（主题切换时渲染层 IPC → 主进程 window.ts）：
-  - mac glass：`win.setVibrancy('under-window')` + `setBackgroundColor('#00000000')`；
-  - win glass：`win.setBackgroundMaterial('acrylic')`（Electron 26+，Win11）；Win10 自动降级为不透明深色（窗口层 try/catch，不报错）；
-  - light/dark：`setVibrancy(null)` + `setBackgroundMaterial('none')` + `setBackgroundColor('#ffffff' | '#1e1e1e')`。
+- **机制**：`themes.css` 定义 CSS 变量全集（--bg / --fg / --fg-dim / --accent / --border / --danger 等），`<html data-theme="light|dark">` 切换；全部 UI（含插件视图）只允许取变量，禁止硬编码色值（判据 4 的静态检查项）。
+- **透明效果**（v0.0.6 起为通用设置，所有主题可开；设置项 `transparency: { enabled, opacity(0-100), blur }`，默认开/55/开）：
+  - 渲染层：`html[data-transparency='on']` + `--tx=opacity/100` 注入，themes.css 据此把着色层变量（--bg / --bg-raised / 边框 / 投影 / 顶光 sheen）半透明化，alpha = (1-—tx)×系数；前景色沿用当前主题，保证可读性不依赖壁纸明暗；
+  - 主进程窗口联动（window.ts，`applyThemeToBrowserWindow(target, theme, tx)`）：
+    - 透明+实时模糊：win11 `setBackgroundMaterial('acrylic')`（Win10 API 静默无效退化为半透明）/ mac `setVibrancy('under-window')`——不需要窗口透明标志，不影响拖缘调整大小；
+    - 透明+无模糊：仅创建时带 `transparent: true` 的窗口直透桌面（Windows 透明窗口不可拖缘调整大小，透明标志只能在创建时定，记入 WeakSet）；运行时才关模糊的窗口回退主题底色（重启后完全生效）；
+    - 透明关：不透明主题底色 `'#f2f3f5' | '#1e1e1e'`；
+  - 旧版 `theme:'glass'` 迁移：settings-store / 备份导入均映射为 `dark + transparency.enabled=true`。
+- **玻璃主题三档风格**（v0.0.16 双材质、v0.0.20 增 clear，`glassMaterial: 'wallpaper' | 'acrylic' | 'clear'`，默认 wallpaper；`glassMaterialSource:'user'` 标记用户显式选择）：
+  - `wallpaper`：透明浮岛窗（864×640 留边距落外投影）+ 弹窗瞬间快照折射层 + 胶囊 feDisplacementMap（v0.0.11 观感）；
+  - `clear`：透明窗直透桌面（DWM 实时合成，真·实时零算力零捕获）；页内折射层不画（页面合成器滤镜够不到窗后内容），玻璃图层沿用默认值（身后内容与 wallpaper 档同源，可读性同参）；代价是无页内磨霜/胶囊折射；
+  - `acrylic`：不透明内容口径窗 + 系统亚克力实时身景（与 light 的透明+模糊档同参），渲染层抑制页内折射层（`data-glass-material='acrylic'`）；亮色系统下亚克力偏奶白，观感≈不透明，只作可选项；
+  - 渲染层/主进程对「画页内折射源」统一收敛到 wallpaper 档（App.vue isGlassWallpaper / ipc.ts wallMode）：acrylic/clear 的身景不经页面，壁纸桥、快照流、胶囊探针全部不启用；`wantsTransparentFlag` 对 glass 非 acrylic 档恒透明 → clear↔wallpaper 运行时切换不重建窗口，acrylic 跨透明类别走 recreateSearchWindow。
+  - **win32 平台约束（实证矩阵，2026-09-27，Win11 22631）**：透明窗 + `WDA_EXCLUDEFROMCAPTURE`（setContentProtection）一经任何窗口生命周期变化（SW_HIDE/SW_SHOW、minimize/restore、opacity 0/1、移屏外、内容级 phantom、移动/缩放/透明度 nudge）DWM 即把整窗永久渲黑或消失，不可逆；无标志则透明窗一切正常。因此 v0.0.14 的主进程实时捕获（glass-backdrop.ts）在 win32 硬关（`canProtectScreen`）；macOS 无此 bug，wallpaper 模式实时捕获正常。若未来 Electron/Windows 修复，重开 `canProtectScreen` 一处即可（矩阵探针法：最小透明窗 × affinity 模式 × 显隐循环 × 外部进程截屏采样）。
+  - **win32 wallpaper 折射 = 渲染层快照流（v0.0.19）**：隐藏期渲染层持有 getUserMedia 桌面流（主进程经 `glassbackdrop:snapshot-stream` 单调签发 sourceId+窗口几何），窗口 show 当口抓流中当前帧（帧全摄于不可见期，无自摄入）、裁窗口区 2x 超采样铺 `--wp-image` 后停流，下次隐藏再养——全链路零防捕获标志，不触 DWM 渲黑矩阵。三个坑：① 显隐联动不能用 visibilitychange/`document.hidden`（`show:false` 窗口首次显隐前页面卡 visible 的 Electron 怪癖），由主进程 `win.on('show'/'hide')` 推 `host:win-visibility` 驱动；② 不要设 `backgroundThrottling:false`（页面恒 visible，联动全断，隐藏期节流不影响流送帧）；③ desktopCapturer.getSources 单调 ~350ms，不适用于弹窗路径。黑帧防护：DRM/独占全屏等场景流会只出全黑帧，抓帧时 16×9 采样 max 通道值 <12 拒收（保上一张/壁纸兜底）。0.0.18 曾把 win32 默认误改 acrylic，v0.0.19 回滚 wallpaper 并对无 `glassMaterialSource:'user'` 标记的存量 acrylic 档 load 时一次性校正回 wallpaper。
 - 对比度判据 3：变量表按 WCAG AA（正文 ≥4.5:1）取值，写死在 themes.css 一处。
 
 ### 5.2 设置持久化（自研）
@@ -487,7 +497,8 @@ backend/index.ts（主进程）：
 ```ts
 interface AppSettings {
   hotkey: { darwin: string; win32: string }
-  theme: 'light' | 'dark' | 'glass'
+  theme: 'light' | 'dark'
+  transparency: { enabled: boolean; opacity: number; blur: boolean }
   disabledPlugins: string[]
 }
 ```
@@ -538,6 +549,7 @@ interface AppSettings {
 | 权限 | 解锁的 api | 说明 |
 |---|---|---|
 | `window:float` | `window.float.create/update/close/closeAll` | 置顶无边框浮窗 |
+| `screenshot` | `screenshot.capture` | 全屏冻结帧选区截图（见 A.7） |
 | `dialog` | `dialog.openFile/saveFile` | 系统文件对话框，选中路径自动授予 fs 权限 |
 | `fs` | `fs.grant/read/write/rename/remove/stat/list/mkdir` | **限定在用户主动授权路径内**的文件读写 |
 
@@ -628,7 +640,11 @@ backend（主进程模块）import 白名单在原有基础上**增加 `node:` �
 
 插件渲染层 import 白名单：`@sdk/*`、`vue`、`pinyin-pro`、**`qrcode`**（局域网共享二维码，用 `toDataURL`/`toString` 渲染端 API）、**`marked`**（markdown-notes / dev-manual 的 markdown→HTML，零依赖）。均为纯 JS，无原生编译。渲染层 `crypto.subtle`（WebCrypto）在 `file://` 安全区可用——密码管理器插件用 PBKDF2+AES-GCM 直接写，不需要宿主 API。UI 颜色仍只许取 `themes.css` 变量。
 
-### A.7 本期未提供的能力（及原因）
+### A.7 截图 screenshot.capture（权限 `screenshot`，v0.0.21 新增）
+
+全屏冻结帧选区截图（内置插件「截图」消费）：`const r = await ctx.host.screenshot.capture()`。流程由宿主托管——隐藏启动器 → desktopCapturer 抓光标所在屏（黑帧重试一次）→ 全屏遮罩窗展示冻结帧 → 用户拖拽框选（回车/双击=复制，Esc/右键=取消）→ 工具条「复制 / 另存 / 取消」。返回 `{ action: 'copy'|'save'|'cancel', dataUrl?, width?, height?, savedPath? }`；并发调用抛错。遮罩窗覆盖单显示器（v1 限定光标所在屏，多屏拼接后议）；结果事件走 `gtools:host` 的 `screenshot:overlay-event`（sender 须为活跃遮罩窗）。保存对话框取消视为整体 cancel。全局快捷键经既有 设置→指令热键 绑定插件的 `capture` 命令即可，无需新热键机制。
+
+### A.8 本期未提供的能力（及原因）
 
 - **屏幕取色（desktopCapturer 截屏 + 像素取色）**：本期调研清单 10 个插件（markdown-notes / lan-file-share / web-quick-open / batch-rename / image-bed / todo-pomodoro / fake-data / dev-manual / password-vault / hot-search）均不需要；devtools 的 ColorTool 是颜色格式转换，不取屏幕色。如后续要加取色类插件再在此层扩展 `screen:pick-color`。
 - 外部插件实例化、`fs` 之外的任意路径访问、浮窗内嵌宿主能力面：刻意不做（安全边界）。

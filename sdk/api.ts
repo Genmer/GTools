@@ -115,6 +115,24 @@ export interface FsListOptions {
   recursive?: boolean
 }
 
+/** 截图选区（DIP，相对目标显示器左上角） */
+export interface ScreenshotRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** capture() 结果：copy=已写剪贴板，save=已落盘（savedPath），cancel=用户放弃（Esc/关窗/存盘对话框取消） */
+export interface ScreenshotResult {
+  action: 'copy' | 'save' | 'cancel'
+  /** PNG dataURL（选区裁剪）；cancel 时缺省 */
+  dataUrl?: string
+  width?: number
+  height?: number
+  savedPath?: string
+}
+
 /** 全局 API 中心的服务品类（封闭枚举：扩服务 = 协议发版时在此加一行） */
 export type ApiServiceId = 'translate'
 
@@ -153,6 +171,14 @@ export interface ApiServiceStatus {
 /** 渲染层可经 ctx.host.events.on 订阅的宿主广播事件（其余事件仍走 plugin-event:<id>） */
 export const HOST_BROADCAST_EVENTS = ['api-services-changed'] as const
 export type HostBroadcastEvent = (typeof HOST_BROADCAST_EVENTS)[number]
+
+/** files/img 匹配命中后宿主传入插件渲染入口的文件项（initialPayload），读写仍须插件侧自行 fs.grant */
+export interface MatchFile {
+  isFile: boolean
+  isDirectory: boolean
+  name: string
+  path: string
+}
 
 /**
  * 宿主 API v1 全集（渲染层插件经 host-client 走 IPC，backend 经 BackendContext 直调，同一能力面）。
@@ -195,6 +221,8 @@ export interface HostApi {
       closeAll(): Promise<void>
     }
   }
+  /** 全屏冻结帧选区截图：隐藏启动器 → 冻结光标所在屏 → 用户框选 → 工具条选复制/另存；并发调用抛错 */
+  screenshot: { capture(): Promise<ScreenshotResult> }
   dialog: {
     /** 用户选中即自动授予 fs 读写授权；取消返回 [] */
     openFile(opts?: DialogOpenOptions): Promise<string[]>
@@ -219,6 +247,16 @@ export interface HostApi {
     status(service: ApiServiceId): Promise<ApiServiceStatus>
   }
   events: { on(event: string, cb: (p: unknown) => void): () => void }
+  /**
+   * 主框子输入控制（渲染层本地实现，不经 dispatchApi，故无 API_PERMISSIONS 项）：
+   * 声明 subInput 的插件激活后宿主始终提供，backend 测试桩可省略；插件侧用 ctx.host.subInput?.x 可选链调用
+   */
+  subInput?: {
+    setValue(v: string): Promise<void>
+    focus(): Promise<void>
+    blur(): Promise<void>
+    select(): Promise<void>
+  }
 }
 
 /** backend 额外具备向渲染层推送事件的能力（HostApi 之外的唯一扩展） */
@@ -260,6 +298,7 @@ export const API_PERMISSIONS: Readonly<Record<string, Permission | undefined>> =
   'window.float.update': 'window:float',
   'window.float.close': 'window:float',
   'window.float.closeAll': 'window:float',
+  'screenshot.capture': 'screenshot',
   'dialog.openFile': 'dialog',
   'dialog.saveFile': 'dialog',
   'fs.grant': 'fs',

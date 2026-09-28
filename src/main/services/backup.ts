@@ -31,7 +31,7 @@ export interface PathTokenRoots {
 
 export function defaultBackupFileName(now = new Date()): string {
   const p = (n: number): string => String(n).padStart(2, '0')
-  return `gtools-backup-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}.json`
+  return `gtools-backup-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}.gtools`
 }
 
 function startsWithPath(s: string, root: string, ci: boolean): boolean {

@@ -26,5 +26,11 @@ function setupScrollbarReveal(): void {
   )
 }
 
+// Electron 官方建议的全局拖放兜底：drop 未取消时 Chromium 默认导航到拖入文件，整个应用被替换。
+// preventDefault 不阻断传播，App.vue 与插件自己的 drop 处理不受影响；挂在入口层同时覆盖独立窗口
+for (const type of ['dragover', 'drop']) {
+  document.addEventListener(type, (e) => e.preventDefault())
+}
+
 setupScrollbarReveal()
 createApp(App).mount('#app')

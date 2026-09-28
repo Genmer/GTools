@@ -30,9 +30,16 @@ function onKeydown(e: KeyboardEvent): void {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
-  // 主题变化主进程只广播到本窗口（settings-changed 只发主窗），用专用事件同步三态
-  window.gtools.on('detached:theme', (t) => {
-    if (typeof t === 'string') document.documentElement.dataset.theme = t
+  // 主题/透明变化主进程只广播到本窗口（settings-changed 只发主窗），用专用事件同步；
+  // transparency 宽松读取保持两侧改动解耦（blur 字段旧载荷缺省视为开）
+  window.gtools.on('detached:theme', (p) => {
+    const d = p as { theme?: string; transparency?: { enabled: boolean; opacity: number; blur?: boolean } }
+    if (typeof d?.theme === 'string') document.documentElement.dataset.theme = d.theme
+    if (d?.transparency) {
+      document.documentElement.dataset.transparency = d.transparency.enabled ? 'on' : 'off'
+      document.documentElement.dataset.blur = d.transparency.blur !== false ? 'on' : 'off'
+      document.documentElement.style.setProperty('--tx', (d.transparency.opacity / 100).toFixed(2))
+    }
   })
 })
 onBeforeUnmount(() => {
@@ -73,15 +80,23 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--bg-raised);
+  border: 1px solid transparent;
+  /* 全工程唯一投影只挂窗口根；与主窗 .app 同款单层 padding-box 背景：
+     受光边走 --window-ring inset shadow，border-box 渐变会透过半透明 tint 漏满整窗（白纱根因） */
+  box-shadow: var(--window-ring, none), var(--shadow-window);
+  background: linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
 }
+/* 顶栏扁平化：与窗口根同 tint，无自身材质 */
 .topbar {
+  position: relative;
   flex: none;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   height: 40px;
   padding: 0 var(--sp-2) 0 var(--sp-3);
+  border-radius: var(--r-xl);
+  background: var(--bg-shell);
   -webkit-app-region: drag;
 }
 /* macOS titleBarStyle hidden 的交通灯落在左上角，顶栏左侧让出 70px */
@@ -132,5 +147,12 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+/* 独立窗口的栏在文档流内（不同于主窗悬浮胶囊），插件面板恢复紧凑上边距、不开顶部溶解 */
+.detached .body :deep(.plugin-body) {
+  padding-top: var(--sp-4);
+  scroll-padding-top: 0;
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 </style>

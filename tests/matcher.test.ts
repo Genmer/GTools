@@ -15,6 +15,7 @@ const entry = (title: string, extra: Partial<SearchEntry> = {}): SearchEntry => 
 // 手工构造索引：音节数据不依赖 pinyin-pro，锁死匹配算法行为
 const jsonIdx = (title: string, syllables: string[], initials: string): PinyinIndexed => ({
   lower: title.toLowerCase(),
+  compact: title.toLowerCase().replace(/\s+/g, ''),
   syllables,
   initials
 })
@@ -124,5 +125,49 @@ describe('matcher + pinyin-pro 集成（真实拼音数据）', () => {
     const vscode = appEntries.find((e) => e.appId === 'com.microsoft.VSCode')!
     expect(matchEntryBest('code', vscode)).not.toBeNull()
     expect(matchEntryBest('vscode', vscode)).not.toBeNull()
+  })
+})
+
+describe('规则1.5 去空白字面（无空格「英文/拼音+中文」混排）', () => {
+  const e = entry('JSON 格式化')
+  const idx = jsonIdx('JSON 格式化', ['json', ' ', 'ge', 'shi', 'hua'], 'json gsh')
+
+  it('无空格 json格式化 命中「JSON 格式化」，分值钳在弱字面档 [2000, 9900]', () => {
+    const s = matchEntry('json格式化', e, idx)
+    expect(s).not.toBeNull()
+    expect(s!).toBeGreaterThanOrEqual(2000)
+    expect(s!).toBeLessThanOrEqual(9900)
+  })
+
+  it('compact 中段命中（跨空格 n格式）按位置计分且仍低于 syllable 带', () => {
+    const s = matchEntry('n格式', e, idx)
+    expect(s).not.toBeNull()
+    expect(s!).toBeGreaterThanOrEqual(2000)
+    expect(s!).toBeLessThan(10_000)
+  })
+
+  it('排序：字面前缀(0) < compact 命中 < 首字母命中', () => {
+    const kfz = entry('开发者工具')
+    const kfzIdx = jsonIdx('开发者工具', ['kai', 'fa', 'zhe', 'gong', 'ju'], 'kfzgj')
+    const prefix = matchEntry('json', e, idx)!
+    const compact = matchEntry('json格式化', e, idx)!
+    const initial = matchEntry('kfz', kfz, kfzIdx)!
+    expect(prefix).toBe(0)
+    const sorted = sortMatches([
+      { score: initial },
+      { score: compact },
+      { score: prefix }
+    ])
+    expect(sorted.map((x) => x.score)).toEqual([prefix, compact, initial])
+  })
+
+  it('误拼 gsrh 与无关 zzzz 仍返回 null（新路径不放宽误拼）', () => {
+    expect(matchEntry('gsrh', e, idx)).toBeNull()
+    expect(matchEntry('zzzz', e, idx)).toBeNull()
+  })
+
+  it('真实拼音数据：json格式化 命中且 keywords 路自动受益', () => {
+    expect(matchEntryBest('json格式化', entry('JSON 格式化'))).not.toBeNull()
+    expect(matchEntryBest('jsonformat', entry('JSON 格式化', { keywords: ['json format'] }))).not.toBeNull()
   })
 })

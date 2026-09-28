@@ -1,4 +1,5 @@
 /** 端到端集成：backend（真实 node:http + 默认 deps）+ 内存 fake ctx + 真实 fetch 客户端 */
+import { createServer } from 'node:net'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createLanFileShareBackend, LanFileShareBackend } from '../../../../src/plugins/lan-file-share/backend/index'
 import { CONTROL_KEY, STATE_KEY, type ShareState } from '../../../../src/plugins/lan-file-share/shared'
@@ -15,6 +16,15 @@ async function until(pred: () => boolean, ms = 5000): Promise<void> {
     if (Date.now() - t0 > ms) throw new Error('等待超时')
     await new Promise((r) => setTimeout(r, 25))
   }
+}
+
+/** 动态取空闲端口：固定端口在本机/CI 上易被占用或落在系统保留段，backend 对残留冲突还会自动 +1 重试 */
+async function freePort(): Promise<number> {
+  const srv = createServer()
+  await new Promise<void>((resolve) => srv.listen(0, '0.0.0.0', resolve))
+  const port = (srv.address() as { port: number }).port
+  await new Promise((resolve) => srv.close(resolve))
+  return port
 }
 
 function multipartBody(boundary: string, files: Array<{ name: string; data: Buffer }>): Buffer {
@@ -50,7 +60,7 @@ describe('lan-file-share 集成（真实 HTTP）', () => {
     backend = createLanFileShareBackend({ pollMs: 20 }) as LanFileShareBackend
     await backend.init(fake.ctx)
     await backend.start()
-    send('start', { dir: '/share', port: 37760 })
+    send('start', { dir: '/share', port: await freePort() })
     await until(() => {
       const s = fake.state()
       return s !== null && s.running

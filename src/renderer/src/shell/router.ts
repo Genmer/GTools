@@ -5,7 +5,7 @@ import { restOf, router } from './router-core'
 export { router, keywordMatch, restOf, syncMode, enterSettings, enterPlugin, isSettingsEntry, resetForShow } from './router-core'
 export type { Mode } from './router-core'
 
-/** Esc 逐级退出：settings → global，plugin → global（清 keyword 留 rest），global → 隐藏窗口 */
+/** Esc 逐级退出：settings → global，plugin → global（清 keyword 留 rest），global 有内容先清空、空才隐藏窗口 */
 export function exitLevel(manifests: PluginManifest[]): void {
   if (router.mode === 'settings') {
     router.mode = 'global'
@@ -18,6 +18,11 @@ export function exitLevel(manifests: PluginManifest[]): void {
     router.activePluginId = null
     router.initialCommand = null
     router.query = rest
+    return
+  }
+  // 两段式（对齐 uTools）：global 有内容先清空留窗，再按一次 Esc 才隐藏
+  if (router.query.trim() !== '') {
+    router.query = ''
     return
   }
   void window.gtools.host('window:hide')

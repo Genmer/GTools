@@ -7,10 +7,10 @@ describe('validateAccelerator 平台黑名单', () => {
     expect(validateAccelerator('Ctrl+Alt+Space', 'win32')).toEqual({ ok: true })
   })
 
-  it('space 单修饰按平台分化：win32 全拒，darwin 仅拒 Cmd/Ctrl，Alt/Shift 放行', () => {
-    expect(validateAccelerator('Alt+Space', 'win32')).toMatchObject({ ok: false })
-    expect(validateAccelerator('Ctrl+Space', 'win32')).toMatchObject({ ok: false })
-    expect(validateAccelerator('Shift+Space', 'win32')).toMatchObject({ ok: false })
+  it('space 单修饰按平台分化：win32 放行 Alt+Space、仍拒 Ctrl/Shift，darwin 仅拒 Cmd/Ctrl', () => {
+    expect(validateAccelerator('Alt+Space', 'win32')).toEqual({ ok: true }) // RegisterHotKey 先于窗口菜单拦截
+    expect(validateAccelerator('Ctrl+Space', 'win32')).toMatchObject({ ok: false }) // 输入法切换
+    expect(validateAccelerator('Shift+Space', 'win32')).toMatchObject({ ok: false }) // 全半角切换
     expect(validateAccelerator('Cmd+Space', 'darwin')).toMatchObject({ ok: false }) // Spotlight
     expect(validateAccelerator('Ctrl+Space', 'darwin')).toMatchObject({ ok: false }) // 输入源切换
     expect(validateAccelerator('Alt+Space', 'darwin')).toEqual({ ok: true })

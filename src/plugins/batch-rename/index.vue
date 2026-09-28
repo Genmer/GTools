@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import type { PluginContext } from '@sdk/api'
+import type { MatchFile, PluginContext } from '@sdk/api'
 import {
   RULE_TYPES,
   UNDO_STORAGE_KEY,
@@ -21,7 +21,7 @@ import {
   type UndoLog
 } from './logic/rename'
 
-const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string }>()
+const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string; initialPayload?: MatchFile[] }>()
 
 const items = ref<FileItem[]>([])
 const rules = ref<RuleDraft[]>([])
@@ -50,6 +50,10 @@ const executableCount = computed(
 const multiDir = computed(() => new Set(items.value.map((i) => i.dir)).size > 1)
 
 onMounted(async () => {
+  // 拖文件/目录入主窗经 files 匹配推荐进入：授权并预填（目录沿用现有过滤提示）
+  if (props.initialPayload !== undefined && props.initialPayload.length > 0) {
+    void addPaths(props.initialPayload.map((f) => f.path))
+  }
   // 跨会话撤销：重启后文件授权已失效，撤销可能报「未授权」，失败明细如实展示
   try {
     const log = await props.ctx.host.storage.get<UndoLog>(UNDO_STORAGE_KEY)

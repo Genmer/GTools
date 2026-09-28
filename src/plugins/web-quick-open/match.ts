@@ -130,3 +130,18 @@ export function pinKeys(site: SiteEntry): string[] {
   }
   return [...keys]
 }
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * 全局 regex matcher 快搜源：别名去重排序、元字符转义，拼「别名开头 + 空格 + 非空」锚定形态。
+ * 锚定保证 MATCHER_PROBES（x/1/中/a b）不全命中以过清单校验；已知限制：自定义站点别名进不了
+ * 静态 manifest 正则，全局快搜覆盖不到属预期。空别名集返回永不匹配的正则，防空分组退化成「空格开头即命中」。
+ */
+export function buildQuickSearchMatcherSource(aliases: string[]): string {
+  const uniq = [...new Set(aliases.map((a) => a.trim()).filter((a) => a !== ''))].sort()
+  if (uniq.length === 0) return '(?!)'
+  return `^(${uniq.map(escapeRegExp).join('|')})\\s+\\S`
+}

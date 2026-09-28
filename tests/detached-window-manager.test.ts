@@ -159,9 +159,10 @@ describe('DetachedWindowManager 批量关闭与主题同步', () => {
     manager.open('calc', '')
     manager.open('markdown-notes', '')
     windows[1].setDestroyed()
-    manager.applyThemeToAll('dark')
-    expect(windows[0].applyTheme).toHaveBeenCalledWith('dark')
-    expect(windows[0].sent).toEqual([{ channel: DETACHED_THEME_EVENT, payload: 'dark' }])
+    const tx = { enabled: true, opacity: 55, blur: true }
+    manager.applyThemeToAll('dark', tx)
+    expect(windows[0].applyTheme).toHaveBeenCalledWith('dark', tx)
+    expect(windows[0].sent).toEqual([{ channel: DETACHED_THEME_EVENT, payload: { theme: 'dark', transparency: tx } }])
     // 已销毁窗口原生调用抛错被吞掉，CSS 事件也不再发送
     expect(windows[1].sent).toEqual([])
   })

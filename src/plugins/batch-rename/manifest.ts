@@ -11,7 +11,9 @@ const manifest: PluginManifest = {
   activation: 'trigger',
   permissions: ['dialog', 'fs', 'storage'],
   source: 'builtin',
-  entry: './index.vue'
+  entry: './index.vue',
+  // 拖任意文件/目录入主窗即推荐进主入口（无 extensions 不限类型），目录由视图按现有规则过滤
+  matchers: [{ type: 'files', fileType: 'both', label: '批量重命名' }]
 }
 
 export default manifest

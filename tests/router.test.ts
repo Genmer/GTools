@@ -36,6 +36,7 @@ function resetRouter(): void {
   router.query = ''
   router.activePluginId = null
   router.initialCommand = null
+  router.initialPayload = null
 }
 
 // exitLevel 的 global 分支经 window.gtools.host 隐藏窗口，node 测试里以 stub 替身观察
@@ -77,14 +78,21 @@ describe('exitLevel 显式退出（Esc / Tag 胶囊 × / 空参数框 Backspace 
     expect(hostMock).not.toHaveBeenCalled()
   })
 
-  it('global 态退出：隐藏窗口（唯一触达 window:hide 的分支）', () => {
+  it('global 态有内容退出（两段式第一段）：清空输入留窗留焦点，不触发窗口隐藏', () => {
     router.mode = 'global'
     router.query = '任意输入'
     exitLevel(manifests)
+    expect(hostMock).not.toHaveBeenCalled()
+    // 留在 global 态等下一次 Esc；焦点保留由外壳 exitToGlobal 的 nextTick focus 承担
+    expect(router.mode).toBe('global')
+    expect(router.query).toBe('')
+  })
+
+  it('global 态空输入退出：隐藏窗口（唯一触达 window:hide 的分支；纯空白视同空）', () => {
+    router.mode = 'global'
+    router.query = '   '
+    exitLevel(manifests)
     expect(hostMock).toHaveBeenCalledTimes(1)
     expect(hostMock).toHaveBeenCalledWith('window:hide')
-    // global 态退出不动输入与插件态字段
-    expect(router.mode).toBe('global')
-    expect(router.query).toBe('任意输入')
   })
 })

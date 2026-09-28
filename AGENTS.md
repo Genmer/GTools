@@ -38,7 +38,7 @@ tests/                  vitest 单测，文件名与被测模块对应
 
 - 文件 kebab-case；Vue 组件 PascalCase；类型/接口 PascalCase；单测 `*.test.ts`
 - UI 颜色一律取 `src/renderer/src/assets/themes.css` 的 CSS 变量，禁止硬编码色值
-- 主题三态 `light | dark | glass`（html data-theme + 主进程窗口 vibrancy/亚克力联动）
+- 主题两态 `light | dark` + 透明效果通用设置（`html[data-transparency='on']` + `--tx` 透明度，主进程按 enabled×blur 联动 vibrancy/亚克力/透明底色；旧 glass 主题自动迁移 dark+透明开）
 - IPC 通道：插件走 `gtools:api`（单通道，主进程按 manifest.permissions 白名单校验），宿主 UI 走 `gtools:host`；渲染事件通道白名单在 preload 维护
 
 ## 注释纪律（用户强规则）

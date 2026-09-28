@@ -1,11 +1,12 @@
 import type { HostApi } from '@sdk/api'
 import { HOST_BROADCAST_EVENTS, HostApiError } from '@sdk/api'
+import { setSubInputValue, subInputBlur, subInputFocus, subInputSelect, type SubInputApi } from './subinput'
 
 /**
  * HostApi 渲染侧实现：每方法自动携带 pluginId 走 preload 单通道，
  * 返回统一解包（失败抛 HostApiError，code 保留 IPC 错误码，插件可据此区分 SERVICE_*）。
  */
-export function createHostClient(pluginId: string): HostApi {
+export function createHostClient(pluginId: string): HostApi & { subInput: SubInputApi } {
   const call = async <T>(api: string, ...args: unknown[]): Promise<T> => {
     const r = await window.gtools.invoke(pluginId, api, args)
     if (!r.ok) throw new HostApiError(r.error ?? 'BAD_REQUEST', r.message || r.error || `api 调用失败：${api}`)
@@ -56,6 +57,7 @@ export function createHostClient(pluginId: string): HostApi {
         closeAll: () => call('window.float.closeAll')
       }
     },
+    screenshot: { capture: () => call('screenshot.capture') },
     dialog: {
       openFile: (opts) => call<string[]>('dialog.openFile', opts),
       saveFile: (opts) => call<string | null>('dialog.saveFile', opts)
@@ -71,6 +73,25 @@ export function createHostClient(pluginId: string): HostApi {
       mkdir: (path) => call('fs.mkdir', path)
     },
     app: appInfo,
+    // 主输入框操纵：纯本地状态（core/subinput），不经 IPC、不走 call()
+    subInput: {
+      setValue: (v) => {
+        setSubInputValue(v)
+        return Promise.resolve()
+      },
+      focus: () => {
+        subInputFocus()
+        return Promise.resolve()
+      },
+      blur: () => {
+        subInputBlur()
+        return Promise.resolve()
+      },
+      select: () => {
+        subInputSelect()
+        return Promise.resolve()
+      }
+    },
     apis: {
       invoke: (service, payload) => call(`apis.${service}`, payload),
       status: (service) => call(`apis.${service}.status`)

@@ -34,9 +34,15 @@ export type ClipboardRecord = ClipboardTextRecord | ClipboardImageRecord
 export interface ClipboardSettings {
   maxRecords: number
   clearOnExit: boolean
+  /** 敏感内容（密码/JWT/密钥）不入库；旧 kv.json 缺省视为 true */
+  skipSensitive: boolean
 }
 
-export const DEFAULT_SETTINGS: ClipboardSettings = { maxRecords: DEFAULT_MAX_RECORDS, clearOnExit: false }
+export const DEFAULT_SETTINGS: ClipboardSettings = {
+  maxRecords: DEFAULT_MAX_RECORDS,
+  clearOnExit: false,
+  skipSensitive: true
+}
 
 export function clampMaxRecords(n: number): number {
   if (!Number.isFinite(n)) return DEFAULT_MAX_RECORDS
@@ -111,6 +117,52 @@ export interface PersistedClipboardState {
 /** 清空标记键：渲染层只写此键（单调递增数值），backend 比对后统一落盘，避免双方直写 state 互相覆盖 */
 export const CLEAR_MARKER_KEY = 'clear-marker'
 
+/** 单条删除标记：与 CLEAR_MARKER_KEY 同款「渲染层只写标记、backend 采纳后统一落盘」协议 */
+export const REMOVE_MARKER_KEY = 'remove-marker'
+
+export interface RemoveMarker {
+  /** 产生时刻：backend 只采纳 ts 更新的标记（同 ts 不重复采纳 = 幂等） */
+  ts: number
+  ids: string[]
+}
+
+/** 防御式解析删除标记：结构不对返回 null（视为无删除） */
+export function parseRemoveMarker(raw: unknown): RemoveMarker | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const o = raw as Record<string, unknown>
+  if (typeof o.ts !== 'number' || !Number.isFinite(o.ts)) return null
+  if (!Array.isArray(o.ids)) return null
+  return { ts: o.ts, ids: o.ids.filter((x): x is string => typeof x === 'string') }
+}
+
+/** 采纳单条删除：与现存 id 取交集防标记膨胀；无变化返回原引用（可作是否落盘判据） */
+export function adoptRemoveRecords<T extends { id: string }>(records: readonly T[], ids: readonly string[]): T[] {
+  const dead = new Set(ids)
+  const kept = records.filter((r) => !dead.has(r.id))
+  return kept.length === records.length ? (records as T[]) : kept
+}
+
+/** 删除标记读-改-写的最小存储面：真实 HostApi.storage 与测试 fake 均可直接注入 */
+export interface RemoveMarkerStore {
+  get(key: string): Promise<unknown>
+  set(key: string, value: unknown): Promise<void>
+}
+
+// 模块级互斥队列：并发删除串行化读-改-写，防「同时读到旧 ids 后互相覆盖」丢 id（与 backend 置空标记的并发同理）
+let removeWriteChain: Promise<void> = Promise.resolve()
+let lastRemoveTs = 0
+
+/** 串行化追加删除 id：ts 严格单调（同刻多次删除不被 backend 幂等去重）；失败向上 reject 但不阻塞队列后续写入 */
+export function appendRemoveId(store: RemoveMarkerStore, id: string, now: number): Promise<void> {
+  const write = removeWriteChain.then(async () => {
+    const cur = parseRemoveMarker(await store.get(REMOVE_MARKER_KEY))
+    lastRemoveTs = Math.max(now, lastRemoveTs + 1, cur?.ts ?? 0)
+    await store.set(REMOVE_MARKER_KEY, { ts: lastRemoveTs, ids: [...(cur?.ids ?? []), id] })
+  })
+  removeWriteChain = write.catch(() => {})
+  return write
+}
+
 export function toPersisted(settings: ClipboardSettings, records: ClipboardRecord[]): PersistedClipboardState {
   return { v: 1, settings: { ...settings }, records: records.map((r) => ({ ...r })) }
 }
@@ -140,7 +192,9 @@ function parseSettings(raw: unknown): ClipboardSettings {
   const o = raw as Record<string, unknown>
   return {
     maxRecords: typeof o.maxRecords === 'number' ? clampMaxRecords(o.maxRecords) : DEFAULT_MAX_RECORDS,
-    clearOnExit: o.clearOnExit === true
+    clearOnExit: o.clearOnExit === true,
+    // 缺省回 true 兼容旧 kv.json（旧状态无此字段），仅显式 false 才关闭过滤
+    skipSensitive: o.skipSensitive !== false
   }
 }
 

@@ -80,6 +80,29 @@ watch(selected, async () => {
   listRef.value?.querySelector(`[data-i="${selected.value}"]`)?.scrollIntoView({ block: 'nearest' })
 })
 
+// initialCommand 消费（全局推荐条直达）：consumed 防热重载/二次进入重放
+let initialCommandConsumed = false
+watch(
+  () => props.initialCommand,
+  (cmd) => {
+    if (initialCommandConsumed || cmd === undefined || cmd === '') return
+    initialCommandConsumed = true
+    if (cmd === 'search') {
+      const pin = resolvePin(props.query, allSites.value)
+      if (pin) {
+        const openUrl = buildOpenUrl(pin.site, pin.term)
+        void open({ key: `pin:${pin.site.id}`, kind: 'search', site: pin.site, title: pin.site.name, subtitle: openUrl, openUrl })
+      }
+      return
+    }
+    if (cmd.startsWith('open-')) {
+      const site = allSites.value.find((s) => s.id === cmd.slice('open-'.length))
+      if (site) void open({ key: `cmd:${site.id}`, kind: 'site', site, title: site.name, subtitle: site.url, openUrl: site.url })
+    }
+  },
+  { immediate: true }
+)
+
 function badge(name: string): string {
   const ch = name.trim()[0] ?? '?'
   return /[a-z]/i.test(ch) ? ch.toUpperCase() : ch

@@ -21,6 +21,7 @@ import type {
 import { API_PERMISSIONS, HostApiError } from '@sdk/api'
 import type { PluginRegistry } from '../plugin-registry'
 import type { FloatWindowApi } from './float-window'
+import type { ScreenshotService } from './screenshot'
 import { ApiServiceError } from './api-center'
 
 /** 各能力面的最小实现接口（services 单例），主进程装配时注入，测试可 fake */
@@ -53,6 +54,7 @@ export interface ServiceBag {
     hide(): Promise<void>
     float: FloatWindowApi
   }
+  screenshot: ScreenshotService
   dialog: {
     openFile(pluginId: string, opts?: DialogOpenOptions): Promise<string[]>
     saveFile(pluginId: string, opts?: DialogSaveOptions): Promise<string | null>
@@ -138,6 +140,8 @@ export async function dispatchApi(
         return { ok: true, data: services.window.float.close(pluginId, str(payload[0])) }
       case 'window.float.closeAll':
         return { ok: true, data: services.window.float.closeAllForPlugin(pluginId) }
+      case 'screenshot.capture':
+        return { ok: true, data: await services.screenshot.capture() }
       case 'dialog.openFile':
         return { ok: true, data: await services.dialog.openFile(pluginId, obj(payload[0]) as DialogOpenOptions) }
       case 'dialog.saveFile':
@@ -260,6 +264,7 @@ export function createBackendContext(registry: PluginRegistry, services: Service
         closeAll: () => call('window.float.closeAll')
       }
     },
+    screenshot: { capture: () => call('screenshot.capture') },
     dialog: {
       openFile: (opts) => call<string[]>('dialog.openFile', opts),
       saveFile: (opts) => call<string | null>('dialog.saveFile', opts)

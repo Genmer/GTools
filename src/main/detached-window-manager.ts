@@ -1,4 +1,4 @@
-import type { ThemeName } from './settings-store'
+import type { ThemeName, TransparencySettings } from './settings-store'
 
 /** 独立窗口的最小面（Electron BrowserWindow 的可注入子集，测试传 fake，生产由 window.ts 适配） */
 export interface DetachedWindowLike {
@@ -9,7 +9,7 @@ export interface DetachedWindowLike {
   focus(): void
   setAlwaysOnTop(v: boolean, level?: 'floating'): void
   /** 窗口原生主题效果（vibrancy/亚克力/底色），与 webContents 的 CSS 主题事件并行下发 */
-  applyTheme(theme: ThemeName): void
+  applyTheme(theme: ThemeName, transparency: TransparencySettings): void
   close(): void
   destroy(): void
   isDestroyed(): boolean
@@ -89,11 +89,11 @@ export class DetachedWindowManager {
     for (const rec of [...this.byPlugin.values()]) this.destroyRecord(rec)
   }
 
-  applyThemeToAll(theme: ThemeName): void {
+  applyThemeToAll(theme: ThemeName, transparency: TransparencySettings): void {
     for (const rec of this.byPlugin.values()) {
       try {
-        rec.win.applyTheme(theme)
-        rec.win.webContents.send(DETACHED_THEME_EVENT, theme)
+        rec.win.applyTheme(theme, transparency)
+        rec.win.webContents.send(DETACHED_THEME_EVENT, { theme, transparency })
       } catch {
         // 窗口销毁竞态时抛错，跳过即可
       }
