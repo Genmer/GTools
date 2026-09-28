@@ -1,6 +1,6 @@
 import { BrowserWindow, nativeTheme, screen } from 'electron'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import type { GlassMaterial, ThemeName, TransparencySettings } from './settings-store'
+import type { ThemeName, TransparencySettings } from './settings-store'
 import { DEFAULT_TRANSPARENCY } from '@sdk/settings'
 import type { DetachedWindowLike, DetachedWindowOptions } from './detached-window-manager'
 
@@ -43,16 +43,14 @@ export function suspendBlurHide<T>(fn: () => Promise<T>): Promise<T> {
 const preloadPath = fileURLToPath(new URL('../preload/index.cjs', import.meta.url))
 
 /**
- * 透明+无模糊模式、以及玻璃主题的壁纸折射模式（win32 上 acrylic 材质是不透明窗）需要窗口透明标志。
- * 圆角取舍（四角无瑕疵 vs Win 拖缘拉伸）按窗口透明性分治：
- * - 透明窗：四角靠 CSS 圆角真正透空（任意半径、Win10 也圆），但 Win32 透明窗不可拖缘调整
- *   大小（Electron 官方约束 setResizable(true) 可能使透明窗失效）→ 主窗插件态拉伸在这类窗口上放弃。
- * - 不透明窗（默认 亚克力/实色）：内容满幅、圆角交 OS 裁剪（Win11 DWMWCP_ROUND / macOS 系统弧；
- *   Win10 无 DWM 圆角 API 降级方角），Win32 拖缘拉伸照常可用。
+ * 透明窗判定 + 圆角分治（详见上）：
+ * - darwin 恒透明窗：磨霜靠 CSS backdrop-filter 采样桌面，窗口必须透明；不透明窗叠 alpha 底色
+ *   会在显隐/缩放时闪烁（实测白闪根因）；且 macOS 没有 Win32「透明窗不可拖缘拉伸」约束
+ * - win32/linux：模糊关闭的透明档与玻璃清透档才要透明标志；带模糊走不透明窗+系统材质（DWM acrylic 只给不透明窗）
  */
-function wantsTransparentFlag(tx: TransparencySettings, theme: ThemeName, gm: GlassMaterial): boolean {
-  // 玻璃 acrylic 档恒不透明（材质即玻璃身景，透明档语义不适用），glass 的 wallpaper/clear 档恒透明
-  return (tx.enabled && !tx.blur && theme !== 'glass') || (theme === 'glass' && gm !== 'acrylic')
+function wantsTransparentFlag(tx: TransparencySettings, theme: ThemeName): boolean {
+  if (process.platform === 'darwin') return true
+  return (tx.enabled || theme === 'glass') && !tx.blur
 }
 
 // Electron 无 isTransparent()：创建时带透明标志的窗口记入此表，材质应用时判断能否直透桌面
@@ -77,7 +75,7 @@ function bindTransparentFlagSync(target: BrowserWindow): void {
 export function createSearchWindow(): BrowserWindow {
   if (win) return win
   const { workArea } = screen.getPrimaryDisplay()
-  const transparent = wantsTransparentFlag(currentTransparency, currentTheme, currentGlassMaterial)
+  const transparent = wantsTransparentFlag(currentTransparency, currentTheme)
   // 透明窗加投影边距；不透明窗维持内容尺寸（uiFixes：外圈投影为透明窗专属，不透明窗零改动）
   const width = transparent ? WINDOW_W : CONTENT_W
   const height = transparent ? WINDOW_H : CONTENT_H
@@ -100,18 +98,13 @@ export function createSearchWindow(): BrowserWindow {
       sandbox: true,
       spellcheck: false
       // 不设 backgroundThrottling:false——它会让隐藏窗口的 document 恒为 visible，
-      // visibilitychange（弹出抓帧+焦点重置等）全部失效；隐藏期节流对流取帧的影响实测可接受
+      // visibilitychange（弹出后焦点重置等）全部失效
     }
   })
   if (transparent) transparentWindows.add(win)
 
   applyThemeToBrowserWindow(win, currentTheme)
   bindTransparentFlagSync(win)
-  // show:false 窗口首次显隐前页面 visibilityState 会卡 visible（Electron 怪癖，visibilitychange 不可靠），
-  // 玻璃快照流的养流/抓帧联动改由主进程窗口事件驱动（永远可靠）；closed 置空 win 不影响闭包内常量引用
-  const liveWin = win
-  win.on('show', () => liveWin.webContents.send('host:win-visibility', true))
-  win.on('hide', () => liveWin.webContents.send('host:win-visibility', false))
   win.on('blur', () => {
     // macOS 刚 show() 瞬间可能有一次假 blur，200ms 内忽略
     if (Date.now() - lastShownAt < 200) return
@@ -190,38 +183,28 @@ export function toggleSearchWindow(): void {
   else showSearchWindow()
 }
 
-/** 当前主题/透明/玻璃材质的模块内镜像：独立窗口晚于设置切换创建时（detach），创建参数需读到最新值 */
+/** 当前主题/透明设置的模块内镜像：独立窗口晚于设置切换创建时（detach），创建参数需读到最新值 */
 let currentTheme: ThemeName = 'light'
 let currentTransparency: TransparencySettings = { ...DEFAULT_TRANSPARENCY }
-let currentGlassMaterial: GlassMaterial = 'wallpaper'
 
 /**
- * 主题×透明联动单个窗口原生效果（主窗/独立窗共用）：
- * - 透明关：不透明主题底色
- * - 透明开+实时模糊：Win11 亚克力 / macOS vibrancy（不需要窗口透明标志，不影响拖缘调整大小）
- * - 透明开+模糊关：透明标志窗口直透桌面（材质保持默认 auto，绝不调 setBackgroundMaterial——
- *   fresh 透明窗设 'none' 实测白板且 'auto' 救不回）；运行时才关模糊的窗口没有透明标志
- *   （Windows 透明窗口不可拖缘调整大小，无法事后补），回退主题底色
- * - glass 壁纸折射模式：恒透明窗+不设任何原生材质，折射源是页内壁纸层（原生模糊只会盖掉折射，见 themes.css）
- * - glass 亚克力模式：不透明窗+系统 acrylic 实时身景（win32 实时背后的唯一安全路，透明窗+防捕获
- *   在 hide/show 循环下 DWM 整窗渲黑），材质应用与 light 的透明+模糊档完全同参
+ * 主题×透明联动单个窗口原生效果（主窗/独立窗共用）——不截图不读壁纸：
+ * - 磨霜：win32 不透明窗走 DWM acrylic；macOS 不用 vibrancy（整窗矩形磨霜会越出卡片圆角边距，
+ *   即实测的「外圈玻璃块」），霜面由渲染层 .app/.detached 的 CSS backdrop-filter 实时采样桌面承担
+ * - 模糊关：透明窗直透桌面（clear 效果）；win32 不透明档回退主题底色
  */
-export function applyThemeToBrowserWindow(
-  target: BrowserWindow,
-  theme: ThemeName,
-  tx: TransparencySettings = currentTransparency,
-  gm: GlassMaterial = currentGlassMaterial
-): void {
-  const opaque = theme === 'glass' ? '#e9eef5' : theme === 'dark' ? '#1e1e1e' : '#f2f3f5'
+export function applyThemeToBrowserWindow(target: BrowserWindow, theme: ThemeName, tx: TransparencySettings = currentTransparency): void {
   syncWindowTransparentFlag(target)
-  // 原生实时模糊：light/dark 的「透明+模糊开」档，或 glass 的亚克力模式
-  const acrylicGlass = theme === 'glass' && gm === 'acrylic'
-  const nativeBlur = (theme !== 'glass' && tx.enabled && tx.blur) || acrylicGlass
+  // 原生实时模糊：透明开+模糊，或玻璃磨砂档（玻璃强制视为透明开）
+  const nativeBlur = tx.blur && (tx.enabled || theme === 'glass')
   const transparent = transparentWindows.has(target)
   try {
     if (process.platform === 'darwin') {
-      target.setVibrancy(nativeBlur && !transparent ? 'under-window' : null)
-      target.setBackgroundColor(nativeBlur || transparent ? '#00000000' : opaque)
+      // 不设 vibrancy：它按整窗矩形生效，会把磨砂延伸到卡片外的透明边距（终审实测的外圈玻璃块）；
+      // 磨砂全由 CSS backdrop-filter 在卡片上实时采样桌面承担，blur 开关走 data-blur
+      target.setVibrancy(null)
+      // darwin 恒透明窗：alpha 底色让桌面从页面半透明涂层下透出
+      target.setBackgroundColor('#00000000')
     } else {
       try {
         // Win11 acrylic 只给不透明窗；DWM tint 亮度只跟系统明暗（与 nativeTheme.themeSource 无关）
@@ -229,17 +212,16 @@ export function applyThemeToBrowserWindow(
       } catch {
         // 旧版 Windows 无此 API，忽略
       }
-      target.setBackgroundColor(transparent || (tx.enabled && !tx.blur && !nativeBlur) ? '#00000000' : opaque)
+      target.setBackgroundColor(transparent ? '#00000000' : theme === 'dark' ? '#1e1e1e' : '#f2f3f5')
     }
   } catch {
     // 窗口效果失败不阻塞主题切换（CSS 变量仍生效）
   }
 }
 
-export function applyThemeToWindow(theme: ThemeName, transparency?: TransparencySettings, glassMaterial?: GlassMaterial): void {
+export function applyThemeToWindow(theme: ThemeName, transparency?: TransparencySettings): void {
   currentTheme = theme
   if (transparency) currentTransparency = { ...transparency }
-  if (glassMaterial) currentGlassMaterial = glassMaterial
   // themeSource 只影响渲染层原生控件的明暗感知；DWM 亚克力 tint 只跟系统明暗，别指望在此控制霜色
   try {
     nativeTheme.themeSource = theme === 'dark' ? 'dark' : 'light'
@@ -247,16 +229,15 @@ export function applyThemeToWindow(theme: ThemeName, transparency?: Transparency
     // 设置失败不影响 CSS 主题
   }
   if (!win) return
-  // 透明↔不透明类别跟窗口创建时定死（Win 透明窗不可事后补标志）：跨类别切换只能重建窗口。
-  // 玻璃在 wallpaper(透明)↔acrylic(不透明) 间切换、或玻璃×透明档组合变化时走此路径
-  if (transparentWindows.has(win) !== wantsTransparentFlag(currentTransparency, currentTheme, currentGlassMaterial)) {
+  // 透明↔不透明类别跟窗口创建时定死（Win 透明窗不可事后补标志）：跨类别切换只能重建窗口（darwin 恒透明不会走到）
+  if (transparentWindows.has(win) !== wantsTransparentFlag(currentTransparency, currentTheme)) {
     recreateSearchWindow()
     return
   }
   applyThemeToBrowserWindow(win, theme)
 }
 
-/** 销毁并按最新镜像重建主窗；原可见则复显（设置页切玻璃材质的运行时通道） */
+/** 销毁并按最新镜像重建主窗；原可见则复显（win32 透明类别切换专用，darwin 恒透明不会走到） */
 function recreateSearchWindow(): void {
   if (!win) return
   const wasVisible = win.isVisible()
@@ -278,7 +259,7 @@ export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindo
     show: false,
     minWidth: 360,
     minHeight: 240,
-    transparent: wantsTransparentFlag(currentTransparency, currentTheme, currentGlassMaterial),
+    transparent: wantsTransparentFlag(currentTransparency, currentTheme),
     backgroundColor: '#00000000',
     webPreferences: {
       preload: preloadPath,
@@ -288,7 +269,7 @@ export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindo
       spellcheck: false
     }
   })
-  if (wantsTransparentFlag(currentTransparency, currentTheme, currentGlassMaterial)) transparentWindows.add(w)
+  if (wantsTransparentFlag(currentTransparency, currentTheme)) transparentWindows.add(w)
   if (opts.alwaysOnTop) w.setAlwaysOnTop(true, 'floating')
   applyThemeToBrowserWindow(w, currentTheme)
   bindTransparentFlagSync(w)

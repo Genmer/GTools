@@ -6,11 +6,8 @@ const allowedEventChannels = (channel: string): boolean =>
   channel === 'plugin-state-changed' ||
   channel === 'api-services-changed' ||
   channel === 'host:open-settings' ||
-  channel === 'host:win-visibility' ||
   channel === 'command-hotkey' ||
   channel === 'hotkey-captured' ||
-  channel === 'wallpaper:changed' ||
-  channel === 'glassbackdrop:changed' ||
   channel.startsWith('plugin-event:') ||
   channel.startsWith('detached:')
 

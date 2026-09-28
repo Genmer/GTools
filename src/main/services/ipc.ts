@@ -1,6 +1,4 @@
-import { ipcMain, dialog as electronDialog, app, powerMonitor, screen, desktopCapturer } from 'electron'
-import type { BrowserWindow } from 'electron'
-import { execFile } from 'node:child_process'
+import { ipcMain, dialog as electronDialog, app } from 'electron'
 import { homedir } from 'node:os'
 import * as nodeFs from 'node:fs/promises'
 import { dirname, join, sep as pathSep } from 'node:path'
@@ -13,9 +11,6 @@ import { dispatchApi } from './dispatch'
 import type { ApiCenterService, ProviderForm } from './api-center'
 import type { NativeAppsService } from './native-apps'
 import type { DetachedWindowManager } from '../detached-window-manager'
-import { createWallpaperService, type WallpaperFs, type WallpaperStyleName } from './wallpaper'
-import { createGlassCapability, removeLensProbeScript } from './glass-capability'
-import { createGlassBackdropService, type BackdropImageLike } from './glass-backdrop'
 import {
   applyHideOnBlur,
   applyThemeToWindow,
@@ -37,6 +32,7 @@ import {
   serializeBackup,
   tokenizePathValues
 } from './backup'
+import { createUpdater } from './updater'
 
 export interface HostInitResult {
   version: string
@@ -80,20 +76,6 @@ async function prunePreImportFiles(dir: string): Promise<void> {
 
 // warnings 只在非空时附带：旧消费方按字段存在性判断，空数组也会被误判为「有警告」
 type HostResult<T = unknown> = { ok: true; data: T; warnings?: string[] } | { ok: false; error: string }
-
-/** 下发给渲染层的壁纸对齐载荷；image=false 时渲染层复用上次 dataUrl 只更新几何 */
-export interface WallpaperPush {
-  dataUrl: string | null
-  image: boolean
-  style: WallpaperStyleName
-  dx: number
-  dy: number
-  dpr: number
-  imgW: number
-  imgH: number
-  dispW: number
-  dispH: number
-}
 
 function pluginsSnapshot(loader: PluginLoader): { manifest: PluginManifest; enabled: boolean }[] {
   return loader.registry.all().map((e) => ({ manifest: e.manifest, enabled: e.enabled }))
@@ -160,213 +142,13 @@ export function setupIpc(deps: {
 }): void {
   const { loader, settings, services, apiCenter } = deps
 
-  // ---- 玻璃折射壁纸桥：backdrop-filter 够不到 DWM 后面的桌面，壁纸原图必须进页内供位移折射采样 ----
-  const wallpaper = createWallpaperService({
-    platform: process.platform,
-    exec: (file, args) =>
-      new Promise((resolve, reject) => {
-        execFile(file, args, { encoding: 'utf8', windowsHide: true, timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) =>
-          err ? reject(err) : resolve({ stdout: String(stdout) })
-        )
-      }),
-    fs: nodeFs as unknown as WallpaperFs,
-    appData: process.env.APPDATA
+  // 更新检测：fetch/openExternal/version/platform 全走 ServiceBag 注入面（测试可 fake）；闭包缓存随 setupIpc 生命周期
+  const updater = createUpdater({
+    fetch: services.net.fetch,
+    version: services.app.version,
+    platform: services.app.platform,
+    arch: services.app.arch
   })
-
-  // 上次已下发的壁纸键：未变更的推送不带 dataUrl（原图 0.4-2MB，仅变更时传一次）
-  let sentImageKey: string | null = null
-
-  async function buildWallpaperPush(includeImage: boolean): Promise<WallpaperPush | null> {
-    const w = getSearchWindow()
-    if (!w || w.isDestroyed()) return null
-    const bounds = w.getBounds()
-    const display = screen.getDisplayMatching(bounds)
-    const snap = await wallpaper.snapshot().catch(() => null)
-    const key = snap ? `${snap.path}:${snap.mtimeMs}:${snap.style}` : null
-    const pushImage = includeImage || key !== sentImageKey
-    sentImageKey = key
-    return {
-      dataUrl: pushImage ? snap?.dataUrl ?? null : null,
-      image: pushImage,
-      style: snap?.style ?? 'fill',
-      dx: Math.round(bounds.x - display.bounds.x),
-      dy: Math.round(bounds.y - display.bounds.y),
-      dpr: display.scaleFactor,
-      imgW: snap?.imgW ?? 0,
-      imgH: snap?.imgH ?? 0,
-      dispW: display.bounds.width,
-      dispH: display.bounds.height
-    }
-  }
-
-  const pushWallpaper = async (includeImage: boolean): Promise<void> => {
-    if (!wallMode()) return // 玻璃壁纸桥只服务 wallpaper 折射档；acrylic/clear 的身景不经页面
-    const payload = await buildWallpaperPush(includeImage)
-    if (payload) broadcast('wallpaper:changed', payload)
-  }
-
-  // ---- 玻璃实时背景：mac 走主进程抓帧（contentProtection 让捕获绕开自身窗），壁纸桥降级为兜底 ----
-  // win32 硬关主进程捕获：透明窗 + WDA_EXCLUDEFROMCAPTURE 一经 hide/show 循环 DWM 即整窗渲黑（Win11 22631 实证矩阵，
-  // 任何摘/戴时序、nudge、opacity/offscreen/minimize/phantom 隐藏均不可逆），且 desktopCapturer 单调 ~350ms 太慢
-  // → win32 壁纸模式改走渲染层快照流（隐藏期养 getUserMedia 流、弹窗瞬间取帧，见 glassbackdrop:snapshot-stream）；
-  // 壁纸桥只读壁纸文件不碰捕获，与防捕获门控无关（0.0.16 曾误绑致渐变兜底外露）
-  const canProtectScreen = process.platform !== 'win32'
-  // 页内折射源（壁纸桥/快照流/胶囊探针）只服务 wallpaper 档；acrylic=系统材质身景，clear=窗口直透桌面
-  const wallMode = (): boolean => settings.settings.theme === 'glass' && settings.settings.glassMaterial === 'wallpaper'
-  const canCapture = (): boolean => canProtectScreen && wallMode()
-  const glassBackdrop = createGlassBackdropService({
-    isGlass: canCapture,
-    isWinVisible: () => {
-      const w = getSearchWindow()
-      return !!w && !w.isDestroyed() && w.isVisible()
-    },
-    snapshotContext: () => {
-      const w = getSearchWindow()
-      if (!w || w.isDestroyed()) return null
-      const winBounds = w.getBounds()
-      const display = screen.getDisplayMatching(winBounds)
-      return {
-        winBounds,
-        displayBounds: display.bounds,
-        scaleFactor: display.scaleFactor,
-        dipSize: { width: winBounds.width, height: winBounds.height },
-        captureSize: {
-          width: Math.round(display.bounds.width * display.scaleFactor),
-          height: Math.round(display.bounds.height * display.scaleFactor)
-        }
-      }
-    },
-    captureScreen: async (size) => {
-      try {
-        const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: size })
-        return (sources[0]?.thumbnail as BackdropImageLike | undefined) ?? null
-      } catch {
-        return null
-      }
-    },
-    encode: (img, rect, dip) => {
-      try {
-        let target = img.crop(rect)
-        const s = target.getSize()
-        if (s.width > dip.width || s.height > dip.height) target = target.resize({ width: dip.width, height: dip.height })
-        const jpeg = target.toJPEG(85)
-        if (jpeg.length === 0) return null
-        return { dataUrl: `data:image/jpeg;base64,${jpeg.toString('base64')}`, width: dip.width, height: dip.height }
-      } catch {
-        return null
-      }
-    },
-    broadcast: (p) => broadcast('glassbackdrop:changed', p)
-  })
-
-  // win32 快照流的屏幕源 id 缓存：getSources 冷调 ~400ms，源 id 会话内稳定；显示器拓扑变化时作废
-  let snapshotSourceId: string | null = null
-
-  /** 玻璃主题切换/窗口重建的同步点：防捕获开关 + 立即抓一帧（离场/非折射档广播 null 回退）。
-   *  win32 壁纸档的快照帧由渲染层自管（host:win-visibility 时取流），show 途经此处不许广播清帧砸掉它 */
-  const syncGlassCaptureMode = (): void => {
-    const w = getSearchWindow()
-    const protect = canCapture()
-    if (w && !w.isDestroyed()) w.setContentProtection(protect)
-    if (protect) void glassBackdrop.capture(true)
-    else if (!wallMode()) glassBackdrop.clear()
-  }
-
-  // ---- 折射能力分级：GPU 合成预检 + 启动像素探针，不过即 L1（纯 blur），崩溃过一次本会话永久 L1 ----
-  const runInPage = (w: BrowserWindow, script: string): Promise<string | null> =>
-    w.webContents.executeJavaScript(script, true).catch(() => null)
-  const glassCap = createGlassCapability({
-    getGpuCompositing: () => {
-      try {
-        return app.getGPUFeatureStatus()['gpu_compositing']
-      } catch {
-        return undefined
-      }
-    },
-    executeInPage: (w, script) => runInPage(w as BrowserWindow, script),
-    removeInPage: (w) => runInPage(w as BrowserWindow, removeLensProbeScript()),
-    captureRect: async (w, rect, dpr) => {
-      try {
-        const img = await (w as BrowserWindow).webContents.capturePage()
-        const cropped = img.crop({
-          x: Math.round(rect.x * dpr),
-          y: Math.round(rect.y * dpr),
-          width: Math.max(1, Math.round(rect.width * dpr)),
-          height: Math.max(1, Math.round(rect.height * dpr))
-        })
-        const size = cropped.getSize()
-        if (size.width <= 0 || size.height <= 0) return null
-        return { width: size.width, height: size.height, data: new Uint8Array(cropped.toBitmap()) }
-      } catch {
-        return null
-      }
-    },
-    applyLensFlag: (w, on) => {
-      void (w as BrowserWindow).webContents
-        .executeJavaScript(on ? "document.documentElement.dataset.lens='1';undefined" : 'delete document.documentElement.dataset.lens;undefined', true)
-        .catch(() => {})
-    },
-    delay: (ms) => new Promise((r) => setTimeout(r, ms)),
-    log: (msg) => console.info(`[glass] ${msg}`)
-  })
-
-  const runLensProbe = (): void => {
-    const w = getSearchWindow()
-    // capturePage 对隐藏窗返回空图，探针只在窗口可见时跑；不可见等下次 show 再试
-    if (!w || w.isDestroyed() || !w.isVisible()) return
-    if (settings.settings.theme !== 'glass' || settings.settings.glassMaterial !== 'wallpaper') return
-    void glassCap.probe(w)
-  }
-
-  // 主窗事件接线（bootstrap 保证 setupIpc 前已建窗）：移动节流推几何、焦点查壁纸变更、崩溃降 L1
-  const mainWin = getSearchWindow()
-  if (mainWin) {
-    let moveTimer: ReturnType<typeof setTimeout> | null = null
-    mainWin.on('move', () => {
-      if (moveTimer) return
-      moveTimer = setTimeout(() => {
-        moveTimer = null
-        void pushWallpaper(false)
-        void glassBackdrop.capture()
-      }, 200)
-    })
-    mainWin.on('resize', () => {
-      void glassBackdrop.capture()
-    })
-    mainWin.on('focus', () => {
-      void wallpaper.refreshIfChanged().then((changed) => {
-        if (changed) void pushWallpaper(false)
-      })
-    })
-    mainWin.on('show', () => {
-      runLensProbe()
-      // 窗口可能在隐藏期被移动/主题被切：show 时重同步防捕获并抓一帧新背景
-      syncGlassCaptureMode()
-    })
-    mainWin.webContents.on('dom-ready', () => {
-      // 重载/崩溃恢复后页内 --wp-*/lens 标志全丢：重推壁纸并恢复折射档
-      void pushWallpaper(true)
-      if (glassCap.state().lensActive) glassCap.applyFlag(mainWin, true)
-      void glassBackdrop.capture(true)
-    })
-    mainWin.webContents.on('render-process-gone', (_e, details) => {
-      if (details.reason !== 'clean-exit' && glassCap.handleRenderProcessGone()) void mainWin.webContents.reload()
-    })
-  }
-  // 背景内容会自己变化（视频/动画）：玻璃可见期低频刷新（setupIpc 与应用同生命周期，不需清理）
-  setInterval(() => {
-    if (settings.settings.theme === 'glass') void glassBackdrop.capture()
-  }, 2500)
-  screen.on('display-metrics-changed', () => {
-    snapshotSourceId = null
-    void pushWallpaper(false)
-    void glassBackdrop.capture(true)
-  })
-  powerMonitor.on('resume', () => {
-    void pushWallpaper(true)
-  })
-  // GPU 状态就绪晚于 whenReady（过早读误报 electron#17641），延 1.5s 再探
-  setTimeout(runLensProbe, 1500)
 
   // 指令热键触发：弹主窗 → 通知渲染层进命令态 → 启 backend（对齐 plugin:enter 语义，backend 结果不阻塞触发）
   const fireCommandHotkey = (pluginId: string, commandId: string): void => {
@@ -518,9 +300,6 @@ export function setupIpc(deps: {
     const nextSettings = await settings.update({
       theme: backup.settings.theme,
       transparency: backup.settings.transparency,
-      // 旧备份无此字段：sanitize 丢弃 undefined，merge 保留现值（外观偏好随备份走）；导入即视为用户显式选择
-      glassMaterial: backup.settings.glassMaterial,
-      glassMaterialSource: backup.settings.glassMaterial === undefined ? undefined : 'user',
       hotkey: backup.settings.hotkey,
       disabledPlugins: nextDisabled
     })
@@ -554,9 +333,8 @@ export function setupIpc(deps: {
       await apiCenter.replaceAll(backup.apiServices)
     }
 
-    applyThemeToWindow(nextSettings.theme, nextSettings.transparency, nextSettings.glassMaterial)
+    applyThemeToWindow(nextSettings.theme, nextSettings.transparency)
     deps.detached.applyThemeToAll(nextSettings.theme, nextSettings.transparency)
-    syncGlassCaptureMode()
     broadcast('settings-changed', nextSettings)
     broadcast('plugin-state-changed', { plugins: pluginsSnapshot(loader) })
     // 常驻 backend 内存态（如剪贴板历史）不会自动重载导入的数据
@@ -587,8 +365,6 @@ export function setupIpc(deps: {
           const p = (req.payload ?? {}) as {
             theme?: ThemeName
             transparency?: Partial<AppSettings['transparency']>
-            glassMaterial?: AppSettings['glassMaterial']
-            glassMaterialSource?: 'auto' | 'user'
             hotkey?: Partial<AppSettings['hotkey']>
             launchAtLogin?: boolean
             clipboardSuggest?: boolean
@@ -626,18 +402,10 @@ export function setupIpc(deps: {
               return { ok: false, error: `开机自启设置失败：${err instanceof Error ? err.message : String(err)}` }
             }
           }
-          // 显式切换材质即固化 user 标记：load 的平台默认校正（0.0.18 acrylic 误写回滚）不再覆盖用户选择
-          if (p.glassMaterial) p.glassMaterialSource = 'user'
           const next = await settings.update(p)
-          if (p.theme || p.transparency || p.glassMaterial) {
-            applyThemeToWindow(next.theme, next.transparency, next.glassMaterial)
+          if (p.theme || p.transparency) {
+            applyThemeToWindow(next.theme, next.transparency)
             deps.detached.applyThemeToAll(next.theme, next.transparency)
-            // 运行时切进玻璃折射档：立即供壁纸 + 补探针（启动时非 glass 没探过）；acrylic/clear 身景不经页面
-            if (next.theme === 'glass' && next.glassMaterial === 'wallpaper') {
-              void pushWallpaper(true)
-              runLensProbe()
-            }
-            syncGlassCaptureMode()
           }
           if (typeof p.hideOnBlur === 'boolean') {
             applyHideOnBlur(next.hideOnBlur)
@@ -723,10 +491,11 @@ export function setupIpc(deps: {
         }
         case 'window:set-height': {
           if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
-          // 空态高度联动（§1.5）：主进程夹紧范围防越界，锚定左上角；下限 220 容下贴底收尾的折叠空态
+          // 空态高度联动（§1.5）：主进程夹紧范围防越界，锚定左上角；下限 120 仅防退化报高
+          // （0/NaN 级异常），窗口贴内容收口——折叠空态自然高度随渲染段数可低至 ~170，垫高会在底部留空带
           const h = (req.payload as { height?: unknown } | null)?.height
           if (typeof h !== 'number' || !Number.isFinite(h)) return { ok: false, error: 'height 必须是数字' }
-          setSearchWindowHeight(Math.min(720, Math.max(220, Math.round(h))))
+          setSearchWindowHeight(Math.min(720, Math.max(120, Math.round(h))))
           return { ok: true, data: null }
         }
         case 'plugin:enter': {
@@ -810,42 +579,26 @@ export function setupIpc(deps: {
           if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
           return { ok: true, data: await services.clipboard.readText() }
         }
-        // 玻璃折射壁纸（宿主 UI 专用，glass 壁纸模式消费）：原图 dataURL + 显示器对齐几何
-        case 'wallpaper:get': {
-          if (!isSearchWindowSender(e) || !wallMode()) return { ok: false, error: '仅主搜索窗口可调用' }
-          const payload = await buildWallpaperPush(true)
-          return payload ? { ok: true, data: payload } : { ok: false, error: '主窗口不存在' }
+        // 手动检查更新：不自动外联，只在用户点击时请求 GitHub releases/latest
+        case 'update:check':
+          return await updater.check()
+        case 'update:open': {
+          // 渲染层只传意图不传 URL，目标地址由主进程闭包缓存 + 白名单后交 openExternal
+          const target = (req.payload as { target?: unknown } | null)?.target
+          if (target !== 'repo' && target !== 'release' && target !== 'download') {
+            return { ok: false, error: 'target 必须是 repo/release/download' }
+          }
+          const r = updater.open(target)
+          if (!r.ok) return { ok: false, error: r.error }
+          await services.shell.openExternal(r.url)
+          return { ok: true, data: null }
         }
-        // 玻璃实时背景（宿主 UI 专用）：最近一帧窗口背后屏幕捕获；非玻璃/尚无帧回 dataUrl:null（渲染层回退壁纸）
-        case 'glassbackdrop:get': {
+        // 重启应用（换常驻 backend 内存态的唯一入口）：仅主搜索窗口可调，防其它子窗拉杀主进程
+        case 'app:relaunch': {
           if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
-          const cur = glassBackdrop.current()
-          return { ok: true, data: settings.settings.theme === 'glass' && cur ? cur : { dataUrl: null } }
-        }
-        // win32 玻璃壁纸快照流（宿主 UI 专用）：渲染层隐藏期养 getUserMedia 流、弹窗瞬间自取当前帧——帧摄于窗口
-        // 不可见期天然无自摄入套娃，全程无防捕获标志/无主进程截屏循环，躲开透明窗+WDA+显隐循环的 DWM 渲黑矩阵；
-        // 主进程只发屏幕源 id 与窗口几何，帧的裁剪/编码/铺设在渲染层完成
-        case 'glassbackdrop:snapshot-stream': {
-          if (!isSearchWindowSender(e) || process.platform !== 'win32' || !wallMode()) {
-            return { ok: false, error: '仅 win32 玻璃壁纸模式可用' }
-          }
-          const w = getSearchWindow()
-          if (!w || w.isDestroyed()) return { ok: false, error: '主窗口未就绪' }
-          if (!snapshotSourceId) {
-            try {
-              const sources = await desktopCapturer.getSources({ types: ['screen'] })
-              snapshotSourceId = sources[0]?.id ?? null
-            } catch {
-              snapshotSourceId = null
-            }
-          }
-          if (!snapshotSourceId) return { ok: false, error: '无屏幕捕获源' }
-          const winBounds = w.getBounds()
-          const display = screen.getDisplayMatching(winBounds)
-          return {
-            ok: true,
-            data: { sourceId: snapshotSourceId, winBounds, displayBounds: display.bounds, scaleFactor: display.scaleFactor }
-          }
+          app.relaunch()
+          app.exit(0)
+          return { ok: true, data: null }
         }
         default:
           return { ok: false, error: `未知宿主 api：${String(req?.api)}` }

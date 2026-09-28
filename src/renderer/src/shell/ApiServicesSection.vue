@@ -292,13 +292,18 @@ async function test(p?: ApiProviderView): Promise<void> {
 </template>
 
 <style scoped>
+/* 与 SettingsPage 的 .group 分组卡同款（含 h3/row/btn 系列同款）：两处样式手工同步，改视觉要一起改 */
 section {
   width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-4);
 }
-/* 与 SettingsPage 的 section 标题同款：无此规则 h3 会落 UA 默认（黑字大号） */
 h3 {
-  margin: 0 0 10px;
-  font-size: 13px;
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-title);
   color: var(--fg-dim);
   font-weight: 600;
 }
@@ -327,11 +332,11 @@ h3 {
   background: var(--fg-dim);
 }
 .name {
-  font-size: 13px;
+  font-size: var(--fs-title);
 }
 .dim {
   color: var(--fg-dim);
-  font-size: 12px;
+  font-size: var(--fs-sub);
 }
 .panel {
   border: 1px solid var(--border);
@@ -394,12 +399,13 @@ select {
   gap: 10px;
 }
 .btn {
-  background: var(--bg-raised);
+  /* 卡内按钮取 --bg 与卡底 --bg-raised 拉开层次（与 SettingsPage 同款） */
+  background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   padding: 5px 12px;
-  font-size: 13px;
+  font-size: var(--fs-title);
   cursor: pointer;
   white-space: nowrap;
 }

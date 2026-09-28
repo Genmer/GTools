@@ -96,12 +96,8 @@ async function bootstrap(): Promise<void> {
   await loader.load(settingsStore.settings.disabledPlugins)
 
   applyHideOnBlur(settingsStore.settings.hideOnBlur)
-  // 先镜像主题/透明/玻璃材质再建窗（透明标志/材质依赖当前设置），建窗后自身完成材质应用
-  applyThemeToWindow(
-    settingsStore.settings.theme,
-    settingsStore.settings.transparency,
-    settingsStore.settings.glassMaterial
-  )
+  // 先镜像主题/透明再建窗（透明标志/材质依赖当前设置），建窗后自身完成材质应用
+  applyThemeToWindow(settingsStore.settings.theme, settingsStore.settings.transparency)
   createSearchWindow()
 
   // 登录项失败不阻断主功能（区别于快捷键失败弹通知），只留日志

@@ -7,29 +7,6 @@
   </head>
   <body>
     <div id="app"></div>
-    <!-- 玻璃折射滤镜：必须解析期静态创建（Chromium 44 实测：脚本 createElementNS 创建的 <filter>
-         不能作 backdrop-filter url() 引用目标，渲染空白）；位移图与几何由 App.vue 运行时注入，
-         探针宿主由主进程按需注入（glass-capability.ts）。
-         清透档的 blur/saturate/brightness 并入滤镜本体（feGaussianBlur stdDev=blur半径/2）：
-         backdrop-filter 里 url() 与 filter 函数混写实测整条失效，只能裸 url() 引用 -->
-    <svg width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
-      <filter id="gt-lens-pill" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB" x="0" y="0" width="1" height="1">
-        <feImage id="gt-lens-map" width="1" height="1" result="m" />
-        <feDisplacementMap id="gt-lens-dm" in="SourceGraphic" in2="m" scale="16" xChannelSelector="R" yChannelSelector="G" />
-        <feGaussianBlur stdDeviation="0.75" />
-        <feColorMatrix type="saturate" values="1.6" />
-        <feComponentTransfer>
-          <feFuncR type="linear" slope="1.05" />
-          <feFuncG type="linear" slope="1.05" />
-          <feFuncB type="linear" slope="1.05" />
-        </feComponentTransfer>
-      </filter>
-      <filter id="gt-lens-probe-f" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB" x="0" y="0" width="64" height="64">
-        <feImage x="0" y="0" width="4" height="4" result="m" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAFklEQVR4nGP8z8DAwMDAxIAEYwGjAgBhygLBZA3QtgAAAABJRU5ErkJggg==" />
-        <feDisplacementMap in="SourceGraphic" in2="m" scale="16" xChannelSelector="R" yChannelSelector="G" />
-        <feColorMatrix type="matrix" values="0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 1 0" />
-      </filter>
-    </svg>
     <script type="module" src="/src/app.ts"></script>
   </body>
 </html>

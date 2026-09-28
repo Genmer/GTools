@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { toElectronAccelerator } from '@sdk/shortcut-rules'
 import {
   registerHotkey,
   rebindHotkey,
@@ -41,11 +42,13 @@ describe('suspendHotkeys / resumeHotkeys（热键录入期挂起）', () => {
 
     const gsS = makeGs()
     expect(suspendHotkeys(gsS)).toBe(true)
-    expect(gsS.unregister.mock.calls.map((c) => c[0]).sort()).toEqual(['Alt+T', 'Ctrl+Alt+Space'])
+    // 注册态存的是 electron 形态（darwin 上 Ctrl→Control），期望值同口径换算
+    const main = toElectronAccelerator('Ctrl+Alt+Space', process.platform)
+    expect(gsS.unregister.mock.calls.map((c) => c[0]).sort()).toEqual(['Alt+T', main])
 
     const gsR = makeGs()
     expect(resumeHotkeys(gsR)).toBe(true)
-    expect(gsR.register.mock.calls.map((c) => c[0]).sort()).toEqual(['Alt+T', 'Ctrl+Alt+Space'])
+    expect(gsR.register.mock.calls.map((c) => c[0]).sort()).toEqual(['Alt+T', main])
 
     unregisterAllHotkeys(gs1)
   })

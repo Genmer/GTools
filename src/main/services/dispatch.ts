@@ -69,7 +69,7 @@ export interface ServiceBag {
     list(pluginId: string, dir: string, opts?: FsListOptions): Promise<FsEntry[]>
     mkdir(pluginId: string, path: string): Promise<void>
   }
-  app: { platform: string; version: string }
+  app: { platform: string; version: string; arch: string }
   apis: {
     translate(req: TranslateRequest): Promise<TranslateResult>
     status(service: ApiServiceId): ApiServiceStatus

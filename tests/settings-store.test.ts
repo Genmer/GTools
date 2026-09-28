@@ -96,44 +96,13 @@ describe('settings-store', () => {
     expect(store.settings.transparency).toEqual({ enabled: false, opacity: 30, blur: true })
   })
 
-  it('glassMaterial：默认 wallpaper，合法三态收录（wallpaper/acrylic/clear），坏值丢弃保留现值，旧档缺字段走默认', async () => {
-    const fs = fakeFs()
+  it('旧档含已废弃的 glassMaterial 字段：加载忽略不报错，其余字段照常', async () => {
+    const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'glass', glassMaterial: 'acrylic', hideOnBlur: false }) })
     const store = new SettingsStore(dir, fs)
     await store.load()
-    expect(store.settings.glassMaterial).toBe('wallpaper')
-    await store.update({ glassMaterial: 'acrylic' })
-    expect(store.settings.glassMaterial).toBe('acrylic')
-    await store.update({ glassMaterial: 'clear' })
-    expect(store.settings.glassMaterial).toBe('clear')
-    await store.update({ glassMaterial: 'frosted' as unknown as 'acrylic' })
-    expect(store.settings.glassMaterial).toBe('clear') // 坏值丢弃
-    // 旧档缺 glassMaterial 字段：merge 回退默认，其余字段不受牵连
-    const fs2 = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'glass', hideOnBlur: false }) })
-    const store2 = new SettingsStore(dir, fs2)
-    await store2.load()
-    expect(store2.settings.glassMaterial).toBe('wallpaper')
-    expect(store2.settings.hideOnBlur).toBe(false)
-  })
-
-  it('glassMaterial 校正：0.0.18 误写的 acrylic（无 user 标记）load 即回滚 wallpaper，显式选择不动', async () => {
-    // 0.0.18 曾把 win32 平台默认误设 acrylic 并自动落进老档：无 glassMaterialSource 的 acrylic 是误写，一次性校正
-    const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'glass', glassMaterial: 'acrylic' }) })
-    const store = new SettingsStore(dir, fs)
-    await store.load()
-    expect(store.settings.glassMaterial).toBe('wallpaper')
-    // 用户显式选的 acrylic 带 user 标记：校正不碰
-    const fs2 = fakeFs({
-      [`${dir}/settings.json`]: JSON.stringify({ theme: 'glass', glassMaterial: 'acrylic', glassMaterialSource: 'user' })
-    })
-    const store2 = new SettingsStore(dir, fs2)
-    await store2.load()
-    expect(store2.settings.glassMaterial).toBe('acrylic')
-    expect(store2.settings.glassMaterialSource).toBe('user')
-    // 显式 wallpaper 原样尊重
-    const fs3 = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'glass', glassMaterial: 'wallpaper' }) })
-    const store3 = new SettingsStore(dir, fs3)
-    await store3.load()
-    expect(store3.settings.glassMaterial).toBe('wallpaper')
+    expect(store.settings.theme).toBe('glass')
+    expect(store.settings.hideOnBlur).toBe(false)
+    expect('glassMaterial' in store.settings).toBe(false)
   })
 
   it('update launchAtLogin：内存立即生效，flush 后落盘 JSON 为 true', async () => {

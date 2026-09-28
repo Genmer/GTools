@@ -207,13 +207,6 @@ function onKeydown(e: KeyboardEvent): void {
   backdrop-filter: var(--glass-filter);
   -webkit-app-region: no-drag;
 }
-/* L2 折射：SVG feDisplacementMap 位移滤镜只挂这一枚固定几何胶囊（主进程探针通过才置 html[data-lens='1']）；
-   只在清透档挂载（磨砂档 blur(14px) 会抹平折射），且 backdrop-filter 只能裸 url()——
-   url() 与 filter 函数混写实测整条失效（清晰无折射无模糊），模糊/提饱和/提亮已并入滤镜本体；
-   回退行在前、url 行在后（后行胜出，滤镜失效时回退纯 blur 不跳变） */
-html[data-lens='1'][data-blur='off'] .searchbox {
-  backdrop-filter: url(#gt-lens-pill);
-}
 .magnifier {
   flex: none;
   color: var(--fg-dim);

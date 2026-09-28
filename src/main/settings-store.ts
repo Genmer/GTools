@@ -1,12 +1,5 @@
-export type { ThemeName, AppSettings, CommandHotkey, TransparencySettings, GlassMaterial } from '@sdk/settings'
-import {
-  DEFAULT_SETTINGS,
-  type AppSettings,
-  type CommandHotkey,
-  type GlassMaterial,
-  type ThemeName,
-  type TransparencySettings
-} from '@sdk/settings'
+export type { ThemeName, AppSettings, CommandHotkey, TransparencySettings } from '@sdk/settings'
+import { DEFAULT_SETTINGS, type AppSettings, type CommandHotkey, type ThemeName, type TransparencySettings } from '@sdk/settings'
 import { validateAccelerator } from '@sdk/shortcut-rules'
 export { DEFAULT_SETTINGS }
 
@@ -22,8 +15,6 @@ type SettingsPatch = {
   hotkey?: Partial<AppSettings['hotkey']>
   theme?: ThemeName
   transparency?: Partial<TransparencySettings>
-  glassMaterial?: GlassMaterial
-  glassMaterialSource?: 'auto' | 'user'
   disabledPlugins?: string[]
   launchAtLogin?: boolean
   clipboardSuggest?: boolean
@@ -40,8 +31,6 @@ function merge(base: AppSettings, patch: SettingsPatch): AppSettings {
     hotkey: { ...base.hotkey, ...(patch.hotkey ?? {}) },
     theme: patch.theme ?? base.theme,
     transparency: { ...base.transparency, ...(patch.transparency ?? {}) },
-    glassMaterial: patch.glassMaterial ?? base.glassMaterial,
-    glassMaterialSource: patch.glassMaterialSource ?? base.glassMaterialSource,
     disabledPlugins: patch.disabledPlugins ?? base.disabledPlugins,
     launchAtLogin: patch.launchAtLogin ?? base.launchAtLogin,
     clipboardSuggest: patch.clipboardSuggest ?? base.clipboardSuggest,
@@ -83,8 +72,6 @@ function sanitizePatch(raw: unknown): SettingsPatch {
     patch.hotkey = hotkey
   }
   if (p.theme === 'light' || p.theme === 'dark' || p.theme === 'glass') patch.theme = p.theme
-  if (p.glassMaterial === 'wallpaper' || p.glassMaterial === 'acrylic' || p.glassMaterial === 'clear') patch.glassMaterial = p.glassMaterial
-  if (p.glassMaterialSource === 'auto' || p.glassMaterialSource === 'user') patch.glassMaterialSource = p.glassMaterialSource
   if (typeof p.transparency === 'object' && p.transparency !== null) {
     const t = p.transparency as Record<string, unknown>
     const tx: Partial<TransparencySettings> = {}
@@ -103,8 +90,6 @@ function sanitizePatch(raw: unknown): SettingsPatch {
   if (Array.isArray(p.commandHotkeys)) patch.commandHotkeys = sanitizeCommandHotkeys(p.commandHotkeys)
   return patch
 }
-
-/** 玻璃材质平台默认 wallpaper：win32 弹窗瞬间取屏快照折射（无 DWM 风险），mac 走主进程实时捕获 */
 
 /** userData/settings.json 的读写：内存持有 + 深合并默认值 + 原子写（tmp→rename）+ 防抖 */
 export class SettingsStore {
@@ -134,14 +119,7 @@ export class SettingsStore {
     try {
       const raw = await this.fs.readFile(this.file, { encoding: 'utf-8' })
       const parsed: unknown = JSON.parse(raw)
-      // 旧档无 glassMaterial 字段：merge 回退实例默认，一次落盘即固化；显式值原样尊重
       this.current = merge(this.current, sanitizePatch(parsed))
-      // 0.0.18 曾把 win32 平台默认误设 acrylic（观感≈不透明）：非用户显式选择的 acrylic 一次性校正回 wallpaper，
-      // 用户显式档带 glassMaterialSource:'user' 不受影响；dirty 让校正结果尽快落盘
-      if (this.current.glassMaterial === 'acrylic' && this.current.glassMaterialSource !== 'user') {
-        this.current.glassMaterial = 'wallpaper'
-        this.dirty = true
-      }
     } catch {
       // 文件不存在或损坏：用默认值，首次写入即落地
     }

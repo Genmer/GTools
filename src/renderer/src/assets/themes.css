@@ -108,8 +108,8 @@ html[data-theme='dark'] {
 }
 
 /* 透明效果（通用设置，所有主题可开，html[data-transparency='on'] + --tx(0-1 透明度) 由宿主注入）：
-   实时模糊由 Win11 亚克力 / macOS vibrancy 在窗口层担纲，CSS 只做薄 tint 补色，
-   alpha = 基数 + (1 - --tx) × 系数：--tx 越大越透；饱和度来自透进来的壁纸，blur/saturate 补偿 */
+   实时磨霜由窗口层（Win11 亚克力）或 .app 的 CSS backdrop-filter（macOS）担纲，CSS 本层只做 tint 补色，
+   alpha = 基数 + (1 - --tx) × 系数：--tx 越大越透；饱和度来自透进来的桌面，blur/saturate 补偿 */
 html[data-transparency='on'][data-theme='dark'] {
   /* 窗口 tint 取 Fluent dark TintColor #2C2C2C 中性灰（亮度透传交给原生层），禁蓝黑/近黑基色 */
   --bg: rgba(44, 44, 44, calc(0.15 + (1 - var(--tx, 0.55)) * 0.2));
@@ -159,23 +159,26 @@ html[data-transparency='on'][data-theme='light'] {
   --rim-c4: rgba(255, 255, 255, 0.3);
 }
 
+/* 清透档（模糊关）三主题通用：霜面退为纯着色，桌面直透；glass 主题在下方另有加厚覆写 */
+html[data-transparency='on'][data-blur='off'] {
+  --glass-filter: none;
+}
+
 /* 玻璃主题层叠纪律（防 backdrop 断链回归，动壳层前必读）：
-   1. 玻璃面（搜索胶囊/溶解条）到壁纸层（body::before）的祖先链禁 filter/opacity<1/mask/clip-path
-      ——含 clip-path:inset(0) 这类无操作裁剪，任何一处都会切断 backdrop 采样；
+   1. 玻璃面（搜索胶囊/溶解条）的祖先链禁 filter/opacity<1/mask/clip-path——含 clip-path:inset(0)
+      这类无操作裁剪，任何一处都会切断 backdrop 采样；
    2. 玻璃显隐动画用 visibility/display，不用容器 opacity；玻璃面内禁 position:fixed 后代；
-   3. 面板内部行/按钮/徽标只用 rgba(255,255,255,0.06~0.12) tint，不做二次 blur（嵌套玻璃只能采到外层过滤输出）；
-   4. 壁纸层静止不动画（任何重绘都令位移链整链重跑），胶囊下/上禁常驻动画；
-   5. 胶囊折射是 L2（主进程探针通过才置 html[data-lens='1']），探针不过自动落 L1 纯 blur。 */
+   3. 面板内部行/按钮/徽标只用 rgba(255,255,255,0.06~0.12) tint，不做二次 blur（嵌套玻璃只能采到外层过滤输出）。 */
+/* 玻璃身景=系统实时材质：win32 走窗口级 acrylic（window.ts），macOS 走 .app 的 CSS backdrop-filter
+   实时采样桌面（vibrancy 因整窗矩形磨霜会越出卡片圆角、已弃用）；霜面承担可读性 dimming，白层减薄防「白塑料板」 */
 html[data-theme='glass'] {
-  /* 清玻璃（ref1 Clear lens）：近全透 tint，可读性 dimming 由内容面板 --bg-content 承担，
-     折射源是页内壁纸层（window.ts 对 glass 不设原生材质）；--tx 调玻璃密度 */
-  --bg: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.1));
-  --bg-raised: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.1));
+  --bg: rgba(255, 255, 255, calc(0.02 + (1 - var(--tx, 0.55)) * 0.04));
+  --bg-raised: rgba(255, 255, 255, calc(0.02 + (1 - var(--tx, 0.55)) * 0.04));
   --fg: #16202e;
   --fg-dim: rgba(22, 32, 46, 0.62);
   --accent: #0a6bd4;
   --accent-dim: rgba(10, 107, 212, 0.14);
-  --border: rgba(255, 255, 255, 0.55);
+  --border: rgba(255, 255, 255, 0.4);
   --danger: #c2342c;
   --ok: #157f3c;
   --warn: #96650a;
@@ -199,12 +202,9 @@ html[data-theme='glass'] {
   --scrollbar-thumb: rgba(30, 42, 60, 0.25);
   --scrollbar-thumb-hover: rgba(30, 42, 60, 0.4);
   --bg-shell: var(--bg-raised);
-  /* 内容面板背板：白 alpha 预算上限 = 壳 0.105 + 本层 0.134 ≤ 0.32（终审 B 断言），
-     可读性 dimming 靠 --tx 滑杆与磨砂档兜底，不靠整层白纱 */
-  --bg-content: rgba(255, 255, 255, calc(0.08 + (1 - var(--tx, 0.55)) * 0.12));
-  /* 近全透玻璃面：tx=0.55 时 alpha≈0.08（与白霜档 0.48 拉开数量级差） */
-  --glass-bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.07));
-  /* 磨砂档（模糊开）；模糊关走下方清透档覆写 */
+  --bg-content: rgba(255, 255, 255, calc(0.03 + (1 - var(--tx, 0.55)) * 0.07));
+  --glass-bg: rgba(255, 255, 255, calc(0.03 + (1 - var(--tx, 0.55)) * 0.05));
+  /* 磨砂档（模糊开=系统实时霜面）；清透档走下方覆写 */
   --glass-filter: blur(14px) saturate(1.5) brightness(1.05);
   --fill-well: rgba(255, 255, 255, calc(0.3 + (1 - var(--tx, 0.55)) * 0.22));
   --strip-tint: rgba(255, 255, 255, 0.1);
@@ -222,51 +222,14 @@ html[data-theme='glass'] {
   --tile-teal-bg: rgba(12, 140, 130, 0.16);
   --tile-teal-fg: #0c8c82;
 }
+/* 清透档（模糊关）：透明窗直透桌面，无系统霜面——白层加厚由页面自身承担可读性 */
 html[data-theme='glass'][data-blur='off'] {
-  /* 清透档：近不模糊+高提饱和，壁纸折射与 rim 可见（磨砂档 blur 会抹平折光） */
+  --bg: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.1));
+  --bg-raised: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.1));
+  --border: rgba(255, 255, 255, 0.55);
+  --bg-content: rgba(255, 255, 255, calc(0.08 + (1 - var(--tx, 0.55)) * 0.12));
+  --glass-bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.07));
   --glass-filter: blur(1.5px) saturate(1.6) brightness(1.05);
-}
-
-/* 亚克力玻璃模式：身景=系统材质实时模糊（window.ts setBackgroundMaterial），页内壁纸折射层整体不画，
-   让近全透 tint 直接透出系统霜面；白层同步减薄——霜面已承担可读性 dimming，再叠满额白纱就成白塑料板 */
-html[data-theme='glass'][data-glass-material='acrylic'] body::before {
-  display: none;
-}
-html[data-theme='glass'][data-glass-material='acrylic'] {
-  --bg: rgba(255, 255, 255, calc(0.02 + (1 - var(--tx, 0.55)) * 0.04));
-  --bg-raised: rgba(255, 255, 255, calc(0.02 + (1 - var(--tx, 0.55)) * 0.04));
-  --bg-shell: var(--bg-raised);
-  --bg-content: rgba(255, 255, 255, calc(0.03 + (1 - var(--tx, 0.55)) * 0.07));
-  --glass-bg: rgba(255, 255, 255, calc(0.03 + (1 - var(--tx, 0.55)) * 0.05));
-  --border: rgba(255, 255, 255, 0.4);
-}
-
-/* 清玻璃模式：身景=窗口真透明直透桌面（DWM 实时合成，页面合成器的滤镜够不到窗后内容），页内折射层不画。
-   图层沿用玻璃默认值——身后内容与 wallpaper 档同源（都是桌面画面），可读性同参；代价是无页内磨霜/胶囊折射 */
-html[data-theme='glass'][data-glass-material='clear'] body::before {
-  display: none;
-}
-
-/* 壁纸折射层（glass 专用）：--wp-* 由 App.vue 按主进程下发的原图尺寸+显示器几何写入，
-   位置平移 dx/dy 后与桌面壁纸逐像素对齐，供胶囊 backdrop 位移滤镜采样。
-   无壁纸（读取全败/macOS TCC 拒绝）回退饱和渐变+假网格：回退态必须有折射源，
-   且与白色主题一眼区分（近白回退是上轮「白纱」判定的成因之一，禁改回） */
-html[data-theme='glass'] body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  border-radius: var(--r-window);
-  background-image: var(
-    --wp-image,
-    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.13) 0 2px, transparent 2px 40px),
-    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.09) 0 2px, transparent 2px 40px),
-    linear-gradient(118deg, #274a86 0%, #2e6ca4 32%, #3f93ac 60%, #7cc0b4 82%, #c9e2d4 100%)
-  );
-  background-size: var(--wp-size, cover);
-  background-position: var(--wp-pos, center);
-  background-repeat: var(--wp-repeat, no-repeat);
-  pointer-events: none;
 }
 
 /* 窗口根 conic 受光环（1.2px）：token 未定义处 transparent 不可见；mask 挖环是装饰叶子节点，

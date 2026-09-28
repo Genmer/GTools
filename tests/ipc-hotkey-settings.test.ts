@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
 // shortcut.ts 顶层的 globalShortcut 来自同一份 electron mock；failAccels 可按测试切换占用键
 const state = vi.hoisted(() => ({ failAccels: [] as string[] }))
@@ -90,7 +90,9 @@ async function boot(seed: Partial<AppSettings> = {}, pluginIds: string[] = []): 
       window: { float: { closeAllForPlugin: vi.fn() } },
       storage: { dumpAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) },
       app: { version: '0.0.0' },
-      clipboard: { readText: vi.fn(async () => '') }
+      clipboard: { readText: vi.fn(async () => '') },
+      // setupIpc 顶层构造 updater 会读 net.fetch（本文件不调 update:*，仅防 undefined）
+      net: { fetch: vi.fn() }
     },
     apiCenter: { config: {}, sanitized: () => ({}), replaceAll: vi.fn(async () => {}) },
     nativeApps: {},
@@ -107,6 +109,16 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(getSearchWindow).mockReturnValue(null)
   state.failAccels = []
+})
+
+// 本文件用例按 win32 主机行为建模（撞键/让位/回滚都发生在 hotkey.win32 侧，darwin 上 hotkeyPlatform 取另一份键必炸）；
+// 收集期不桩：B 套件的 skipIf(win32) 判定不受影响，只在运行期钉住
+const realPlatform = process.platform
+beforeAll(() => {
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+})
+afterAll(() => {
+  Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true })
 })
 
 describe('gtools:host settings:set', () => {

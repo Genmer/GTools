@@ -89,7 +89,7 @@ function makeServices(): ServiceBag & {
       list: rec('fs.list'),
       mkdir: rec('fs.mkdir')
     },
-    app: { platform: 'darwin', version: '0.2.0' },
+    app: { platform: 'darwin', version: '0.2.0', arch: 'x64' },
     apis: {
       translate: async () => ({ resultText: '你好', providerId: 'builtin:mymemory' }),
       status: () => ({

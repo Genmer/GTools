@@ -475,19 +475,13 @@ backend/index.ts（主进程）：
 
 - **机制**：`themes.css` 定义 CSS 变量全集（--bg / --fg / --fg-dim / --accent / --border / --danger 等），`<html data-theme="light|dark">` 切换；全部 UI（含插件视图）只允许取变量，禁止硬编码色值（判据 4 的静态检查项）。
 - **透明效果**（v0.0.6 起为通用设置，所有主题可开；设置项 `transparency: { enabled, opacity(0-100), blur }`，默认开/55/开）：
-  - 渲染层：`html[data-transparency='on']` + `--tx=opacity/100` 注入，themes.css 据此把着色层变量（--bg / --bg-raised / 边框 / 投影 / 顶光 sheen）半透明化，alpha = (1-—tx)×系数；前景色沿用当前主题，保证可读性不依赖壁纸明暗；
-  - 主进程窗口联动（window.ts，`applyThemeToBrowserWindow(target, theme, tx)`）：
-    - 透明+实时模糊：win11 `setBackgroundMaterial('acrylic')`（Win10 API 静默无效退化为半透明）/ mac `setVibrancy('under-window')`——不需要窗口透明标志，不影响拖缘调整大小；
-    - 透明+无模糊：仅创建时带 `transparent: true` 的窗口直透桌面（Windows 透明窗口不可拖缘调整大小，透明标志只能在创建时定，记入 WeakSet）；运行时才关模糊的窗口回退主题底色（重启后完全生效）；
-    - 透明关：不透明主题底色 `'#f2f3f5' | '#1e1e1e'`；
-  - 旧版 `theme:'glass'` 迁移：settings-store / 备份导入均映射为 `dark + transparency.enabled=true`。
-- **玻璃主题三档风格**（v0.0.16 双材质、v0.0.20 增 clear，`glassMaterial: 'wallpaper' | 'acrylic' | 'clear'`，默认 wallpaper；`glassMaterialSource:'user'` 标记用户显式选择）：
-  - `wallpaper`：透明浮岛窗（864×640 留边距落外投影）+ 弹窗瞬间快照折射层 + 胶囊 feDisplacementMap（v0.0.11 观感）；
-  - `clear`：透明窗直透桌面（DWM 实时合成，真·实时零算力零捕获）；页内折射层不画（页面合成器滤镜够不到窗后内容），玻璃图层沿用默认值（身后内容与 wallpaper 档同源，可读性同参）；代价是无页内磨霜/胶囊折射；
-  - `acrylic`：不透明内容口径窗 + 系统亚克力实时身景（与 light 的透明+模糊档同参），渲染层抑制页内折射层（`data-glass-material='acrylic'`）；亮色系统下亚克力偏奶白，观感≈不透明，只作可选项；
-  - 渲染层/主进程对「画页内折射源」统一收敛到 wallpaper 档（App.vue isGlassWallpaper / ipc.ts wallMode）：acrylic/clear 的身景不经页面，壁纸桥、快照流、胶囊探针全部不启用；`wantsTransparentFlag` 对 glass 非 acrylic 档恒透明 → clear↔wallpaper 运行时切换不重建窗口，acrylic 跨透明类别走 recreateSearchWindow。
-  - **win32 平台约束（实证矩阵，2026-09-27，Win11 22631）**：透明窗 + `WDA_EXCLUDEFROMCAPTURE`（setContentProtection）一经任何窗口生命周期变化（SW_HIDE/SW_SHOW、minimize/restore、opacity 0/1、移屏外、内容级 phantom、移动/缩放/透明度 nudge）DWM 即把整窗永久渲黑或消失，不可逆；无标志则透明窗一切正常。因此 v0.0.14 的主进程实时捕获（glass-backdrop.ts）在 win32 硬关（`canProtectScreen`）；macOS 无此 bug，wallpaper 模式实时捕获正常。若未来 Electron/Windows 修复，重开 `canProtectScreen` 一处即可（矩阵探针法：最小透明窗 × affinity 模式 × 显隐循环 × 外部进程截屏采样）。
-  - **win32 wallpaper 折射 = 渲染层快照流（v0.0.19）**：隐藏期渲染层持有 getUserMedia 桌面流（主进程经 `glassbackdrop:snapshot-stream` 单调签发 sourceId+窗口几何），窗口 show 当口抓流中当前帧（帧全摄于不可见期，无自摄入）、裁窗口区 2x 超采样铺 `--wp-image` 后停流，下次隐藏再养——全链路零防捕获标志，不触 DWM 渲黑矩阵。三个坑：① 显隐联动不能用 visibilitychange/`document.hidden`（`show:false` 窗口首次显隐前页面卡 visible 的 Electron 怪癖），由主进程 `win.on('show'/'hide')` 推 `host:win-visibility` 驱动；② 不要设 `backgroundThrottling:false`（页面恒 visible，联动全断，隐藏期节流不影响流送帧）；③ desktopCapturer.getSources 单调 ~350ms，不适用于弹窗路径。黑帧防护：DRM/独占全屏等场景流会只出全黑帧，抓帧时 16×9 采样 max 通道值 <12 拒收（保上一张/壁纸兜底）。0.0.18 曾把 win32 默认误改 acrylic，v0.0.19 回滚 wallpaper 并对无 `glassMaterialSource:'user'` 标记的存量 acrylic 档 load 时一次性校正回 wallpaper。
+  - 渲染层：`html[data-transparency='on']` + `--tx=opacity/100` 注入，themes.css 据此把着色层变量（--bg / --bg-raised / 边框 / 投影 / 顶光 sheen）半透明化，alpha = (1-—tx)×系数；前景色沿用当前主题，保证可读性不依赖桌面明暗；
+  - 磨霜分平台（`applyThemeToBrowserWindow`，v0.0.22 起不截图不读壁纸）：
+    - win32：不透明窗 + `setBackgroundMaterial('acrylic')`（Win10 API 静默无效退化为半透明）；透明档（blur 关）才带 `transparent: true`（Windows 透明窗不可拖缘调整大小，标志只能创建时定，记入 WeakSet，跨类别走 recreateSearchWindow）；
+    - mac：**恒透明窗 + 零 vibrancy**——`setVibrancy('under-window')` 按整窗矩形磨霜，会把霜面延伸到卡片外 32/32/48 透明边距（实测「外圈玻璃块」），且不透明窗叠 alpha 底色在显隐/缩放时白闪（v0.0.21 及之前 light 主题闪烁根因之一）；霜面由 `.app` / `.detached` 的 `backdrop-filter: var(--glass-filter)` 实时采样桌面承担（透明窗上 CSS backdrop-filter 可采到窗后内容，实测验证）；
+    - blur 开关经 `html[data-blur]` 联动 `--glass-filter`（blur(14-16px) ↔ none/blur(1.5px)）；透明关：不透明主题底色 `'#f2f3f5' | '#1e1e1e'`；
+- **玻璃主题**（v0.0.22 起）：glass 主题 = 薄白 tint（--bg ≈ 0.02-0.06 alpha）+ 上述磨霜机制的磨砂档（blur 开）/清透档（blur 关），霜面实时透出真实桌面；无独立材质字段。
+- **已废弃机制**（v0.0.16-v0.0.21 的 wallpaper/acrylic/clear 三档 glassMaterial、壁纸读取桥、快照折射层、胶囊 feDisplacementMap 透镜、win32 渲染层快照流、glass-backdrop/glass-capability/wallpaper 三个服务）已全量删除——「透明玻璃本身就是实时的」，任何靠截图/读壁纸伪造背景的方案不再回来；旧档残留 `glassMaterial` 键加载时忽略。
 - 对比度判据 3：变量表按 WCAG AA（正文 ≥4.5:1）取值，写死在 themes.css 一处。
 
 ### 5.2 设置持久化（自研）
@@ -506,6 +500,15 @@ interface AppSettings {
 - 读写：主进程内存持有 + 读时深合并默认值（新增字段向前兼容）；写时 `writeFile(tmp) → rename` 原子替换，300ms 防抖合并连续写。
 - 暴露：宿主 IPC（`settings:get/set`，非插件通道）供设置页与快捷键页使用；变更即广播 `settings-changed` 渲染事件（主题即时生效判据）。
 - 插件各自设置**不进** settings.json，一律走各自 `host.storage`（B1 隔离）。
+
+### 5.3 设置页信息架构与更新检测（v0.0.24 起）
+
+- **双栏 IA**：设置页根改 `.settings-page` 双栏——左侧 168px 分区导航（通用 / 外观 / 快捷键 / 插件 / 数据与服务 / 关于，emoji 图标沿用 manifest icon 先例），右侧分区内容单栏、仅右栏内部滚动；右滚动容器保留 `.settings` 类名（base.css 悬浮滚动条与 App.vue 顶栏溶解条按它匹配，勿改名）；上下 80/46px 让位与 mask 渐隐原样；侧边栏不做 backdrop-filter（`.settings` 自带 mask，后代玻璃断 backdrop 采样链）。分区记忆走 localStorage `gtools:settings-section`（外壳 UI 状态，零 IPC）；「关于」分区的 AboutSection 用 `<KeepAlive>` 挂载，切分区保留更新检测态。
+- **更新检测管线**：纯逻辑模块 `src/main/services/updater.ts`（`compareVersions` / `pickAsset` / `parseLatestRelease` / `createUpdater`，零 electron import，fetch 构造注入），`gtools:host` 新增三 case：
+  - `update:check`：手动触发（不自动外联），经 ServiceBag `net.fetch`（fetchViaNet：Chromium 网络栈 + assertHttpUrl + 10s 超时）请求 GitHub `releases/latest`；判新方向 `compareVersions(latest, current) > 0`（远程比本地新才提示，防降级引导）；HTTP 非 2xx / 坏 JSON / 非数字 tag（如 `latest`）/ 网络异常分别转中文 error（网络异常在 check() 内 catch，勿冒英文技术串到外层）；成功返回 `{ current, latest, hasUpdate, releaseUrl, downloadUrl }`。
+  - `update:open`：payload 只传 target 意图（`repo | release | download`，严校验），URL 由主进程 updater 闭包缓存 + 白名单（仅本仓库主页常量与 `releases/` 前缀）后交 `shell.openExternal`（自带 assertHttpUrl 双保险）；无缓存返回「请先检查更新」。资产选择：darwin→`*.dmg`、win32→`*.exe`，多资产按 universal→当前 arch token 消歧，仍歧义回退 release 页。
+  - `app:relaunch`：`isSearchWindowSender` 守卫下 `app.relaunch() + app.exit(0)`；入口两处——关于页功能按钮区、备份导入 `restartRecommended` 提示旁。
+- **ServiceBag.app 增 `arch: string`**（electron-services 注入 `process.arch`），仅供资产消歧；渲染层五态状态机（idle/checking/latest/available/failed）在 AboutSection 内维护，`hasUpdate` 映射 available。
 
 ---
 

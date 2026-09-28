@@ -85,6 +85,8 @@ onBeforeUnmount(() => {
      受光边走 --window-ring inset shadow，border-box 渐变会透过半透明 tint 漏满整窗（白纱根因） */
   box-shadow: var(--window-ring, none), var(--shadow-window);
   background: linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
+  /* 磨霜与主窗 .app 同源同变量：macOS 上独立窗透明直透桌面，无此层则失去霜面 */
+  backdrop-filter: var(--glass-filter);
 }
 /* 顶栏扁平化：与窗口根同 tint，无自身材质 */
 .topbar {

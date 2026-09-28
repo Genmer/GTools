@@ -132,7 +132,6 @@ export function normalizeSettings(raw: unknown): AppSettings {
     if (typeof h.win32 === 'string' && validateAccelerator(h.win32, 'win32').ok) out.hotkey.win32 = h.win32
   }
   if (r.theme === 'light' || r.theme === 'dark' || r.theme === 'glass') out.theme = r.theme
-  if (r.glassMaterial === 'wallpaper' || r.glassMaterial === 'acrylic') out.glassMaterial = r.glassMaterial
   if (typeof r.transparency === 'object' && r.transparency !== null) {
     const t = r.transparency as Record<string, unknown>
     if (typeof t.enabled === 'boolean') out.transparency.enabled = t.enabled

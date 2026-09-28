@@ -402,7 +402,7 @@ export function createElectronServices(opts: {
       list: (pluginId, dir, o) => fileAccess.list(pluginId, dir, o),
       mkdir: (pluginId, path) => fileAccess.mkdir(pluginId, path)
     },
-    app: { platform: process.platform, version: opts.appVersion },
+    app: { platform: process.platform, version: opts.appVersion, arch: process.arch },
     apis: {
       translate: (req) => opts.apiCenter.translate(req),
       status: (service) => opts.apiCenter.status(service)

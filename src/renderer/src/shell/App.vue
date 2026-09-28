@@ -696,274 +696,10 @@ function applyVisualSettings(s: AppSettings): void {
   // 玻璃主题自身即玻璃面板，透明属性强制开启（透明度滑杆仍调节玻璃密度）
   document.documentElement.dataset.transparency = s.transparency.enabled || s.theme === 'glass' ? 'on' : 'off'
   document.documentElement.dataset.blur = s.transparency.blur ? 'on' : 'off'
-  // 玻璃风格：wallpaper=透明窗+页内折射源（壁纸/快照），acrylic=系统材质实时身景，clear=透明窗直透桌面（都不画页内图）
-  if (s.theme === 'glass') document.documentElement.dataset.glassMaterial = s.glassMaterial ?? 'wallpaper'
-  else delete document.documentElement.dataset.glassMaterial
-  if (!isGlassWallpaper()) clearWallpaperVars()
   document.documentElement.style.setProperty('--tx', (s.transparency.opacity / 100).toFixed(2))
 }
 
-// ---- 玻璃折射（L2）：壁纸对齐 + 胶囊位移滤镜。折射源与几何由主进程下发，探针通过才置 data-lens ----
 
-interface WallpaperPayload {
-  dataUrl: string | null
-  image: boolean
-  style: 'fill' | 'stretch' | 'fit' | 'center' | 'tile' | 'span'
-  dx: number
-  dy: number
-  dpr: number
-  imgW: number
-  imgH: number
-  dispW: number
-  dispH: number
-}
-
-let wallpaperActive = false
-let lastWallpaper: WallpaperPayload | null = null
-let backdropActive = false
-
-function clearWallpaperVars(): void {
-  const s = document.documentElement.style
-  s.removeProperty('--wp-image')
-  s.removeProperty('--wp-size')
-  s.removeProperty('--wp-pos')
-  s.removeProperty('--wp-repeat')
-  wallpaperActive = false
-  backdropActive = false
-}
-
-function applyWallpaper(p: WallpaperPayload): void {
-  // 页内折射源只属于 wallpaper 档；acrylic=系统身景、clear=窗口直透桌面，画了反而盖住真实身景
-  if (!isGlassWallpaper()) {
-    clearWallpaperVars()
-    return
-  }
-  lastWallpaper = p
-  // 实时背景优先：抓取链可用时壁纸几何不覆盖背景帧（壁纸降级为抓取失败兜底）
-  if (backdropActive) return
-  const s = document.documentElement.style
-  if (p.image) {
-    wallpaperActive = !!(p.dataUrl && p.imgW > 0 && p.imgH > 0)
-    if (wallpaperActive) s.setProperty('--wp-image', `url("${p.dataUrl}")`)
-    else s.removeProperty('--wp-image')
-  }
-  if (!wallpaperActive) {
-    s.removeProperty('--wp-size')
-    s.removeProperty('--wp-pos')
-    s.removeProperty('--wp-repeat')
-    return
-  }
-  // 原图按显示区精确缩放后平移 dx/dy，与桌面壁纸逐像素对齐（窗口移动时内容跟着桌面走）
-  const nativeW = p.imgW / (p.dpr || 1)
-  const nativeH = p.imgH / (p.dpr || 1)
-  let size: string
-  switch (p.style) {
-    case 'stretch':
-      size = `${p.dispW}px ${p.dispH}px`
-      break
-    case 'center':
-    case 'tile':
-      size = `${nativeW}px ${nativeH}px`
-      break
-    case 'fit': {
-      const k = Math.min(p.dispW / p.imgW, p.dispH / p.imgH)
-      size = `${p.imgW * k}px ${p.imgH * k}px`
-      break
-    }
-    default: {
-      // fill/span：cover 级缩放
-      const k = Math.max(p.dispW / p.imgW, p.dispH / p.imgH)
-      size = `${p.imgW * k}px ${p.imgH * k}px`
-    }
-  }
-  s.setProperty('--wp-size', size)
-  s.setProperty('--wp-pos', `${-p.dx}px ${-p.dy}px`)
-  s.setProperty('--wp-repeat', p.style === 'tile' ? 'repeat' : 'no-repeat')
-}
-
-async function refreshWallpaper(): Promise<void> {
-  if (isDetachedWindow.value) return
-  if (!isGlassWallpaper()) return
-  const r = await window.gtools.host('wallpaper:get')
-  if (r.ok && r.data) applyWallpaper(r.data as WallpaperPayload)
-}
-
-interface BackdropPayload {
-  dataUrl: string | null
-  width?: number
-  height?: number
-}
-
-// 抓到帧 = 窗口区域 1:1 铺满；抓不到（非玻璃/捕获失败）回退壁纸桥
-function applyBackdrop(p: BackdropPayload): void {
-  if (!isGlassWallpaper()) {
-    clearWallpaperVars()
-    return
-  }
-  const s = document.documentElement.style
-  if (p.dataUrl) {
-    backdropActive = true
-    s.setProperty('--wp-image', `url("${p.dataUrl}")`)
-    s.setProperty('--wp-size', '100% 100%')
-    s.setProperty('--wp-pos', '0 0')
-    s.setProperty('--wp-repeat', 'no-repeat')
-    return
-  }
-  backdropActive = false
-  if (lastWallpaper) applyWallpaper(lastWallpaper)
-}
-
-async function refreshBackdrop(): Promise<void> {
-  if (isDetachedWindow.value) return
-  if (!isGlassWallpaper()) return
-  const r = await window.gtools.host('glassbackdrop:get')
-  if (r.ok && r.data) applyBackdrop(r.data as BackdropPayload)
-}
-
-// ---- win32 玻璃壁纸快照流：隐藏期养桌面媒体流，弹窗瞬间取当前帧 ----
-// 流中帧全摄于窗口不可见期（天然无自摄入套娃），不用防捕获标志、不用主进程截屏循环，
-// 躲开「透明窗+WDA+显隐循环」的 DWM 渲黑矩阵；desktopCapturer 单调 ~350ms 太慢，常驻流取帧 <10ms。
-// 取帧只许发生在可见事件当口（帧摄于隐藏期），禁止可见期延后补取（会摄入自身）；取完停流省 GPU，下次隐藏再养
-
-interface SnapshotStreamGeo {
-  sourceId: string
-  winBounds: { x: number; y: number; width: number; height: number }
-  displayBounds: { x: number; y: number; width: number; height: number }
-  scaleFactor: number
-}
-
-let snapStream: MediaStream | null = null
-let snapVideo: HTMLVideoElement | null = null
-let snapGeo: SnapshotStreamGeo | null = null
-let snapStarting = false
-
-/** 页内折射源（壁纸桥/快照流）只在玻璃 wallpaper 档存在；acrylic/clear 的身景不经页面，非玻璃更无折射层 */
-function isGlassWallpaper(): boolean {
-  const el = document.documentElement
-  return el.dataset.theme === 'glass' && el.dataset.glassMaterial === 'wallpaper'
-}
-
-async function startSnapStream(): Promise<void> {
-  if (isDetachedWindow.value || snapStream || snapStarting || !isGlassWallpaper()) return
-  if (!navigator.mediaDevices?.getUserMedia) return
-  snapStarting = true
-  try {
-    const r = await window.gtools.host('glassbackdrop:snapshot-stream')
-    if (!r.ok || !r.data) return
-    const geo = r.data as SnapshotStreamGeo
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      // Electron 桌面捕获的 legacy 约束形态（DOM 类型无 mandatory，运行时支持）
-      video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: geo.sourceId } }
-    } as unknown as MediaStreamConstraints)
-    const v = document.createElement('video')
-    v.muted = true
-    v.playsInline = true
-    v.srcObject = stream
-    await v.play().catch(() => undefined)
-    snapStream = stream
-    snapVideo = v
-    snapGeo = geo
-  } catch {
-    // 取源/开流失败：弹窗时无新鲜帧，壁纸桥兜底
-  } finally {
-    snapStarting = false
-  }
-}
-
-function stopSnapStream(): void {
-  snapStream?.getTracks().forEach((t) => t.stop())
-  snapStream = null
-  snapVideo = null
-  snapGeo = null
-}
-
-/** 弹窗瞬间取流中当前帧铺折射源（裁窗口区域，2x 超采样），编码与铺设全在渲染层完成 */
-function grabSnapshotFrame(): void {
-  if (isDetachedWindow.value) return
-  const v = snapVideo
-  const geo = snapGeo
-  if (!v || !geo || v.readyState < 2 || !v.videoWidth || !v.videoHeight) return
-  const cvs = document.createElement('canvas')
-  const outW = Math.round(geo.winBounds.width * 2)
-  const outH = Math.round(geo.winBounds.height * 2)
-  cvs.width = outW
-  cvs.height = outH
-  const ctx = cvs.getContext('2d')
-  if (!ctx) return
-  // 流分辨率可能被引擎缩放而非屏幕物理像素原尺寸：按视频实际尺寸换算裁剪区
-  const kx = v.videoWidth / (geo.displayBounds.width * geo.scaleFactor)
-  const ky = v.videoHeight / (geo.displayBounds.height * geo.scaleFactor)
-  const sx = (geo.winBounds.x - geo.displayBounds.x) * geo.scaleFactor * kx
-  const sy = (geo.winBounds.y - geo.displayBounds.y) * geo.scaleFactor * ky
-  const sw = geo.winBounds.width * geo.scaleFactor * kx
-  const sh = geo.winBounds.height * geo.scaleFactor * ky
-  ctx.drawImage(v, sx, sy, sw, sh, 0, 0, outW, outH)
-  // DRM/独占全屏等场景流会短暂只出全黑帧：拒收保住上一张折射源（无上一张则维持壁纸兜底），别把黑屏铺进窗口
-  const probe = document.createElement('canvas')
-  probe.width = 16
-  probe.height = 9
-  const pctx = probe.getContext('2d')
-  if (!pctx) return
-  pctx.drawImage(v, sx, sy, sw, sh, 0, 0, 16, 9)
-  const px = pctx.getImageData(0, 0, 16, 9).data
-  let maxCh = 0
-  for (let i = 0; i < px.length; i += 4) maxCh = Math.max(maxCh, px[i], px[i + 1], px[i + 2])
-  if (maxCh < 12) return
-  applyBackdrop({ dataUrl: cvs.toDataURL('image/jpeg', 0.85) })
-}
-
-const LENS_BAND = 20
-let lensW = 0
-let lensH = 0
-let lensRo: ResizeObserver | null = null
-
-/**
- * 位移图：到边距离 e 经 k^1.5 曲线衰减，最外 3px 硬归零躲 backdrop 采样钳制，峰值 0.8×band 保证全程内采样。
- * 滤镜链本体静态放在 index.html（脚本创建的 <filter> 实测不能作 backdrop url() 引用目标），
- * 这里只对静态元素注入位移图 dataURL 与几何
- */
-function rebuildLensMap(): void {
-  const el = searchBox.value?.$el as HTMLElement | undefined
-  const w = Math.round(el?.clientWidth ?? 0)
-  const h = Math.round(el?.clientHeight ?? 0)
-  if (w < 80 || h < 24) return
-  if (w === lensW && h === lensH) return
-  const map = document.getElementById('gt-lens-map')
-  const filter = document.getElementById('gt-lens-pill')
-  const dm = document.getElementById('gt-lens-dm')
-  if (!map || !filter || !dm) return
-  const max = LENS_BAND * 0.8
-  const cvs = document.createElement('canvas')
-  cvs.width = w
-  cvs.height = h
-  const ctx = cvs.getContext('2d')
-  if (!ctx) return
-  const img = ctx.createImageData(w, h)
-  const d = img.data
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const e = Math.min(x, y, w - 1 - x, h - 1 - y)
-      const m = e < 3 ? 0 : Math.pow(Math.min(e / LENS_BAND, 1), 1.5) * max
-      const dx = x < w / 2 ? -m : m
-      const dy = y < h / 2 ? -m : m
-      const i = (y * w + x) * 4
-      d[i] = 128 + (dx / max) * 127
-      d[i + 1] = 128 + (dy / max) * 127
-      d[i + 2] = 128
-      d[i + 3] = 255
-    }
-  }
-  ctx.putImageData(img, 0, 0)
-  map.setAttribute('href', cvs.toDataURL('image/png'))
-  map.setAttribute('width', String(w))
-  map.setAttribute('height', String(h))
-  filter.setAttribute('width', String(w))
-  filter.setAttribute('height', String(h))
-  dm.setAttribute('scale', String(Math.round(max)))
-  lensW = w
-  lensH = h
-}
 
 onMounted(async () => {
   loadRecent()
@@ -991,16 +727,9 @@ onMounted(async () => {
     }
     if (!isDemo.value && !isDetachedWindow.value) void loadApps()
   }
-  // win32 玻璃壁纸：装载即养快照流（页面 hidden 在 show:false 窗口上不可靠，见 host:win-visibility 订阅处）
-  void startSnapStream()
   window.gtools.on('settings-changed', (p) => {
     settings.value = p as AppSettings
     applyVisualSettings(p as AppSettings)
-    // 切进玻璃主题时首次拉壁纸（主进程有缓存，重复调用廉价）
-    void refreshWallpaper()
-    // 材质/主题切换联动快照流：离开玻璃壁纸即停，处于隐藏态则开养（可见态等下次隐藏）
-    if (!isGlassWallpaper()) stopSnapStream()
-    else if (document.hidden) void startSnapStream()
   })
   window.gtools.on('plugin-state-changed', (p) => {
     const d = p as { id: string; enabled: boolean; plugins: PluginState[] }
@@ -1010,20 +739,6 @@ onMounted(async () => {
     enterSettings()
     void nextTick(() => searchBox.value?.focus())
   })
-  // 主进程窗口显隐驱动快照流（首次弹出前 visibilitychange 因页面可见性卡 visible 不触发）；
-  // 与 visibilitychange 分支重复触发无害：养流有 snapStarting/snapStream 守卫，抓帧后流已停
-  const offWinVis = window.gtools.on('host:win-visibility', (p) => {
-    if (p !== true && p !== false) return
-    if (!p) {
-      void startSnapStream()
-      return
-    }
-    if (isGlassWallpaper()) {
-      grabSnapshotFrame()
-      stopSnapStream()
-    }
-  })
-  if (offWinVis) offFns.push(offWinVis)
   // 常驻插件推送订阅初始建立（此后由 enabledManifests watch 随启用集合增减，Map 去重防重订阅）
   syncPushSubscriptions(enabledManifests.value)
   // 指令热键直达：主进程侧已先 showSearchWindow（P7 车道），渲染层只负责进入插件命令态；
@@ -1033,34 +748,12 @@ onMounted(async () => {
     if (typeof d.pluginId === 'string' && d.pluginId !== '') activateEntry(d.pluginId, d.commandId)
   })
   if (offHotkey) offFns.push(offHotkey)
-  // 玻璃折射：订阅壁纸推送（move/focus/display/resume 触发）+ 实时背景帧（抓窗口背后真实屏幕）+ 按胶囊实际几何建位移图
-  const offWallpaper = window.gtools.on('wallpaper:changed', (p) => applyWallpaper(p as WallpaperPayload))
-  if (offWallpaper) offFns.push(offWallpaper)
-  const offBackdrop = window.gtools.on('glassbackdrop:changed', (p) => applyBackdrop((p ?? { dataUrl: null }) as BackdropPayload))
-  if (offBackdrop) offFns.push(offBackdrop)
-  void refreshWallpaper()
-  void refreshBackdrop()
-  if (!isDetachedWindow.value) {
-    const pill = searchBox.value?.$el as HTMLElement | undefined
-    if (pill && typeof ResizeObserver === 'function') {
-      lensRo = new ResizeObserver(() => rebuildLensMap())
-      lensRo.observe(pill)
-    }
-    rebuildLensMap()
-  }
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') {
       // 隐私默认：推送与拖入集只在窗口可见会话内保留，隐藏即清（对齐 dropFiles 声明处注释）
       pushedItems.value = []
       releaseDrop()
-      // win32 玻璃壁纸：隐藏期开始养快照流，供下次弹窗瞬间取帧
-      void startSnapStream()
       return
-    }
-    // win32 玻璃壁纸：此刻流中最新帧摄于隐藏期（干净），当场取帧铺折射源后停流；可见期绝不补取（会摄入自身）
-    if (isGlassWallpaper()) {
-      grabSnapshotFrame()
-      stopSnapStream()
     }
     if (router.mode === 'global') {
       // resetForShow 的推送清理点（router-core 不持有推送态，外壳侧同步清）
@@ -1085,9 +778,6 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onWindowKeydown)
-  stopSnapStream()
-  lensRo?.disconnect()
-  lensRo = null
   for (const off of pushOffs.values()) off()
   for (const off of offFns) off()
 })
@@ -1185,6 +875,10 @@ onBeforeUnmount(() => {
      border-box 渐变（edge-hi 0.95→0.3）会透过它漏满整窗，即终审实测的 75-80% 白纱；
      窗缘受光全部由 --window-ring 的 inset shadow 承担（分主题定义） */
   background: linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
+  /* 磨霜面（macOS 主霜源）：backdrop-filter 实时采样窗口背后桌面，与 --glass-filter 同变量——
+     blur 开关/主题档位经 data-blur 联动（light/dark/glass 清透档均为 none）；win32 磨霜由窗口级
+     亚克力担纲，此处在不透明窗上无页面底色可采、自然无效 */
+  backdrop-filter: var(--glass-filter);
 }
 /* 圆角按窗口透明性分治（真实标志由 window.ts 经 html[data-wintx] 同步）：
    不透明窗（亚克力/实色）内容满幅、圆角交 OS 裁剪（Win11 DWM/macOS 系统弧）——

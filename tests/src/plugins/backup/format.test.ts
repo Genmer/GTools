@@ -190,7 +190,7 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings(null)).toEqual(DEFAULT_SETTINGS)
     expect(normalizeSettings('x')).toEqual(DEFAULT_SETTINGS)
   })
-  it('合法字段全保留（glass 为合法主题，transparency/glassMaterial 合法段收录）', () => {
+  it('合法字段全保留（glass 为合法主题，transparency 合法段收录；旧备份的 glassMaterial 字段已废弃忽略）', () => {
     const s = normalizeSettings({
       theme: 'glass',
       glassMaterial: 'acrylic',
@@ -204,7 +204,6 @@ describe('normalizeSettings', () => {
     })
     expect(s).toEqual({
       theme: 'glass',
-      glassMaterial: 'acrylic',
       transparency: { enabled: true, opacity: 80, blur: false },
       hotkey: { darwin: 'Cmd+Shift+P', win32: 'Ctrl+Alt+Space' },
       disabledPlugins: ['hello'],

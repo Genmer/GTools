@@ -485,13 +485,13 @@ function isPlaceholderEq(i: number): boolean {
   border-radius: 3px;
 }
 
-/* §3 行结构：行号 24px + 表达式 + 右对齐结果，行高 ~34px */
+/* §3 行结构：行号 + 表达式 + 右对齐结果；稿纸是读数主工作面，字号独立放大不走 token */
 .row {
   position: relative;
   display: flex;
   align-items: center;
-  height: 34px;
-  padding-right: 28px;
+  height: 60px;
+  padding-right: 34px;
   border-radius: var(--r-sm);
 }
 .row.focused {
@@ -499,10 +499,10 @@ function isPlaceholderEq(i: number): boolean {
 }
 .no {
   flex: none;
-  width: 24px;
+  width: 32px;
   text-align: right;
   color: var(--fg-dim);
-  font-size: var(--fs-foot);
+  font-size: 16px;
   user-select: none;
 }
 .row.focused .no {
@@ -512,14 +512,14 @@ function isPlaceholderEq(i: number): boolean {
 .expr {
   flex: 1;
   min-width: 0;
-  margin-left: 10px;
+  margin-left: 14px;
   height: 100%;
   border: none;
   outline: none;
   background: transparent;
   color: var(--fg);
   font: inherit;
-  font-size: var(--fs-title);
+  font-size: 36px;
   caret-color: var(--accent);
 }
 .expr::placeholder {
@@ -535,7 +535,7 @@ function isPlaceholderEq(i: number): boolean {
   white-space: nowrap;
   text-align: right;
   color: var(--fg);
-  font-size: var(--fs-title);
+  font-size: 36px;
   user-select: none;
 }
 .result.ok {
@@ -556,14 +556,14 @@ function isPlaceholderEq(i: number): boolean {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: none;
   background: transparent;
   border-radius: var(--r-sm);
   color: var(--fg-dim);
-  font-size: 14px;
+  font-size: 20px;
   line-height: 1;
   cursor: pointer;
   opacity: 0;
@@ -578,14 +578,14 @@ function isPlaceholderEq(i: number): boolean {
 }
 .copied-pill {
   position: absolute;
-  right: 30px;
+  right: 38px;
   top: 50%;
   transform: translateY(-50%);
-  padding: 1px 6px;
+  padding: 2px 8px;
   border-radius: var(--r-sm);
   background: var(--bg-raised);
   color: var(--fg-dim);
-  font-size: var(--fs-foot);
+  font-size: var(--fs-sub);
   pointer-events: none;
 }
 
@@ -594,21 +594,21 @@ function isPlaceholderEq(i: number): boolean {
   flex: none;
   display: flex;
   align-items: center;
-  height: 36px;
+  height: 66px;
   margin-top: var(--sp-1);
-  padding-right: 28px;
+  padding-right: 34px;
   border-top: 1px solid var(--border);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-weight: 700;
 }
 .sum-label {
-  margin-left: 34px;
+  margin-left: 46px;
   color: var(--fg);
 }
 .sum-value {
   margin-left: auto;
   color: var(--fg);
-  font-size: var(--fs-title);
+  font-size: 38px;
 }
 
 .history-wrap {
