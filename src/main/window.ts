@@ -114,6 +114,12 @@ export function createSearchWindow(): BrowserWindow {
   win.on('closed', () => {
     win = null
   })
+  // 容器插件页可发起顶层导航/弹窗：SPA 只认本渲染源，其余一律拦下（iframe sandbox 为第一道防线）
+  const rendererOrigin = process.env.ELECTRON_RENDERER_URL ?? 'file://'
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!url.startsWith(rendererOrigin)) e.preventDefault()
+  })
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
   if (process.env.ELECTRON_RENDERER_URL) {
     const base = process.env.ELECTRON_RENDERER_URL

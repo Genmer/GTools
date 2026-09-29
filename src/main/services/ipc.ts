@@ -33,6 +33,7 @@ import {
   tokenizePathValues
 } from './backup'
 import { createUpdater } from './updater'
+import { createPluginServer, scanUtoolsPlugins, type UtoolsPluginServer } from './utools-compat'
 
 export interface HostInitResult {
   version: string
@@ -165,6 +166,38 @@ export function setupIpc(deps: {
 
   // 启动注册（setupIpc 晚于 index.ts 的主热键注册调用，同键项在此让位主唤起）
   syncCommandHotkeys(currentBindings(), settings.settings.hotkey[hotkeyPlatform()], fireCommandHotkey, undefined, hotkeySyncOpts())
+
+  // uTools 移植 POC：独立目录 userData/utools-plugins/（不触碰 userData/plugins/ 安全边界），本地静态服务退出容器即停
+  const utoolsPluginsDir = (): string => join(app.getPath('userData'), 'utools-plugins')
+  // 缓存创建 promise：并发 serve 复用同一实例（check-then-await 会各自 listen 泄漏先者）；失败清空允许重试
+  let utoolsServerPromise: Promise<UtoolsPluginServer> | null = null
+  // 承载容器视图的 webContents：destroyed（窗口被关/crash 重载）时兜底停服，不等渲染层自觉
+  interface UtoolsOwnerRef {
+    readonly id: number
+    once(ev: string, cb: () => void): unknown
+    removeListener(ev: string, cb: () => void): unknown
+  }
+  let utoolsOwner: UtoolsOwnerRef | null = null
+  const utoolsOwnerDestroyed = (): void => {
+    void stopUtoolsServer()
+    utoolsOwner = null
+  }
+  const watchUtoolsOwner = (sender: UtoolsOwnerRef): void => {
+    if (utoolsOwner === sender) return
+    utoolsOwner?.removeListener('destroyed', utoolsOwnerDestroyed)
+    utoolsOwner = sender
+    sender.once('destroyed', utoolsOwnerDestroyed)
+  }
+  const stopUtoolsServer = async (): Promise<void> => {
+    const p = utoolsServerPromise
+    utoolsServerPromise = null
+    if (!p) return
+    try {
+      await (await p).close()
+    } catch {
+      // 创建半途失败：无资源可清理
+    }
+  }
 
   // 插件能力通道：权限与启用校验在 dispatchApi 内
   ipcMain.handle('gtools:api', (_e, req: { pluginId: string; api: string; payload: unknown[] }): Promise<ApiCallResult> => {
@@ -599,6 +632,52 @@ export function setupIpc(deps: {
           app.relaunch()
           app.exit(0)
           return { ok: true, data: null }
+        }
+        // uTools 移植 POC：scan 结果直接下发；serve/stop 管全局静态服务（须主窗调用）
+        case 'utools:list': {
+          return { ok: true, data: await scanUtoolsPlugins(utoolsPluginsDir(), nodeFs) }
+        }
+        case 'utools:serve': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const id = (req.payload as { id?: unknown } | null)?.id
+          if (typeof id !== 'string' || id === '') return { ok: false, error: '缺少插件 id' }
+          const entries = await scanUtoolsPlugins(utoolsPluginsDir(), nodeFs)
+          const found = entries.find((e2) => e2.id === id && e2.manifest !== undefined)
+          if (!found?.manifest) return { ok: false, error: 'uTools 插件不存在或清单无效' }
+          utoolsServerPromise ??= createPluginServer({ rootDir: utoolsPluginsDir(), fsLike: nodeFs }).catch((err) => {
+            utoolsServerPromise = null
+            throw err
+          })
+          const server = await utoolsServerPromise
+          // 白名单每次 serve 前按最新扫描刷新，目录变动无需重启服务
+          server.setPlugins(Object.fromEntries(entries.filter((e2) => e2.manifest).map((e2) => [e2.id, e2.manifest!.main])))
+          watchUtoolsOwner(e.sender)
+          return { ok: true, data: { url: server.url(id) } }
+        }
+        case 'utools:stop': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          await stopUtoolsServer()
+          return { ok: true, data: null }
+        }
+        case 'utools:api': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const p = (req.payload ?? {}) as { action?: unknown; payload?: unknown }
+          const inner = (p.payload ?? {}) as { text?: unknown; body?: unknown }
+          switch (p.action) {
+            case 'copyText':
+              if (typeof inner.text !== 'string') return { ok: false, error: 'text 必须是字符串' }
+              await services.clipboard.writeText(inner.text)
+              return { ok: true, data: null }
+            case 'notify':
+              if (typeof inner.body !== 'string') return { ok: false, error: 'body 必须是字符串' }
+              await services.notification.show('UTools 插件', inner.body)
+              return { ok: true, data: null }
+            case 'hideMainWindow':
+              hideSearchWindow()
+              return { ok: true, data: null }
+            default:
+              return { ok: false, error: `未知 utools api：${String(p.action)}` }
+          }
         }
         default:
           return { ok: false, error: `未知宿主 api：${String(req?.api)}` }

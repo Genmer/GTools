@@ -112,24 +112,24 @@ html[data-theme='dark'] {
    alpha = 基数 + (1 - --tx) × 系数：--tx 越大越透；饱和度来自透进来的桌面，blur/saturate 补偿 */
 html[data-transparency='on'][data-theme='dark'] {
   /* 窗口 tint 取 Fluent dark TintColor #2C2C2C 中性灰（亮度透传交给原生层），禁蓝黑/近黑基色 */
-  --bg: rgba(44, 44, 44, calc(0.15 + (1 - var(--tx, 0.55)) * 0.2));
-  --bg-raised: rgba(44, 44, 46, calc(0.25 + (1 - var(--tx, 0.55)) * 0.25));
+  --bg: rgba(44, 44, 44, calc(0.05 + (1 - var(--tx, 0.55)) * 0.9));
+  --bg-raised: rgba(44, 44, 46, calc(0.12 + (1 - var(--tx, 0.55)) * 0.9));
   --border: rgba(255, 255, 255, 0.09);
   /* 三段式外投影（接触+悬浮+环境，延伸量按透明窗边距 48/32 预算）：alpha 随 --tx 线性上调 */
-  --shadow-window: 0 1px 2px rgba(0, 0, 0, calc(0.16 + var(--tx, 0.55) * 0.04)),
-    0 10px 24px rgba(0, 0, 0, calc(0.28 + var(--tx, 0.55) * 0.06)),
-    0 18px 28px rgba(0, 0, 0, calc(0.16 + var(--tx, 0.55) * 0.04));
+  --shadow-window: 0 1px 2px rgba(0, 0, 0, calc(0.16 + var(--tx, 0.55) * 0.08)),
+    0 10px 24px rgba(0, 0, 0, calc(0.28 + var(--tx, 0.55) * 0.12)),
+    0 18px 28px rgba(0, 0, 0, calc(0.16 + var(--tx, 0.55) * 0.08));
   --window-ring: inset 0 1px 2px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.07),
-    inset 0 0 30px rgba(0, 0, 0, calc(0.22 + var(--tx, 0.55) * 0.14));
+    inset 0 0 30px rgba(0, 0, 0, calc(0.22 + var(--tx, 0.55) * 0.28));
   --bg-shell: var(--bg);
-  --bg-content: rgba(28, 28, 30, calc(0.45 + (1 - var(--tx, 0.55)) * 0.25));
+  --bg-content: rgba(28, 28, 30, calc(0.06 + (1 - var(--tx, 0.55)) * 0.88));
   /* Regular：导航胶囊/底栏 tint + 受控模糊提饱和（tint 下调让 DWM 亚克力透进感可见）；Clear：溶解条 */
-  --glass-bg: rgba(40, 40, 42, calc(0.3 + (1 - var(--tx, 0.55)) * 0.2));
+  --glass-bg: rgba(40, 40, 42, calc(0.05 + (1 - var(--tx, 0.55)) * 0.78));
   --glass-filter: blur(16px) saturate(1.4) brightness(1.03);
   --strip-tint: rgba(255, 255, 255, 0.08);
   --strip-filter: blur(12px) saturate(1.2);
-  /* 凹陷输入域厚填充；黑不做面板底，禁 alpha>0.7 的 overlay */
-  --fill-well: rgba(0, 0, 0, calc(0.2 + (1 - var(--tx, 0.55)) * 0.1));
+  /* 凹陷输入域厚填充；黑不做面板底，禁 alpha>0.7 的 overlay（系数 0.6 保证 tx=0 时恰好触界） */
+  --fill-well: rgba(0, 0, 0, calc(0.1 + (1 - var(--tx, 0.55)) * 0.6));
   /* 暗色系 rim 白 alpha 减半 */
   --rim-c1: rgba(255, 255, 255, 0.47);
   --rim-c2: rgba(255, 255, 255, 0.06);
@@ -138,21 +138,21 @@ html[data-transparency='on'][data-theme='dark'] {
 }
 
 html[data-transparency='on'][data-theme='light'] {
-  --bg: rgba(255, 255, 255, calc(0.3 + (1 - var(--tx, 0.55)) * 0.3));
-  --bg-raised: rgba(255, 255, 255, calc(0.45 + (1 - var(--tx, 0.55)) * 0.3));
+  --bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.9));
+  --bg-raised: rgba(255, 255, 255, calc(0.15 + (1 - var(--tx, 0.55)) * 0.9));
   --border: rgba(0, 0, 0, 0.07);
-  --shadow-window: 0 1px 2px rgba(15, 23, 42, calc(0.1 + var(--tx, 0.55) * 0.04)),
-    0 10px 24px rgba(15, 23, 42, calc(0.14 + var(--tx, 0.55) * 0.06)),
-    0 18px 28px rgba(15, 23, 42, calc(0.08 + var(--tx, 0.55) * 0.04));
+  --shadow-window: 0 1px 2px rgba(15, 23, 42, calc(0.1 + var(--tx, 0.55) * 0.08)),
+    0 10px 24px rgba(15, 23, 42, calc(0.14 + var(--tx, 0.55) * 0.12)),
+    0 18px 28px rgba(15, 23, 42, calc(0.08 + var(--tx, 0.55) * 0.08));
   --window-ring: inset 0 1px 2px rgba(15, 23, 42, 0.12), inset 0 0 0 1px rgba(15, 23, 42, 0.05),
-    inset 0 0 30px rgba(15, 23, 42, calc(0.08 + var(--tx, 0.55) * 0.06));
+    inset 0 0 30px rgba(15, 23, 42, calc(0.08 + var(--tx, 0.55) * 0.12));
   --bg-shell: var(--bg);
-  --bg-content: rgba(255, 255, 255, calc(0.4 + (1 - var(--tx, 0.55)) * 0.25));
-  --glass-bg: rgba(255, 255, 255, calc(0.3 + (1 - var(--tx, 0.55)) * 0.2));
+  --bg-content: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.88));
+  --glass-bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.78));
   --glass-filter: blur(16px) saturate(1.4) brightness(1.03);
   --strip-tint: rgba(255, 255, 255, 0.15);
   --strip-filter: blur(12px) saturate(1.2);
-  --fill-well: rgba(255, 255, 255, calc(0.55 + (1 - var(--tx, 0.55)) * 0.2));
+  --fill-well: rgba(255, 255, 255, calc(0.1 + (1 - var(--tx, 0.55)) * 0.75));
   --rim-c1: rgba(255, 255, 255, 0.95);
   --rim-c2: rgba(255, 255, 255, 0.12);
   --rim-c3: rgba(255, 255, 255, 0.05);
@@ -172,8 +172,8 @@ html[data-transparency='on'][data-blur='off'] {
 /* 玻璃身景=系统实时材质：win32 走窗口级 acrylic（window.ts），macOS 走 .app 的 CSS backdrop-filter
    实时采样桌面（vibrancy 因整窗矩形磨霜会越出卡片圆角、已弃用）；霜面承担可读性 dimming，白层减薄防「白塑料板」 */
 html[data-theme='glass'] {
-  --bg: rgba(255, 255, 255, calc(0.02 + (1 - var(--tx, 0.55)) * 0.04));
-  --bg-raised: rgba(255, 255, 255, calc(0.02 + (1 - var(--tx, 0.55)) * 0.04));
+  --bg: rgba(255, 255, 255, calc(0.04 + (1 - var(--tx, 0.55)) * 0.86));
+  --bg-raised: rgba(255, 255, 255, calc(0.09 + (1 - var(--tx, 0.55)) * 0.86));
   --fg: #16202e;
   --fg-dim: rgba(22, 32, 46, 0.62);
   --accent: #0a6bd4;
@@ -202,11 +202,11 @@ html[data-theme='glass'] {
   --scrollbar-thumb: rgba(30, 42, 60, 0.25);
   --scrollbar-thumb-hover: rgba(30, 42, 60, 0.4);
   --bg-shell: var(--bg-raised);
-  --bg-content: rgba(255, 255, 255, calc(0.03 + (1 - var(--tx, 0.55)) * 0.07));
-  --glass-bg: rgba(255, 255, 255, calc(0.03 + (1 - var(--tx, 0.55)) * 0.05));
+  --bg-content: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.85));
+  --glass-bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.78));
   /* 磨砂档（模糊开=系统实时霜面）；清透档走下方覆写 */
   --glass-filter: blur(14px) saturate(1.5) brightness(1.05);
-  --fill-well: rgba(255, 255, 255, calc(0.3 + (1 - var(--tx, 0.55)) * 0.22));
+  --fill-well: rgba(255, 255, 255, calc(0.1 + (1 - var(--tx, 0.55)) * 0.7));
   --strip-tint: rgba(255, 255, 255, 0.1);
   --strip-filter: blur(10px) saturate(1.3);
   --tile-blue-bg: rgba(9, 105, 218, 0.16);
@@ -224,11 +224,11 @@ html[data-theme='glass'] {
 }
 /* 清透档（模糊关）：透明窗直透桌面，无系统霜面——白层加厚由页面自身承担可读性 */
 html[data-theme='glass'][data-blur='off'] {
-  --bg: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.1));
-  --bg-raised: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.1));
+  --bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.85));
+  --bg-raised: rgba(255, 255, 255, calc(0.1 + (1 - var(--tx, 0.55)) * 0.85));
   --border: rgba(255, 255, 255, 0.55);
-  --bg-content: rgba(255, 255, 255, calc(0.08 + (1 - var(--tx, 0.55)) * 0.12));
-  --glass-bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.07));
+  --bg-content: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.84));
+  --glass-bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.78));
   --glass-filter: blur(1.5px) saturate(1.6) brightness(1.05);
 }
 

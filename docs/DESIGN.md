@@ -652,6 +652,10 @@ backend（主进程模块）import 白名单在原有基础上**增加 `node:` �
 - **屏幕取色（desktopCapturer 截屏 + 像素取色）**：本期调研清单 10 个插件（markdown-notes / lan-file-share / web-quick-open / batch-rename / image-bed / todo-pomodoro / fake-data / dev-manual / password-vault / hot-search）均不需要；devtools 的 ColorTool 是颜色格式转换，不取屏幕色。如后续要加取色类插件再在此层扩展 `screen:pick-color`。
 - 外部插件实例化、`fs` 之外的任意路径访问、浮窗内嵌宿主能力面：刻意不做（安全边界）。
 
+### A.9 uTools 移植容器 POC（utools-port 插件，阶段 1）
+
+外部 uTools 插件整个目录放进 `userData/utools-plugins/`（独立目录，与 `userData/plugins/` 安全边界无关——那边仍只校验不实例化）；仅在 utools-port 管理页**显式打开**才运行。主进程起 127.0.0.1 随机端口静态服务（插件目录白名单 + resolve 防穿越）供 iframe 加载页面并注入 `window.utools` shim；**不执行插件 preload.js**（require 全量 Node，与渲染沙箱互斥），API 仅白名单 onPluginEnter / onPluginOut（离开容器广播）/ copyText / notify / hideMainWindow，经 postMessage 桥由 `gtools:host` 的 `utools:api` 代理，其余 `utools.*` 成员不存在（插件自行降级）。容器页不支持分离独立窗口：`utools:serve/stop/api` 仅主搜索窗可调，分离态打开会报「启动本地服务失败」并优雅降级。
+
 ---
 
 ## 附录 B：全局 API 配置中心（第三期）

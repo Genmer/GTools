@@ -6,6 +6,8 @@ import type { HostInitResult } from '../env'
 import { buildAppEntries, buildEntries } from '../core/entries'
 import { calc } from '../core/calc'
 import { matchEntryBest } from '../core/pinyin-index'
+import type { SearchEntry } from '../core/matcher'
+import { buildUtoolsEntries, UTOOLS_PLUGIN_ID, type UtoolsEntryScan } from '../core/utools-entries'
 import { buildRecommendations, fileMatcherHits, type MatchFile, type RecItem } from '../core/recommend'
 import {
   mergePushedItems,
@@ -94,7 +96,13 @@ const offFns: (() => void)[] = []
 const enabledManifests = computed(() => plugins.value.filter((p) => p.enabled).map((p) => p.manifest))
 const pluginEntries = computed(() => buildEntries(plugins.value))
 const appEntries = computed(() => buildAppEntries(apps.value))
-const entries = computed(() => [...pluginEntries.value, ...appEntries.value])
+// uTools 插件功能词条：随 utools-port 启用态门控（禁用后词条消失，enterPlugin 对未知 id 也会兜底拒绝）
+const utoolsEntries = ref<SearchEntry[]>([])
+const entries = computed(() => [
+  ...pluginEntries.value,
+  ...appEntries.value,
+  ...(plugins.value.some((p) => p.enabled && p.manifest.id === UTOOLS_PLUGIN_ID) ? utoolsEntries.value : [])
+])
 const results = computed(() => {
   const q = router.query.trim()
   if (q === '') return entries.value.map((e) => ({ entry: e, score: 0 }))
@@ -120,10 +128,19 @@ const recentRows = computed<RecentRow[]>(() => {
     const m = enabledManifests.value.find((x) => x.id === r.pluginId)
     if (!m) continue // 插件已禁用/卸载则不展示
     const cmd = (m.commands ?? []).find((c) => c.id === r.commandId)
+    let title = cmd ? cmd.title : m.name
+    let subtitle = cmd ? m.name : (m.description ?? '')
+    // uTools 功能词条（commandId=dir/code，不属宿主命令）回查词条标题；目录已删查不到则跳过
+    if (!cmd && r.pluginId === UTOOLS_PLUGIN_ID) {
+      const u = utoolsEntries.value.find((e) => e.commandId === r.commandId)
+      if (!u) continue
+      title = u.title
+      subtitle = u.subtitle ?? ''
+    }
     rows.push({
       key: `${r.pluginId}:${r.commandId ?? '_main'}`,
-      title: cmd ? cmd.title : m.name,
-      subtitle: cmd ? m.name : (m.description ?? ''),
+      title,
+      subtitle,
       icon: m.icon,
       pluginId: r.pluginId,
       commandId: r.commandId
@@ -364,6 +381,16 @@ async function peekClipboard(): Promise<void> {
   if (r.ok && typeof r.data === 'string') clipboardText.value = r.data
 }
 
+// uTools 插件扫描→词条：失败/空静默置 []（utools-port 未装插件属常态，不弹错）
+async function loadUtoolsEntries(): Promise<void> {
+  const r = await window.gtools.host('utools:list')
+  if (!r.ok) {
+    utoolsEntries.value = []
+    return
+  }
+  utoolsEntries.value = buildUtoolsEntries((r.data ?? []) as UtoolsEntryScan[])
+}
+
 // ---- 拖入文件/图片（推荐源 files/img）----
 
 const DROP_IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'])
@@ -554,7 +581,13 @@ function onSelect(index: number): void {
   if (item.entry.kind === 'app' && item.entry.appId) {
     void openAppById(item.entry.appId)
   } else if (item.entry.pluginId) {
-    activateEntry(item.entry.pluginId, item.entry.commandId)
+    // uTools 语义「关键词命中后带余文进入」：按最长命中关键词剥离前缀，余文经既有 query 通路进插件
+    const q = router.query.trim()
+    const kws = [item.entry.title, ...(item.entry.keywords ?? [])].filter(
+      (k): k is string => typeof k === 'string' && k !== ''
+    )
+    const kw = [...kws].sort((a, b) => b.length - a.length).find((k) => q.startsWith(k))
+    activateEntry(item.entry.pluginId, item.entry.commandId, kw !== undefined ? q.slice(kw.length).trim() : '')
   }
 }
 
@@ -726,6 +759,7 @@ onMounted(async () => {
       if (ok) void window.gtools.host('plugin:enter', { id: link.pluginId })
     }
     if (!isDemo.value && !isDetachedWindow.value) void loadApps()
+    void loadUtoolsEntries()
   }
   window.gtools.on('settings-changed', (p) => {
     settings.value = p as AppSettings
@@ -764,6 +798,8 @@ onMounted(async () => {
       // 重新唤起时低成本刷新（宿主内存缓存命中即回），顺带收敛 TTL 过期与新装应用
       void loadApps()
       void peekClipboard()
+      // 覆盖「拷入新 uTools 插件目录后重唤启动器」的词条刷新
+      void loadUtoolsEntries()
     } else if (router.mode === 'plugin') {
       // 插件/设置态唤醒保留现场：焦点交回插件内容区首个输入控件
       pluginHost.value?.focusContent()
