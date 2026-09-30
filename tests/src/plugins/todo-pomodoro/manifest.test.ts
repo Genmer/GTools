@@ -37,4 +37,9 @@ describe('todo-pomodoro manifest', () => {
       expect(ctx.activeKeywords.has(k), `keyword「${k}」被占用`).toBe(false)
     }
   })
+
+  it('声明 add 命令与对应的 text matcher', () => {
+    expect(manifest.commands?.some((c) => c.id === 'add' && c.title === '添加到待办')).toBe(true)
+    expect(manifest.matchers?.some((m) => m.type === 'text' && m.commandId === 'add')).toBe(true)
+  })
 })

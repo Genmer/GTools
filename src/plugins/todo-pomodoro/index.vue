@@ -151,12 +151,32 @@ watch(
   { immediate: true }
 )
 
+// initialCommand 消费（全局推荐条直达）
+let initialCommandConsumed = false
+function consumeInitialCommand(cmd?: string): void {
+  if (initialCommandConsumed || cmd === undefined || cmd === '') return
+  if (cmd === 'add') {
+    initialCommandConsumed = true
+    if (props.query.trim()) {
+      const text = props.query.trim()
+      const next = addTodo(todos.value, { text, priority: 'normal', now: Date.now() })
+      if (next !== null) {
+        todos.value = next
+        void props.ctx.host.storage.set(TODOS_KEY, toPersistedTodos(todos.value))
+        addText.value = ''
+      }
+    }
+    return
+  }
+}
+
 async function load(): Promise<void> {
   try {
     todos.value = parsePersistedTodos(await props.ctx.host.storage.get(TODOS_KEY)) ?? []
   } catch {
     todos.value = []
   }
+  consumeInitialCommand(props.initialCommand)
   try {
     settings.value = normalizeTimerSettings(await props.ctx.host.storage.get(SETTINGS_KEY))
   } catch {
@@ -392,6 +412,8 @@ onMounted(() => {
   if (!isDemo.value) {
     void load()
     offEvents = props.ctx.host.events.on(TIMER_EVENT, (p) => applySnapshot(p))
+  } else {
+    consumeInitialCommand(props.initialCommand)
   }
   clockTimer = setInterval(() => {
     now.value = Date.now()

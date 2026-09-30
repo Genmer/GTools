@@ -3,6 +3,7 @@ import type { PluginManifest, PluginMatcher } from '../sdk/manifest'
 import type { SearchEntry } from '../src/renderer/src/core/matcher'
 import type { MatchFile } from '../src/renderer/src/core/recommend'
 import { buildRecommendations, fileMatcherHits, keywordSideHits, looksLikeJson, matcherHits } from '../src/renderer/src/core/recommend'
+import { isSensitiveText } from '../src/renderer/src/core/sensitive'
 
 const entry = (over: Partial<SearchEntry> & { key: string }): SearchEntry => ({ title: over.key, icon: '', ...over })
 
@@ -116,15 +117,38 @@ describe('matcherHits', () => {
     expect(matcherHits('banana', [excluded])).toHaveLength(1)
   })
 
-  it('json 型只认剪贴板文本；query 为空时 text/regex 短路、仅剪贴板 json 可产出', () => {
+  it('json 型双源：剪贴板优先、fallback 到 query', () => {
     const j = manifest('json-editor', { matchers: [{ type: 'json', label: '打开 JSON 编辑器' }] })
-    expect(matcherHits('{"a":1}', [j])).toEqual([]) // query 非 JSON，json 型不认 query
-    expect(matcherHits('', [j], '{"a":1}')).toHaveLength(1)
-    expect(matcherHits('', [j], 'not json')).toEqual([])
+    // query 是 JSON 时也命中（P0 改动）
+    const queryHit = matcherHits('{"a":1}', [j])
+    expect(queryHit).toHaveLength(1)
+    expect(queryHit[0].pluginId).toBe('json-editor')
+    expect(queryHit[0].payload).toBe('{"a":1}')
+    // 剪贴板有 JSON 时优先用剪贴板
+    const hits = matcherHits('other', [j], '{"b":2}')
+    expect(hits).toHaveLength(1)
+    expect(hits[0].payload).toBe('{"b":2}')
+    // 剪贴板非 JSON、query 是 JSON 时 fallback
+    const fb = matcherHits('{"c":3}', [j], 'not json')
+    expect(fb).toHaveLength(1)
+    expect(fb[0].payload).toBe('{"c":3}')
+    // 两者都不是 JSON 时不命中
+    expect(matcherHits('hello', [j], 'world')).toEqual([])
     expect(matcherHits('', [j])).toEqual([])
 
     const t = manifest('translate', { matchers: [{ type: 'text', label: 'x' }] })
     expect(matcherHits('', [t], '{"a":1}')).toEqual([]) // 空 query 下 text 不产出
+  })
+
+  it('按源组配额：text 上限 4、json 属于 content 组不被挤占', () => {
+    const textPlugins = [1, 2, 3, 4, 5].map((i) =>
+      manifest(`t${i}`, { matchers: [{ type: 'text', label: `t${i}` }] })
+    )
+    const jsonPlugin = manifest('json-p', { matchers: [{ type: 'json', label: 'json' }] })
+    const hits = matcherHits('{"a":1}', [...textPlugins, jsonPlugin])
+    expect(hits.filter((h) => h.source === 'text')).toHaveLength(4)
+    expect(hits.filter((h) => h.source === 'json')).toHaveLength(1)
+    expect(hits).toHaveLength(5)
   })
 
   it('每插件每 type 至多一条、总数上限 4', () => {
@@ -291,5 +315,39 @@ describe('buildRecommendations', () => {
   it('matcher 未声明时（如 PluginMatcher 缺省插件）不产出 matcher 推荐', () => {
     const bare = manifest('calc')
     expect(buildRecommendations({ query: 'jsq', manifests: [bare] })).toEqual([])
+  })
+
+  it('敏感 query：推荐保留但 payload 为 undefined', () => {
+    const secretJson = '{"password":"super-secret-password-123"}'
+    expect(isSensitiveText(secretJson)).toBe(true)
+    const r = buildRecommendations({
+      query: secretJson,
+      entries: [],
+      manifests: [jsonEditor, translate]
+    })
+    expect(r.length).toBeGreaterThan(0)
+    for (const it of r) {
+      expect(it.payload).toBeUndefined()
+    }
+  })
+
+  it('敏感 clipboardText：不传入 matcherHits 且不产出 json 推荐', () => {
+    const secretClip = '{"password":"super-secret-123"}'
+    expect(isSensitiveText(secretClip)).toBe(true)
+    const r = buildRecommendations({
+      query: 'hello',
+      entries: [],
+      manifests: [jsonEditor],
+      clipboardText: secretClip
+    })
+    expect(r.filter((it) => it.source === 'json')).toHaveLength(0)
+    expect(
+      buildRecommendations({
+        query: '',
+        entries: [],
+        manifests: [jsonEditor],
+        clipboardText: secretClip
+      })
+    ).toEqual([])
   })
 })

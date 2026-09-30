@@ -30,11 +30,17 @@ describe('float-image manifest', () => {
   it('trigger 型无 backend，权限只声明用到的能力', () => {
     expect(manifest.activation).toBe('trigger')
     expect(manifest.backend).toBeUndefined()
-    expect(manifest.permissions).toEqual(['clipboard:read', 'window:float', 'dialog', 'fs', 'storage'])
+    expect(manifest.permissions).toEqual(['clipboard:read', 'window:float', 'dialog', 'fs', 'storage', 'window:hide'])
   })
 
   it('commands 唯一且与全局词条直达对应', () => {
     const ids = manifest.commands?.map((c) => c.id) ?? []
     expect(ids).toEqual(['pin-clipboard', 'pin-file'])
+  })
+
+  it('matchers 包含 files 图片类型匹配', () => {
+    expect(manifest.matchers).toEqual([
+      { type: 'files', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'], label: '贴图：悬浮图片文件', commandId: 'pin-file' }
+    ])
   })
 })

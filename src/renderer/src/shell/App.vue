@@ -9,6 +9,7 @@ import { matchEntryBest } from '../core/pinyin-index'
 import type { SearchEntry } from '../core/matcher'
 import { buildUtoolsEntries, UTOOLS_PLUGIN_ID, type UtoolsEntryScan } from '../core/utools-entries'
 import { buildRecommendations, fileMatcherHits, type MatchFile, type RecItem } from '../core/recommend'
+import { isSensitiveText } from '../core/sensitive'
 import {
   mergePushedItems,
   normalizePushedItem,
@@ -378,7 +379,9 @@ async function loadApps(force = false): Promise<void> {
 async function peekClipboard(): Promise<void> {
   if (!clipboardSuggestOn.value) return
   const r = await window.gtools.host('clipboard:peek')
-  if (r.ok && typeof r.data === 'string') clipboardText.value = r.data
+  if (r.ok && typeof r.data === 'string') {
+    clipboardText.value = isSensitiveText(r.data) ? '' : r.data
+  }
 }
 
 // uTools 插件扫描→词条：失败/空静默置 []（utools-port 未装插件属常态，不弹错）
@@ -730,6 +733,10 @@ function applyVisualSettings(s: AppSettings): void {
   document.documentElement.dataset.transparency = s.transparency.enabled || s.theme === 'glass' ? 'on' : 'off'
   document.documentElement.dataset.blur = s.transparency.blur ? 'on' : 'off'
   document.documentElement.style.setProperty('--tx', (s.transparency.opacity / 100).toFixed(2))
+  // (1-tx)³ 感知曲线：玻璃主题专用——滑杆低段陡增保证 0 档够白可读，高段维持清玻璃
+  document.documentElement.style.setProperty('--txp', Math.pow(1 - s.transparency.opacity / 100, 3).toFixed(4))
+  // 霜曲线：(1-t)^0.9 幂次 CSS calc 表达不了，JS 算好注入（themes.css 玻璃块 blur 消费）
+  document.documentElement.style.setProperty('--txf', Math.pow(1 - s.transparency.opacity / 100, 0.9).toFixed(4))
 }
 
 
@@ -786,6 +793,7 @@ onMounted(async () => {
     if (document.visibilityState !== 'visible') {
       // 隐私默认：推送与拖入集只在窗口可见会话内保留，隐藏即清（对齐 dropFiles 声明处注释）
       pushedItems.value = []
+      clipboardText.value = ''
       releaseDrop()
       return
     }
@@ -907,14 +915,38 @@ onBeforeUnmount(() => {
   overflow: hidden;
   /* 全工程唯一投影，只挂窗口根（系统 DWM 影为主，此值为兜底轮廓） */
   box-shadow: var(--window-ring, none), var(--shadow-window);
-  /* 只铺 padding-box 单层：受光边绝不能走 border-box 层——透明窗 shell 是半透明白，
-     border-box 渐变（edge-hi 0.95→0.3）会透过它漏满整窗，即终审实测的 75-80% 白纱；
-     窗缘受光全部由 --window-ring 的 inset shadow 承担（分主题定义） */
-  background: linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
+  /* 只铺 padding-box：受光边绝不能走 border-box 层——透明窗 shell 是半透明白，
+     border-box 渐变会透过它漏满整窗，即终审实测的 75-80% 白纱；窗缘受光全部由
+     --window-ring 的 inset shadow 承担（分主题定义）。上层 115deg sheen 高光随磨砂度渐显 */
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, var(--glass-sheen)), rgba(255, 255, 255, 0) 46%) padding-box,
+    linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
   /* 磨霜面（macOS 主霜源）：backdrop-filter 实时采样窗口背后桌面，与 --glass-filter 同变量——
      blur 开关/主题档位经 data-blur 联动（light/dark/glass 清透档均为 none）；win32 磨霜由窗口级
      亚克力担纲，此处在不透明窗上无页面底色可采、自然无效 */
   backdrop-filter: var(--glass-filter);
+}
+/* 厚玻璃壁：168deg 上亮→中透→下暗微亮的环带渐变，模拟厚玻璃切面；叶子伪元素自持 mask，
+   不在玻璃面的祖先链上（同 .app::before 先例）；--glass-depth 惰性 0px 时 mask xor 无环带不可见 */
+.app::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: var(--glass-depth);
+  background: linear-gradient(
+    168deg,
+    rgba(255, 255, 255, 0.9),
+    rgba(255, 255, 255, 0.14) 30%,
+    rgba(148, 163, 184, 0.04) 55%,
+    rgba(100, 116, 139, 0.16) 84%,
+    rgba(255, 255, 255, 0.55)
+  );
+  -webkit-mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
+  mask-composite: exclude;
+  pointer-events: none;
 }
 /* 圆角按窗口透明性分治（真实标志由 window.ts 经 html[data-wintx] 同步）：
    不透明窗（亚克力/实色）内容满幅、圆角交 OS 裁剪（Win11 DWM/macOS 系统弧）——
@@ -927,6 +959,14 @@ html[data-wintx='1'] .app {
   border-radius: var(--r-window);
   /* 透明窗：#app 有 32/32/48 透明边距（base.css），.app 只满 padding-box，外圈投影落进边距 */
   height: 100%;
+}
+/* win32 不透明窗（DWM 亚克力霜面 CSS 采不到）：feTurbulence 噪点自绘玻璃颗粒，叠 sheen 之上 */
+html[data-wintx='0'][data-theme='glass'] .app {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E")
+      padding-box,
+    linear-gradient(115deg, rgba(255, 255, 255, var(--glass-sheen)), rgba(255, 255, 255, 0) 46%) padding-box,
+    linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
 }
 /* 导航层：搜索胶囊绝对定位浮于内容之上，内容滚入其下；z 两层只有 --z-nav / --z-content */
 .topbar {

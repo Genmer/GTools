@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import type { FloatWindowEvent, PluginContext } from '@sdk/api'
+import type { FloatWindowEvent, MatchFile, PluginContext } from '@sdk/api'
 import { buildFloatHtml, extractThemeVars, sanitizeDataUrl } from './logic/float-html'
 import {
   createPinRuntime,
@@ -20,7 +20,12 @@ import {
   type NaturalSize
 } from './logic/state'
 
-const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string }>()
+const props = defineProps<{
+  ctx: PluginContext
+  query: string
+  initialCommand?: string
+  initialPayload?: MatchFile[]
+}>()
 
 const STORAGE_KEY = 'state'
 const THUMB_MAX = 96
@@ -76,14 +81,43 @@ onBeforeUnmount(() => {
   if (!demoMode) void props.ctx.host.storage.set(STORAGE_KEY, runtime.persist).catch(() => {})
 })
 
-// 全局词条直达：pin-clipboard 直接贴出剪贴板，pin-file 直接弹文件选择（demo 不触发动作）
+// 全局词条直达：pin-clipboard 直接贴出剪贴板，pin-file 优先消费拖入文件（demo 不触发动作）
 watch(
   () => props.initialCommand,
-  (cmd) => {
-    if (commandDone || !cmd) return
+  async (cmd) => {
+    if (commandDone || !cmd || demoMode) return
     commandDone = true
-    if (cmd === 'pin-clipboard') void pinClipboard()
-    else if (cmd === 'pin-file') void pickFiles()
+    if (cmd === 'pin-clipboard') {
+      await pinClipboard()
+    } else if (cmd === 'pin-file') {
+      const files = props.initialPayload ?? []
+      if (files.length > 0) {
+        busy.value = true
+        error.value = ''
+        try {
+          const paths = files.map((f) => f.path)
+          await props.ctx.host.fs.grant(paths)
+          let anySuccess = false
+          for (const p of paths) {
+            try {
+              await pinFile(p)
+              anySuccess = true
+            } catch (err) {
+              fail(`${p}：${err instanceof Error ? err.message : String(err)}`)
+            }
+          }
+          if (anySuccess) {
+            await hideHostWindow()
+          }
+        } catch (err) {
+          fail(err instanceof Error ? err.message : String(err))
+        } finally {
+          busy.value = false
+        }
+      } else {
+        await pickFiles()
+      }
+    }
   },
   { immediate: true }
 )
@@ -161,6 +195,16 @@ function schedulePersist(): void {
   }, 500)
 }
 
+async function hideHostWindow(): Promise<void> {
+  try {
+    if (typeof props.ctx.host.window?.hide === 'function') {
+      await props.ctx.host.window.hide()
+    }
+  } catch {
+    // 隐藏宿主窗失败不阻断贴图结果
+  }
+}
+
 async function pinClipboard(): Promise<void> {
   if (busy.value) return
   busy.value = true
@@ -173,6 +217,7 @@ async function pinClipboard(): Promise<void> {
       return
     }
     await pinDataUrl(img.dataUrl, { width: img.width, height: img.height }, '剪贴板图片')
+    await hideHostWindow()
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err))
   } finally {
@@ -190,12 +235,17 @@ async function pickFiles(): Promise<void> {
       multiple: true,
       filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'] }]
     })
+    let anySuccess = false
     for (const p of paths) {
       try {
         await pinFile(p)
+        anySuccess = true
       } catch (err) {
         fail(`${p}：${err instanceof Error ? err.message : String(err)}`)
       }
+    }
+    if (anySuccess) {
+      await hideHostWindow()
     }
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err))

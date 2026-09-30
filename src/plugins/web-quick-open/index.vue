@@ -87,6 +87,14 @@ watch(
   (cmd) => {
     if (initialCommandConsumed || cmd === undefined || cmd === '') return
     initialCommandConsumed = true
+    if (cmd === 'baidu') {
+      const site = allSites.value.find((s) => s.id === 'baidu')
+      if (site) {
+        const openUrl = buildOpenUrl(site, props.query)
+        void open({ key: 'cmd:baidu', kind: 'search', site, title: '百度一下', subtitle: openUrl, openUrl })
+      }
+      return
+    }
     if (cmd === 'search') {
       const pin = resolvePin(props.query, allSites.value)
       if (pin) {

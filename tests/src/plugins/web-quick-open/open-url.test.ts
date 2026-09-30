@@ -6,6 +6,7 @@ import {
   looksLikeUrl,
   normalizeUserUrl
 } from '../../../../src/plugins/web-quick-open/open-url'
+import { BUILTIN_SITES } from '../../../../src/plugins/web-quick-open/sites'
 
 describe('normalizeUserUrl', () => {
   it('补 https 前缀并去空白', () => {
@@ -93,5 +94,14 @@ describe('buildOpenUrl', () => {
 
   it('模板损坏时回退主页，不产出坏 URL', () => {
     expect(buildOpenUrl({ url: 'https://a.com', searchUrl: 'https://a.com/s' }, 'x')).toBe('https://a.com')
+  })
+
+  it('baidu 动作：正常参数拼接搜索链接，空参数回退主页', () => {
+    const baidu = BUILTIN_SITES.find((s) => s.id === 'baidu')!
+    expect(baidu).toBeDefined()
+    expect(buildOpenUrl(baidu, 'vitest')).toBe('https://www.baidu.com/s?wd=vitest')
+    expect(buildOpenUrl(baidu, '')).toBe('https://www.baidu.com')
+    expect(buildOpenUrl(baidu, '   ')).toBe('https://www.baidu.com')
+    expect(buildOpenUrl(baidu)).toBe('https://www.baidu.com')
   })
 })

@@ -203,9 +203,53 @@ function onKeydown(e: KeyboardEvent): void {
   padding: 0 14px;
   height: 100%;
   border-radius: var(--r-pill);
-  background: var(--glass-bg);
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, var(--glass-sheen)), rgba(255, 255, 255, 0) 46%),
+    linear-gradient(var(--glass-bg), var(--glass-bg));
   backdrop-filter: var(--glass-filter);
   -webkit-app-region: no-drag;
+}
+/* 厚玻璃壁：与 .app/.detached 的壁厚伪元素同构；叶子伪元素自持 mask，不碰玻璃面的 backdrop 祖先链 */
+.searchbox::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: var(--glass-depth);
+  background: linear-gradient(
+    168deg,
+    rgba(255, 255, 255, 0.9),
+    rgba(255, 255, 255, 0.14) 30%,
+    rgba(148, 163, 184, 0.04) 55%,
+    rgba(100, 116, 139, 0.16) 84%,
+    rgba(255, 255, 255, 0.55)
+  );
+  -webkit-mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+/* 135deg 色散渐变环：白光过玻璃边缘的青/品红 1px 微偏移（token 玻璃主题外 transparent 不可见）；
+   叶子伪元素自持 mask，不碰玻璃面的 backdrop 祖先链（同 .app::before 先例） */
+.searchbox::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    135deg,
+    var(--disp-c1),
+    rgba(255, 255, 255, 0) 34%,
+    rgba(255, 255, 255, 0) 62%,
+    var(--disp-c2)
+  );
+  -webkit-mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
+  mask-composite: exclude;
+  pointer-events: none;
 }
 .magnifier {
   flex: none;

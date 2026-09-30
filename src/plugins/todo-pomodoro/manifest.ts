@@ -13,7 +13,13 @@ const manifest: PluginManifest = {
   permissions: ['storage', 'notification', 'window:float'],
   source: 'builtin',
   entry: './index.vue',
-  backend: './backend/index.ts'
+  backend: './backend/index.ts',
+  commands: [
+    { id: 'add', title: '添加到待办' }
+  ],
+  matchers: [
+    { type: 'text', label: '添加到待办', commandId: 'add' }
+  ]
 }
 
 export default manifest

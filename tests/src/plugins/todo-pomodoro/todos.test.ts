@@ -74,6 +74,15 @@ describe('makeTodo / addTodo', () => {
     expect(next!.length).toBe(2)
     expect(src.length).toBe(1)
   })
+
+  it('add 命令处理：正常参数追加待办，空/纯空白参数拒绝', () => {
+    const list: Todo[] = []
+    const added = addTodo(list, { text: '写文档', now: T0 })
+    expect(added).not.toBeNull()
+    expect(added![0].text).toBe('写文档')
+    expect(addTodo(list, { text: '', now: T0 })).toBeNull()
+    expect(addTodo(list, { text: '   ', now: T0 })).toBeNull()
+  })
 })
 
 describe('updateTodo / toggleTodo / removeTodo', () => {

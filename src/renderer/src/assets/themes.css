@@ -59,6 +59,16 @@ html[data-theme='light'] {
   --fill-well: var(--bg-raised);
   --strip-tint: transparent;
   --strip-filter: none;
+  /* 玻璃曲线 token 惰性默认（glass 块按磨砂度覆写真值）：depth=0 时壁厚伪元素 mask xor 无环带不可见，
+     disp 为色散环两端色（玻璃主题外 transparent） */
+  --glass-blur: 14px;
+  --glass-contrast: 1;
+  --glass-sat: 1.5;
+  --glass-sheen: 0;
+  --glass-depth: 0px;
+  --glass-shadow-k: 1;
+  --disp-c1: transparent;
+  --disp-c2: transparent;
 
   /* 空态应用/最近行字母块兜底色（§1.5）：六色轮换，前景为大号图标字形取宽松对比 */
   --tile-blue-bg: rgba(9, 105, 218, 0.12);
@@ -159,7 +169,7 @@ html[data-transparency='on'][data-theme='light'] {
   --rim-c4: rgba(255, 255, 255, 0.3);
 }
 
-/* 清透档（模糊关）三主题通用：霜面退为纯着色，桌面直透；glass 主题在下方另有加厚覆写 */
+/* 清透档（模糊关）三主题通用：霜面退为纯着色，桌面直透；玻璃感厚度由 glass 曲线 token 自带 */
 html[data-transparency='on'][data-blur='off'] {
   --glass-filter: none;
 }
@@ -172,8 +182,9 @@ html[data-transparency='on'][data-blur='off'] {
 /* 玻璃身景=系统实时材质：win32 走窗口级 acrylic（window.ts），macOS 走 .app 的 CSS backdrop-filter
    实时采样桌面（vibrancy 因整窗矩形磨霜会越出卡片圆角、已弃用）；霜面承担可读性 dimming，白层减薄防「白塑料板」 */
 html[data-theme='glass'] {
-  --bg: rgba(255, 255, 255, calc(0.04 + (1 - var(--tx, 0.55)) * 0.86));
-  --bg-raised: rgba(255, 255, 255, calc(0.09 + (1 - var(--tx, 0.55)) * 0.86));
+  /* 主窗 tint = 0.02 + 0.60·txp + 0.04·t（0 档 0.62 封顶不平板白，55 档 0.097 不倒退） */
+  --bg: rgba(255, 255, 255, calc(0.02 + 0.6 * var(--txp, 0.0911) + 0.04 * var(--tx, 0.55)));
+  --bg-raised: rgba(255, 255, 255, calc(0.02 + 0.6 * var(--txp, 0.0911) + 0.04 * var(--tx, 0.55)));
   --fg: #16202e;
   --fg-dim: rgba(22, 32, 46, 0.62);
   --accent: #0a6bd4;
@@ -182,16 +193,21 @@ html[data-theme='glass'] {
   --danger: #c2342c;
   --ok: #157f3c;
   --warn: #96650a;
-  /* 三段式外投影（接触+悬浮+环境），延伸量按透明窗边距（下 48/侧 32）预算 */
-  --shadow-window: 0 1px 2px rgba(20, 32, 52, 0.14), 0 14px 34px rgba(20, 32, 52, 0.22),
-    0 24px 48px rgba(20, 32, 52, 0.18);
-  /* 壳缘受光=玻璃厚度光：上缘亮线/下缘暗线/侧缘弱光/内部微光（ref1 玻璃板边缘光学） */
-  --window-ring: inset 0 1px 1px rgba(255, 255, 255, 0.65), inset 0 -1px 1px rgba(255, 255, 255, 0.22),
+  /* 三段式外投影（接触+悬浮+环境），延伸量按透明窗边距（下 48/侧 32）预算——
+     超预算会被窗口矩形硬裁出直边（实测「看得出正方形」根因），动值前先对 MARGIN 校验；
+     alpha 乘 --glass-shadow-k（磨砂度越高影越实） */
+  --shadow-window: 0 1px 2px rgba(20, 32, 52, calc(0.14 * var(--glass-shadow-k))),
+    0 10px 24px rgba(20, 32, 52, calc(0.16 * var(--glass-shadow-k))),
+    0 16px 26px rgba(20, 32, 52, calc(0.12 * var(--glass-shadow-k)));
+  /* 壳缘受光=玻璃厚度光：色散线（上青下品红的 1px 折射偏移）+ 上缘亮线/下缘暗线/侧缘弱光/内部微光 */
+  --window-ring: inset 0 1px 0 var(--disp-c1), inset 0 -1px 0 var(--disp-c2),
+    inset 0 1px 1px rgba(255, 255, 255, 0.65), inset 0 -1px 1px rgba(255, 255, 255, 0.22),
     inset 1px 0 0 rgba(255, 255, 255, 0.28), inset -1px 0 0 rgba(255, 255, 255, 0.28),
-    inset 0 0 10px rgba(255, 255, 255, 0.1);
+    inset 0 0 22px rgba(255, 255, 255, calc(0.16 * var(--glass-shadow-k)));
   --glass-inset: var(--window-ring);
-  /* 独立玻璃件（胶囊）下的真实软投影 */
-  --shadow-glass: 0 1px 2px rgba(15, 23, 42, 0.12), 0 8px 24px rgba(15, 23, 42, 0.16);
+  /* 独立玻璃件（胶囊）下的真实软投影，alpha 乘 --glass-shadow-k 与窗口影同步 */
+  --shadow-glass: 0 1px 2px rgba(15, 23, 42, calc(0.12 * var(--glass-shadow-k))),
+    0 8px 24px rgba(15, 23, 42, calc(0.16 * var(--glass-shadow-k)));
   /* conic 受光环：左上强受光绕一圈明暗变化（窗缘「弯折桌面」CSS 做不到，此环是光学近似） */
   --rim-c1: rgba(255, 255, 255, 0.95);
   --rim-c2: rgba(255, 255, 255, 0.12);
@@ -202,10 +218,20 @@ html[data-theme='glass'] {
   --scrollbar-thumb: rgba(30, 42, 60, 0.25);
   --scrollbar-thumb-hover: rgba(30, 42, 60, 0.4);
   --bg-shell: var(--bg-raised);
-  --bg-content: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.85));
-  --glass-bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.78));
-  /* 磨砂档（模糊开=系统实时霜面）；清透档走下方覆写 */
-  --glass-filter: blur(14px) saturate(1.5) brightness(1.05);
+  --bg-content: rgba(255, 255, 255, calc(0.03 + 0.07 * (1 - var(--tx, 0.55)) + 0.21 * var(--txp, 0.0911)));
+  --glass-bg: rgba(255, 255, 255, calc(0.04 + 0.3 * var(--txp, 0.0911)));
+  /* 玻璃曲线 token 族：blur 幂次靠宿主注入的 --txf（App.vue），其余由 --tx/--txp 纯 calc 表达 */
+  --glass-blur: calc(1.5px + 34px * var(--txf, 0.4874));
+  --glass-contrast: calc(1 + 0.18 * (1 - var(--tx, 0.55)));
+  --glass-sat: calc(1.5 + 0.1 * var(--tx, 0.55));
+  --glass-sheen: calc(0.1 + 0.3 * var(--tx, 0.55));
+  --glass-depth: calc(2.5px + 1.5px * var(--tx, 0.55));
+  --glass-shadow-k: calc(1 + 0.4 * var(--tx, 0.55));
+  /* 磨砂档（模糊开=系统实时霜面）；清透档由全局 data-blur off 规则退 none，玻璃感由厚度曲线自带 */
+  --glass-filter: blur(var(--glass-blur)) contrast(var(--glass-contrast)) saturate(var(--glass-sat)) brightness(1.05);
+  /* 色散环两端色：青=折射短波偏移、品红=长波偏移，静态 alpha 不随磨砂度 */
+  --disp-c1: rgba(45, 212, 191, 0.55);
+  --disp-c2: rgba(232, 64, 180, 0.45);
   --fill-well: rgba(255, 255, 255, calc(0.1 + (1 - var(--tx, 0.55)) * 0.7));
   --strip-tint: rgba(255, 255, 255, 0.1);
   --strip-filter: blur(10px) saturate(1.3);
@@ -222,14 +248,12 @@ html[data-theme='glass'] {
   --tile-teal-bg: rgba(12, 140, 130, 0.16);
   --tile-teal-fg: #0c8c82;
 }
-/* 清透档（模糊关）：透明窗直透桌面，无系统霜面——白层加厚由页面自身承担可读性 */
-html[data-theme='glass'][data-blur='off'] {
-  --bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.85));
-  --bg-raised: rgba(255, 255, 255, calc(0.1 + (1 - var(--tx, 0.55)) * 0.85));
-  --border: rgba(255, 255, 255, 0.55);
-  --bg-content: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.84));
-  --glass-bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.78));
-  --glass-filter: blur(1.5px) saturate(1.6) brightness(1.05);
+/* win32 不透明窗降级（blur 开走窗口级亚克力，DWM 霜面 CSS backdrop 采不到）：tint 整体抬高保可读 */
+html[data-wintx='0'][data-theme='glass'] {
+  --bg: rgba(255, 255, 255, calc(0.28 + 0.44 * var(--txp, 0.0911)));
+  --bg-raised: rgba(255, 255, 255, calc(0.28 + 0.44 * var(--txp, 0.0911)));
+  --glass-bg: rgba(255, 255, 255, calc(0.22 + 0.34 * var(--txp, 0.0911)));
+  --fill-well: rgba(255, 255, 255, calc(0.3 + 0.4 * var(--txp, 0.0911)));
 }
 
 /* 窗口根 conic 受光环（1.2px）：token 未定义处 transparent 不可见；mask 挖环是装饰叶子节点，

@@ -8,6 +8,7 @@ const allAliases = BUILTIN_SITES.flatMap((s) => s.aliases ?? [])
 // 高频站点直达命令：keywords 进全局词条池（id + 中文名 + 长别名，短缩写不放防噪声）
 const OPEN_COMMANDS: PluginManifest['commands'] = [
   { id: 'search', title: '网页快搜' },
+  { id: 'baidu', title: '百度一下' },
   { id: 'open-baidu', title: '打开 百度', keywords: ['baidu', '百度'] },
   { id: 'open-bilibili', title: '打开 哔哩哔哩', keywords: ['bilibili', '哔哩哔哩', 'bili'] },
   { id: 'open-github', title: '打开 GitHub', keywords: ['github'] },
@@ -38,6 +39,11 @@ const manifest: PluginManifest = {
       match: buildQuickSearchMatcherSource(allAliases),
       label: '网页快搜',
       commandId: 'search'
+    },
+    {
+      type: 'text',
+      label: '百度一下',
+      commandId: 'baidu'
     }
   ],
   // 激活后主框进入子输入态，占位归插件声明

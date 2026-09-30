@@ -348,7 +348,8 @@ async function importBackup(): Promise<void> {
             </div>
             <div class="row">
               <div class="row-main">
-                <span class="name">透明度</span>
+                <!-- 玻璃主题下滑杆语义 = 磨砂度：0 厚磨砂、100 清玻璃 -->
+                <span class="name">{{ settings?.theme === 'glass' ? '磨砂度' : '透明度' }}</span>
               </div>
               <input
                 class="slider"

@@ -38,7 +38,11 @@ onMounted(() => {
     if (d?.transparency) {
       document.documentElement.dataset.transparency = d.transparency.enabled ? 'on' : 'off'
       document.documentElement.dataset.blur = d.transparency.blur !== false ? 'on' : 'off'
-      document.documentElement.style.setProperty('--tx', (d.transparency.opacity / 100).toFixed(2))
+      // 独立窗不走 App.vue 的 applyVisualSettings，感知曲线 token 需在此对主窗同公式注入
+      const t = d.transparency.opacity / 100
+      document.documentElement.style.setProperty('--tx', t.toFixed(2))
+      document.documentElement.style.setProperty('--txp', Math.pow(1 - t, 3).toFixed(4))
+      document.documentElement.style.setProperty('--txf', Math.pow(1 - t, 0.9).toFixed(4))
     }
   })
 })
@@ -76,17 +80,41 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .detached {
+  position: relative;
   height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   border: 1px solid transparent;
-  /* 全工程唯一投影只挂窗口根；与主窗 .app 同款单层 padding-box 背景：
+  /* 全工程唯一投影只挂窗口根；与主窗 .app 同款 padding-box 背景（sheen 高光层 + tint 层）：
      受光边走 --window-ring inset shadow，border-box 渐变会透过半透明 tint 漏满整窗（白纱根因） */
   box-shadow: var(--window-ring, none), var(--shadow-window);
-  background: linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, var(--glass-sheen)), rgba(255, 255, 255, 0) 46%) padding-box,
+    linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
   /* 磨霜与主窗 .app 同源同变量：macOS 上独立窗透明直透桌面，无此层则失去霜面 */
   backdrop-filter: var(--glass-filter);
+}
+/* 厚玻璃壁：与主窗 .app::after 同构；--glass-depth 惰性 0px 时 mask xor 无环带不可见 */
+.detached::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: var(--glass-depth);
+  background: linear-gradient(
+    168deg,
+    rgba(255, 255, 255, 0.9),
+    rgba(255, 255, 255, 0.14) 30%,
+    rgba(148, 163, 184, 0.04) 55%,
+    rgba(100, 116, 139, 0.16) 84%,
+    rgba(255, 255, 255, 0.55)
+  );
+  -webkit-mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
+  mask-composite: exclude;
+  pointer-events: none;
 }
 /* 顶栏扁平化：与窗口根同 tint，无自身材质 */
 .topbar {

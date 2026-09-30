@@ -1,5 +1,6 @@
 import type { PluginManifest } from '@sdk/manifest'
 import type { SearchEntry } from './matcher'
+import { isSensitiveText } from './sensitive'
 
 /** 推荐来源，即优先级：剪贴板 JSON > 拖入文件/图片 > 关键词沾边 > 正则 > 通用文本（通用压底防噪声） */
 export type RecSource = 'json' | 'files' | 'img' | 'push' | 'keyword' | 'regex' | 'text'
@@ -118,22 +119,29 @@ function matchesRegex(match: string, text: string, exclude?: string): boolean {
 
 /**
  * matcher 命中：text 型过长度窗（minLength 缺省 2）、regex 型截断后测试（非法正则跳过）、
- * json 型只认剪贴板文本（v1 数据源）。每插件每 type 至多一条，总数上限 4。
- * 契约：query 为空时 text/regex 短路，仅剪贴板 json 可产出。
+ * json 型双源（clip 优先，fallback 到 query）。每插件每 type 至多一条。
+ * 按源组配额：content 组（json/files/img/regex）上限 4、text 组上限 4，互不挤占。
+ * 契约：query 为空时 text/regex 短路，仅剪贴板/query json 可产出。
  */
 export function matcherHits(text: string, manifests: PluginManifest[], jsonText?: string): RecItem[] {
   const q = text.trim()
   const clip = (jsonText ?? '').trim()
   if (q === '' && clip === '') return []
   const items: RecItem[] = []
+  let contentCount = 0
+  let textCount = 0
   for (const m of manifests) {
     const seenTypes = new Set<RecSource>()
     for (const mt of m.matchers ?? []) {
-      if (items.length >= REC_CAP) return items
+      if (contentCount >= REC_CAP && textCount >= REC_CAP) return items
       if (seenTypes.has(mt.type)) continue
+      const isTextType = mt.type === 'text'
+      if (isTextType && textCount >= REC_CAP) continue
+      if (!isTextType && contentCount >= REC_CAP) continue
       let hit: string | null = null
       if (mt.type === 'json') {
         if (clip !== '' && looksLikeJson(clip)) hit = clip
+        else if (q !== '' && looksLikeJson(q)) hit = q
       } else if (q !== '') {
         const body = truncate(q, mt.maxLength)
         if (mt.type === 'text') {
@@ -144,6 +152,8 @@ export function matcherHits(text: string, manifests: PluginManifest[], jsonText?
       }
       if (hit === null) continue
       seenTypes.add(mt.type)
+      if (isTextType) textCount++
+      else contentCount++
       items.push({
         key: `${m.id}:${mt.commandId ?? '_main'}`,
         pluginId: m.id,
@@ -243,12 +253,16 @@ export function fileMatcherHits(files: MatchFile[], manifests: PluginManifest[],
 export function buildRecommendations(input: BuildRecommendationsInput): RecItem[] {
   if (input.enabled === false) return []
   const q = input.query.trim()
+  const qSensitive = isSensitiveText(input.query)
+  const safeClip =
+    input.clipboardText !== undefined && isSensitiveText(input.clipboardText) ? '' : input.clipboardText
   const json: RecItem[] = []
   const files: RecItem[] = []
   const img: RecItem[] = []
   const regex: RecItem[] = []
   const text: RecItem[] = []
-  for (const it of matcherHits(input.query, input.manifests, input.clipboardText)) {
+  for (const it of matcherHits(input.query, input.manifests, safeClip)) {
+    if (qSensitive) it.payload = undefined
     if (it.source === 'json') json.push(it)
     else if (it.source === 'regex') regex.push(it)
     else text.push(it)

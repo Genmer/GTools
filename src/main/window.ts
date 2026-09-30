@@ -90,6 +90,8 @@ export function createSearchWindow(): BrowserWindow {
     show: false,
     skipTaskbar: true,
     transparent,
+    // 透明窗只留 CSS 阴影：macOS 原生影按含阴影 alpha 的整窗矩形生成，与 CSS 影叠加成又硬又大的方框
+    hasShadow: !transparent,
     backgroundColor: '#00000000',
     webPreferences: {
       preload: preloadPath,
@@ -256,6 +258,7 @@ function recreateSearchWindow(): void {
 
 /** 独立插件窗口：titleBarStyle hidden 保留 macOS 交通灯（渲染层顶栏做 70px 避让），安全配置与主窗一致；透明+无模糊模式创建即带透明标志 */
 export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindowLike {
+  const transparent = wantsTransparentFlag(currentTransparency, currentTheme)
   const w = new BrowserWindow({
     width: opts.width,
     height: opts.height,
@@ -265,7 +268,9 @@ export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindo
     show: false,
     minWidth: 360,
     minHeight: 240,
-    transparent: wantsTransparentFlag(currentTransparency, currentTheme),
+    transparent,
+    // 与主窗同因：透明窗关原生影，防原生整窗矩形影与 CSS 影叠加出方框
+    hasShadow: !transparent,
     backgroundColor: '#00000000',
     webPreferences: {
       preload: preloadPath,
