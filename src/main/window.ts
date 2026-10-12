@@ -3,6 +3,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { ThemeName, TransparencySettings } from './settings-store'
 import { DEFAULT_TRANSPARENCY } from '@sdk/settings'
 import type { DetachedWindowLike, DetachedWindowOptions } from './detached-window-manager'
+import { decideShowPosition } from './window-position'
 
 // 内容口径 800×560 为四期 uTools 视觉规范（docs/design/ui-style-guide.md §1.1）。
 // 透明窗的 OS 窗口比内容大一圈透明边距，外圈投影落进边距才可见（Electron 透明+无边框窗
@@ -22,8 +23,28 @@ const deepLinkHash = process.env.GTOOLS_DEEP_LINK?.trim() || ''
 let win: BrowserWindow | null = null
 let lastShownAt = 0
 
+// 首帧就绪门控：冷启动后立即按热键 show 会白屏，未就绪时挂起等 ready-to-show 再显
+let rendererReady = false
+let showPending = false
+
 /** 失焦自动隐藏的模块内镜像（设置页开关即时生效，只约束主窗） */
 let hideOnBlurEnabled = true
+
+// 上次位置记忆（用户拖动后记录，经 bindWindowPositionSink 持久化到 settings.windowPos）
+let rememberedPos: { x: number; y: number } | null = null
+let persistWindowPos: ((p: { x: number; y: number } | null) => void) | null = null
+// 程序化 setPosition 的目标值：moved 回调据此识别自触发的移动，不当作用户拖动记录
+let lastProgrammaticPos: { x: number; y: number } | null = null
+let movedDebounce: ReturnType<typeof setTimeout> | null = null
+
+export function setRememberedWindowPos(p: { x: number; y: number } | null): void {
+  rememberedPos =
+    p !== null && Number.isFinite(p.x) && Number.isFinite(p.y) ? { x: Math.round(p.x), y: Math.round(p.y) } : null
+}
+
+export function bindWindowPositionSink(cb: (p: { x: number; y: number } | null) => void): void {
+  persistWindowPos = cb
+}
 
 export function applyHideOnBlur(v: boolean): void {
   hideOnBlurEnabled = v
@@ -105,6 +126,16 @@ export function createSearchWindow(): BrowserWindow {
   })
   if (transparent) transparentWindows.add(win)
 
+  rendererReady = false
+  showPending = false
+  win.once('ready-to-show', () => {
+    rendererReady = true
+    if (showPending) {
+      showPending = false
+      showSearchWindow()
+    }
+  })
+
   applyThemeToBrowserWindow(win, currentTheme)
   bindTransparentFlagSync(win)
   win.on('blur', () => {
@@ -112,6 +143,20 @@ export function createSearchWindow(): BrowserWindow {
     if (Date.now() - lastShownAt < 200) return
     if (suspendBlurHideCount > 0 || !hideOnBlurEnabled) return
     hideSearchWindow()
+  })
+  // 拖动后防抖记忆位置；与 lastProgrammaticPos 重合的是 showSearchWindow 自己挪的，跳过
+  win.on('moved', () => {
+    if (!win || win.isDestroyed() || !win.isVisible()) return
+    const [x, y] = win.getPosition()
+    if (lastProgrammaticPos !== null && lastProgrammaticPos.x === x && lastProgrammaticPos.y === y) return
+    if (movedDebounce !== null) clearTimeout(movedDebounce)
+    movedDebounce = setTimeout(() => {
+      movedDebounce = null
+      if (!win || win.isDestroyed() || !win.isVisible()) return
+      const [px, py] = win.getPosition()
+      rememberedPos = { x: px, y: py }
+      persistWindowPos?.(rememberedPos)
+    }, 600)
   })
   win.on('closed', () => {
     win = null
@@ -145,12 +190,36 @@ export function getSearchWindow(): BrowserWindow | null {
 
 export function showSearchWindow(): void {
   if (!win) return
+  if (!rendererReady) {
+    // 页面首帧未就绪：挂起待 ready-to-show 再显，防冷启动白屏
+    showPending = true
+    return
+  }
+  // 唤起位置跟随光标所在屏；用户拖过的位置在同屏内沿用（隐藏状态下挪动，用户无感）
+  const [w, h] = win.getSize()
+  const target = decideShowPosition(rememberedPos, screen.getCursorScreenPoint(), screen.getAllDisplays(), {
+    width: w,
+    height: h
+  })
+  const [cx, cy] = win.getPosition()
+  if (cx !== target.x || cy !== target.y) {
+    lastProgrammaticPos = target
+    win.setPosition(target.x, target.y, false)
+  }
   win.show()
   win.focus()
   lastShownAt = Date.now()
 }
 
 export function hideSearchWindow(): void {
+  // 拖动防抖未到期即隐藏（hideOnBlur 常见）：就地落一次位置，防本次摆放被丢弃
+  if (movedDebounce !== null && win && !win.isDestroyed()) {
+    clearTimeout(movedDebounce)
+    movedDebounce = null
+    const [px, py] = win.getPosition()
+    rememberedPos = { x: px, y: py }
+    persistWindowPos?.(rememberedPos)
+  }
   win?.hide()
 }
 
@@ -297,6 +366,9 @@ export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindo
     isDestroyed: () => w.isDestroyed(),
     on: (event, cb) => {
       w.on(event, cb)
+    },
+    once: (event, cb) => {
+      w.once(event, cb)
     }
   }
 }

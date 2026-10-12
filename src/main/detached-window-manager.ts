@@ -1,4 +1,4 @@
-import type { ThemeName, TransparencySettings } from './settings-store'
+import type { OutlineColor, ThemeName, TransparencySettings } from './settings-store'
 
 /** 独立窗口的最小面（Electron BrowserWindow 的可注入子集，测试传 fake，生产由 window.ts 适配） */
 export interface DetachedWindowLike {
@@ -14,6 +14,8 @@ export interface DetachedWindowLike {
   destroy(): void
   isDestroyed(): boolean
   on(event: 'closed', cb: () => void): void
+  /** 首帧就绪回调（门控 show 用，防空窗闪现） */
+  once(event: 'ready-to-show', cb: () => void): void
 }
 
 export interface DetachedWindowOptions {
@@ -22,6 +24,17 @@ export interface DetachedWindowOptions {
   x: number
   y: number
   alwaysOnTop: boolean
+}
+
+/** 独立窗 CSS 侧轮廓环视觉；环纯 CSS 实现，原生 applyTheme 不感知 */
+export interface OutlineVisual {
+  enabled: boolean
+  width: number
+  color: OutlineColor
+  /** 自定义环色 hex；宽松可选（旧载荷缺省容忍），接收端经 sanitizeOutlineCustomColor 自校验 */
+  customColor?: string
+  /** 流动速度档位；宽松可选（旧载荷缺省容忍），接收端经 sanitizeOutlineFlowSpeed 自校验 */
+  flowSpeed?: number
 }
 
 export interface DetachedWindowManagerDeps {
@@ -71,7 +84,10 @@ export class DetachedWindowManager {
     this.byWebContents.set(win.webContentsId, rec)
     win.on('closed', () => this.remove(rec))
     win.loadURL(this.deps.entryUrlFor(pluginId, query))
-    win.show()
+    // 首帧就绪再显窗：loadURL 后立即 show 会先见空窗再跳内容
+    win.once('ready-to-show', () => {
+      if (!win.isDestroyed()) win.show()
+    })
     return 'created'
   }
 
@@ -89,11 +105,11 @@ export class DetachedWindowManager {
     for (const rec of [...this.byPlugin.values()]) this.destroyRecord(rec)
   }
 
-  applyThemeToAll(theme: ThemeName, transparency: TransparencySettings): void {
+  applyThemeToAll(theme: ThemeName, transparency: TransparencySettings, outline: OutlineVisual): void {
     for (const rec of this.byPlugin.values()) {
       try {
         rec.win.applyTheme(theme, transparency)
-        rec.win.webContents.send(DETACHED_THEME_EVENT, { theme, transparency })
+        rec.win.webContents.send(DETACHED_THEME_EVENT, { theme, transparency, outline })
       } catch {
         // 窗口销毁竞态时抛错，跳过即可
       }

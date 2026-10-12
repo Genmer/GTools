@@ -72,7 +72,7 @@ export async function executeHttpTemplate(
   }
   const endpoint = (cfg?.endpoint ?? '').trim()
   const bodyTemplate = cfg?.bodyTemplate ?? ''
-  const apiKey = cfg?.apiKey ?? ''
+  const apiKey = cfg?.secrets?.apiKey ?? ''
   if (endpoint === '') {
     throw new TranslateExecutorError('config', '请先在 设置 → API 服务 配置接口地址')
   }

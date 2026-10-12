@@ -41,6 +41,7 @@ function makeServices(): ServiceBag & {
       readText: async () => '',
       writeText: async () => {},
       readImage: async () => null,
+      readImageThumb: async () => null,
       writeImage: async () => {}
     },
     storage: {

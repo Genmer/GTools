@@ -45,15 +45,16 @@ html[data-wintx='1'] #app {
 }
 
 /* shell 三滚动容器隐藏原生槽（经典滚动条槽永久占位会把面板右缘挤短 10px、与搜索框错开）；
-   滚动反馈改由 is-scrolling（app.ts 挂）在容器右缘画不占位、不随内容滚动的半透明悬浮条 */
+   滚动反馈改由 is-scrolling（app.ts 挂）在容器右缘画不占位、不随内容滚动的半透明悬浮条；
+   结果列表实际类名是 .result-view（ResultList.vue 根类，与 App.vue 溶解条选择器一致） */
 .empty-state::-webkit-scrollbar,
-.result-list::-webkit-scrollbar,
+.result-view::-webkit-scrollbar,
 .settings::-webkit-scrollbar {
   width: 0;
   height: 0;
 }
 .empty-state.is-scrolling,
-.result-list.is-scrolling,
+.result-view.is-scrolling,
 .settings.is-scrolling {
   background-image: linear-gradient(
     to right,
@@ -65,8 +66,65 @@ html[data-wintx='1'] #app {
 }
 
 /* shell 滚动容器底部 32px 渐隐收尾：替代面板/列表被视口硬切（仅溢出滚动时启用，折叠空态不遮罩）；
-   mask 相对容器边框盒固定、不随内容滚动 */
-.empty-state.is-overflowing,
-.result-list {
+   mask 相对容器边框盒固定、不随内容滚动。result-view 不在此列：其 scoped 顶缘溶解
+   mask（内容滚入玻璃胶囊下方）特异性更高且语义不同，底缘渐隐不适用 */
+.empty-state.is-overflowing {
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 32px), transparent);
+}
+
+/* iOS 风拨动开关（label.switch > input[checkbox] + span 文字）：原生勾选框视觉隐藏但保留
+   可点/可达性，轨道与圆点画在文字 span 伪元素上——零模板改动全设置页生效；
+   颜色只取 themes.css token（--switch-on/--switch-track） */
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sub, 12px);
+  color: var(--fg-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.switch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.switch input + span {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 22px;
+}
+.switch input + span::before {
+  content: '';
+  width: 36px;
+  height: 22px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--switch-track, rgba(120, 120, 128, 0.32));
+  transition: background 0.18s ease;
+}
+.switch input + span::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transform: translateY(-50%);
+  transition: transform 0.18s ease;
+}
+.switch input:checked + span::before {
+  background: var(--switch-on, #34c759);
+}
+.switch input:checked + span::after {
+  transform: translate(14px, -50%);
+}
+.switch input:focus-visible + span::before {
+  box-shadow: 0 0 0 2px var(--accent-dim);
 }

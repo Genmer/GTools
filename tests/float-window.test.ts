@@ -30,6 +30,13 @@ class FakeFloatWindow implements FloatWindowLike {
   setBounds(b: { x?: number; y?: number; width?: number; height?: number }): void {
     Object.assign(this.bounds, b)
   }
+  getPosition(): [number, number] {
+    return [this.bounds.x ?? 0, this.bounds.y ?? 0]
+  }
+  setPosition(x: number, y: number): void {
+    this.bounds.x = x
+    this.bounds.y = y
+  }
   setAlwaysOnTop(v: boolean): void {
     this.alwaysOnTop = v
   }
@@ -191,6 +198,22 @@ describe('FloatWindowManager 生命周期', () => {
     expect(manager.emitFromWebContents(99999, 'x', null)).toBe(false)
     const info = manager.infoByWebContents(wcId)
     expect(info).toEqual({ id: 'todo#1', pluginId: 'todo' })
+  })
+
+  it('drag-move 内建移动窗口且不回传插件；非法/越界载荷吞掉不动窗', () => {
+    const { manager, windows, events } = setup()
+    manager.create('p', { html: 'x', x: 10, y: 20, width: 100, height: 80 })
+    const wcId = windows[0].webContentsId
+    expect(manager.emitFromWebContents(wcId, 'drag-move', { dx: 15, dy: -5 })).toBe(true)
+    expect(windows[0].bounds).toEqual({ width: 100, height: 80, x: 25, y: 15 })
+    expect(events).toEqual([])
+    // 非数字 / NaN / 超大增量：吞掉不转发也不动
+    manager.emitFromWebContents(wcId, 'drag-move', { dx: 'a', dy: 1 })
+    manager.emitFromWebContents(wcId, 'drag-move', { dx: NaN, dy: 1 })
+    manager.emitFromWebContents(wcId, 'drag-move', { dx: 500, dy: 0 })
+    manager.emitFromWebContents(wcId, 'drag-move', null)
+    expect(windows[0].bounds).toEqual({ width: 100, height: 80, x: 25, y: 15 })
+    expect(events).toEqual([])
   })
 
   it('closeByWebContents 只关对应浮窗', () => {

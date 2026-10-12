@@ -1,7 +1,7 @@
 // 倒计时纯逻辑 + backend 单测：Electron 能力全部注入 fake，scheduler/clock 手动控制
 import { describe, expect, it } from 'vitest'
 import type { BackendContext } from '@sdk/api'
-import defaultBackend, { COUNTDOWN_TICK_MS, CountdownBackend } from '../../../../src/plugins/time-toolbox/backend'
+import defaultBackend, { COUNTDOWN_IDLE_POLL_MS, COUNTDOWN_TICK_MS, CountdownBackend } from '../../../../src/plugins/time-toolbox/backend'
 import {
   COUNTDOWN_CMD_KEY,
   COUNTDOWN_STATE_KEY,
@@ -239,14 +239,15 @@ async function makeHarness(seed?: Record<string, unknown>): Promise<Harness> {
 }
 
 describe('CountdownBackend', () => {
-  it('start 命令：运行态落盘并 emit；500ms tick 注册且不重复', async () => {
+  it('start 命令：运行态落盘并 emit；轮询分档（空闲慢档兜命令，运行快档）', async () => {
     const h = await makeHarness()
     await h.backend.start()
-    expect(h.scheduler.live().map((t) => t.ms)).toEqual([COUNTDOWN_TICK_MS])
+    expect(h.scheduler.live().map((t) => t.ms)).toEqual([COUNTDOWN_IDLE_POLL_MS])
 
     h.sendCmd({ type: 'start', ms: 60_000 })
     await h.tick()
     expect(h.backend.snapshot().status).toBe('running')
+    expect(h.scheduler.live().map((t) => t.ms)).toEqual([COUNTDOWN_TICK_MS])
     const persisted = parseCountdownState(h.storage.get(COUNTDOWN_STATE_KEY))
     expect(persisted?.status).toBe('running')
     expect(h.emits.at(-1)).toMatchObject({ event: 'countdown-changed' })
@@ -271,6 +272,7 @@ describe('CountdownBackend', () => {
     h.setNow(T0 + 60_000)
     await h.tick()
     expect(h.backend.snapshot().status).toBe('expired')
+    expect(h.scheduler.live().map((t) => t.ms)).toEqual([COUNTDOWN_IDLE_POLL_MS]) // expired 无计时任务：降慢档
     expect(h.notifications).toHaveLength(1)
     expect(h.notifications[0]).toMatchObject({ title: '⏰ 倒计时时间到', body: '设定的 1 分钟 已到' })
     expect(parseCountdownState(h.storage.get(COUNTDOWN_STATE_KEY))?.status).toBe('expired')
@@ -369,5 +371,15 @@ describe('CountdownBackend', () => {
     expect(h.scheduler.live()).toHaveLength(0)
     expect(typeof defaultBackend.init).toBe('function')
     expect(COUNTDOWN_TICK_MS).toBe(500)
+  })
+
+  it('stop 与在途 tick 并发：不重挂僵尸 interval', async () => {
+    const h = await makeHarness()
+    await h.backend.start()
+    h.sendCmd({ type: 'start', ms: 60_000 })
+    h.scheduler.live()[0]!.fn() // 触发本轮但不等它走完
+    await h.backend.stop() // stop 抢在 onTick 尾部 syncInterval 之前
+    await new Promise((r) => setTimeout(r, 0))
+    expect(h.scheduler.live()).toHaveLength(0)
   })
 })

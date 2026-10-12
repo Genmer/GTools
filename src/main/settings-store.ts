@@ -1,5 +1,16 @@
-export type { ThemeName, AppSettings, CommandHotkey, TransparencySettings } from '@sdk/settings'
-import { DEFAULT_SETTINGS, type AppSettings, type CommandHotkey, type ThemeName, type TransparencySettings } from '@sdk/settings'
+export type { ThemeName, AppSettings, CommandHotkey, TransparencySettings, OutlineColor } from '@sdk/settings'
+import {
+  DEFAULT_SETTINGS,
+  isOutlineColor,
+  sanitizeOutlineCustomColor,
+  sanitizeOutlineFlowSpeed,
+  sanitizeOutlineWidth,
+  type AppSettings,
+  type CommandHotkey,
+  type OutlineColor,
+  type ThemeName,
+  type TransparencySettings
+} from '@sdk/settings'
 import { validateAccelerator } from '@sdk/shortcut-rules'
 export { DEFAULT_SETTINGS }
 
@@ -15,15 +26,27 @@ type SettingsPatch = {
   hotkey?: Partial<AppSettings['hotkey']>
   theme?: ThemeName
   transparency?: Partial<TransparencySettings>
+  outlineEnabled?: boolean
+  outlineWidth?: number
+  outlineColor?: OutlineColor
+  outlineCustomColor?: string
+  outlineFlowSpeed?: number
   disabledPlugins?: string[]
   launchAtLogin?: boolean
   clipboardSuggest?: boolean
   hideOnBlur?: boolean
   commandHotkeys?: CommandHotkey[]
+  windowPos?: { x: number; y: number } | null
 }
 
 function clampOpacity(v: number): number {
   return Math.min(100, Math.max(0, Math.round(v)))
+}
+
+/** 损坏留证文件名后缀：settings.json → settings.json.corrupt-20261006-093000 */
+function corruptStamp(now = new Date()): string {
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
 }
 
 function merge(base: AppSettings, patch: SettingsPatch): AppSettings {
@@ -31,11 +54,17 @@ function merge(base: AppSettings, patch: SettingsPatch): AppSettings {
     hotkey: { ...base.hotkey, ...(patch.hotkey ?? {}) },
     theme: patch.theme ?? base.theme,
     transparency: { ...base.transparency, ...(patch.transparency ?? {}) },
+    outlineEnabled: patch.outlineEnabled ?? base.outlineEnabled,
+    outlineWidth: patch.outlineWidth ?? base.outlineWidth,
+    outlineColor: patch.outlineColor ?? base.outlineColor,
+    outlineCustomColor: patch.outlineCustomColor ?? base.outlineCustomColor,
+    outlineFlowSpeed: patch.outlineFlowSpeed ?? base.outlineFlowSpeed,
     disabledPlugins: patch.disabledPlugins ?? base.disabledPlugins,
     launchAtLogin: patch.launchAtLogin ?? base.launchAtLogin,
     clipboardSuggest: patch.clipboardSuggest ?? base.clipboardSuggest,
     hideOnBlur: patch.hideOnBlur ?? base.hideOnBlur,
-    commandHotkeys: patch.commandHotkeys ?? base.commandHotkeys
+    commandHotkeys: patch.commandHotkeys ?? base.commandHotkeys,
+    windowPos: patch.windowPos === undefined ? base.windowPos : patch.windowPos
   }
 }
 
@@ -84,10 +113,30 @@ function sanitizePatch(raw: unknown): SettingsPatch {
     patch.disabledPlugins = p.disabledPlugins
   }
   if (typeof p.launchAtLogin === 'boolean') patch.launchAtLogin = p.launchAtLogin
+  if (typeof p.outlineEnabled === 'boolean') patch.outlineEnabled = p.outlineEnabled
+  const outlineWidth = sanitizeOutlineWidth(p.outlineWidth)
+  if (outlineWidth !== null) patch.outlineWidth = outlineWidth
+  if (isOutlineColor(p.outlineColor)) patch.outlineColor = p.outlineColor
+  const outlineCustomColor = sanitizeOutlineCustomColor(p.outlineCustomColor)
+  if (outlineCustomColor !== null) patch.outlineCustomColor = outlineCustomColor
+  const outlineFlowSpeed = sanitizeOutlineFlowSpeed(p.outlineFlowSpeed)
+  if (outlineFlowSpeed !== null) patch.outlineFlowSpeed = outlineFlowSpeed
   if (typeof p.clipboardSuggest === 'boolean') patch.clipboardSuggest = p.clipboardSuggest
   if (typeof p.hideOnBlur === 'boolean') patch.hideOnBlur = p.hideOnBlur
   // 数组即收（含空数组 = 清空全部指令绑定）；非数组整体丢弃由 merge 回退现值
   if (Array.isArray(p.commandHotkeys)) patch.commandHotkeys = sanitizeCommandHotkeys(p.commandHotkeys)
+  if (p.windowPos === null || typeof p.windowPos === 'object') {
+    const w = p.windowPos as { x?: unknown; y?: unknown } | null
+    // null = 显式清除记忆；坐标须为有限数字，坏值丢弃回退现值
+    if (w === null) {
+      patch.windowPos = null
+    } else if (
+      typeof w.x === 'number' && Number.isFinite(w.x) &&
+      typeof w.y === 'number' && Number.isFinite(w.y)
+    ) {
+      patch.windowPos = { x: Math.round(w.x), y: Math.round(w.y) }
+    }
+  }
   return patch
 }
 
@@ -116,12 +165,22 @@ export class SettingsStore {
   }
 
   async load(): Promise<void> {
+    let raw: string | null = null
     try {
-      const raw = await this.fs.readFile(this.file, { encoding: 'utf-8' })
-      const parsed: unknown = JSON.parse(raw)
-      this.current = merge(this.current, sanitizePatch(parsed))
+      raw = await this.fs.readFile(this.file, { encoding: 'utf-8' })
     } catch {
-      // 文件不存在或损坏：用默认值，首次写入即落地
+      raw = null // 文件不存在：用默认值，首次写入即落地
+    }
+    if (raw !== null) {
+      try {
+        const parsed: unknown = JSON.parse(raw)
+        this.current = merge(this.current, sanitizePatch(parsed))
+      } catch {
+        // 损坏先留证再按默认值处理，防首次写入静默覆盖残余
+        const evidence = `${this.file}.corrupt-${corruptStamp()}`
+        await this.fs.rename(this.file, evidence).catch(() => {})
+        console.error(`GTools 设置文件损坏，已留证 ${evidence}，本次回退默认设置`)
+      }
     }
     this.loaded = true
   }

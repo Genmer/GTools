@@ -17,7 +17,8 @@ const manifest: PluginManifest = {
     { id: 'pin-file', title: '贴图：选择图片文件', keywords: ['tupian'] }
   ],
   matchers: [
-    { type: 'files', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'], label: '贴图：悬浮图片文件', commandId: 'pin-file' }
+    { type: 'files', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'], label: '贴图：悬浮图片文件', commandId: 'pin-file' },
+    { type: 'img', label: '贴图：贴出剪贴板图片', commandId: 'pin-clipboard' }
   ]
 }
 

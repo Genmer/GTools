@@ -77,12 +77,16 @@ function makeLoader() {
 }
 
 /** 每 test 独立一套 store/loader，setupIpc 后从 ipcMain.handle 取 gtools:host 处理器 */
-async function boot(seed: Partial<AppSettings> = {}, pluginIds: string[] = []): Promise<{ store: SettingsStore; host: Host }> {
+async function boot(
+  seed: Partial<AppSettings> = {},
+  pluginIds: string[] = []
+): Promise<{ store: SettingsStore; host: Host; detached: { applyThemeToAll: Mock } }> {
   const store = new SettingsStore('C:\\tmp\\gtools-test', noopFs, 1)
   if (Object.keys(seed).length > 0) await store.update(seed)
   const { entries, loader } = makeLoader()
   for (const id of pluginIds) entries.set(id, { manifest: { id }, enabled: true })
   unregisterAllHotkeys() // 清 shortcut.ts 模块级注册态（currentElectronAccel + commandActions）
+  const detached = { applyThemeToAll: vi.fn(), closeForPlugin: vi.fn(), open: vi.fn(), closeByWebContents: vi.fn(), setAlwaysOnTopFor: vi.fn() }
   setupIpc({
     loader,
     settings: store,
@@ -96,12 +100,12 @@ async function boot(seed: Partial<AppSettings> = {}, pluginIds: string[] = []): 
     },
     apiCenter: { config: {}, sanitized: () => ({}), replaceAll: vi.fn(async () => {}) },
     nativeApps: {},
-    detached: { applyThemeToAll: vi.fn(), closeForPlugin: vi.fn(), open: vi.fn(), closeByWebContents: vi.fn(), setAlwaysOnTopFor: vi.fn() },
+    detached,
     onHotkeyToggle: vi.fn()
   } as unknown as Parameters<typeof setupIpc>[0])
   const call = (ipcMain.handle as unknown as Mock).mock.calls.find(([ch]) => ch === 'gtools:host')
   if (!call) throw new Error('gtools:host 未注册')
-  return { store, host: call[1] as Host }
+  return { store, host: call[1] as Host, detached }
 }
 
 beforeEach(() => {
@@ -213,6 +217,72 @@ describe('gtools:host settings:set', () => {
     const r = await host(sender(), { api: 'plugins:set-enabled', payload: { id: 'x', enabled: false } })
     expect(r.ok).toBe(true)
     expect(vi.mocked(globalShortcut.unregister).mock.calls).toContainEqual(['Alt+9'])
+  })
+
+  it('自定义环色：settings:set custom+hex 落盘且 applyThemeToAll 收到 color=custom+customColor', async () => {
+    const { host, store, detached } = await boot()
+    const r = await host(sender(), {
+      api: 'settings:set',
+      payload: { outlineColor: 'custom', outlineCustomColor: '#aabbcc' }
+    })
+    expect(r.ok).toBe(true)
+    expect((r.data as AppSettings).outlineColor).toBe('custom')
+    expect((r.data as AppSettings).outlineCustomColor).toBe('#aabbcc')
+    expect(store.settings.outlineColor).toBe('custom')
+    expect(detached.applyThemeToAll).toHaveBeenCalledWith('light', { enabled: true, opacity: 55, blur: true }, {
+      enabled: true,
+      width: 3,
+      color: 'custom',
+      customColor: '#aabbcc',
+      flowSpeed: 3
+    })
+  })
+
+  it('只改色值不换枚举也触发双窗重同步；坏 hex 被 store 剔除保默认', async () => {
+    const { host, store, detached } = await boot({ outlineColor: 'custom' })
+    const r = await host(sender(), { api: 'settings:set', payload: { outlineCustomColor: 'nope' } })
+    expect(r.ok).toBe(true)
+    // 坏 hex 剔除保默认 #42a5f5，outlineColor 保持 custom
+    expect(store.settings.outlineCustomColor).toBe('#42a5f5')
+    expect(store.settings.outlineColor).toBe('custom')
+    expect(detached.applyThemeToAll).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(detached.applyThemeToAll).mock.calls[0][2]).toMatchObject({ color: 'custom', customColor: '#42a5f5' })
+  })
+
+  it('新枚举 rainbow/rainbow-gradient：settings:set 生效落盘，只改枚举也广播四字段载荷', async () => {
+    const { host, store, detached } = await boot()
+    for (const color of ['rainbow', 'rainbow-gradient'] as const) {
+      const r = await host(sender(), { api: 'settings:set', payload: { outlineColor: color } })
+      expect(r.ok).toBe(true)
+      expect((r.data as AppSettings).outlineColor).toBe(color)
+      expect(store.settings.outlineColor).toBe(color)
+    }
+    expect(detached.applyThemeToAll).toHaveBeenCalledTimes(2)
+    // customColor 未传保持现值；宽度/开关/速度取当前设置原样下发
+    expect(vi.mocked(detached.applyThemeToAll).mock.calls[1][2]).toEqual({
+      enabled: true,
+      width: 3,
+      color: 'rainbow-gradient',
+      customColor: '#42a5f5',
+      flowSpeed: 3
+    })
+  })
+
+  it('流动速度：settings:set 落盘且载荷携带 flowSpeed；坏值剔除保现值不触发双窗重同步', async () => {
+    const { host, store, detached } = await boot({ outlineColor: 'rainbow' })
+    const r = await host(sender(), { api: 'settings:set', payload: { outlineFlowSpeed: 8 } })
+    expect(r.ok).toBe(true)
+    expect((r.data as AppSettings).outlineFlowSpeed).toBe(8)
+    expect(store.settings.outlineFlowSpeed).toBe(8)
+    expect(vi.mocked(detached.applyThemeToAll).mock.calls[0][2]).toMatchObject({ color: 'rainbow', flowSpeed: 8 })
+    // 0 夹取为 1；'x' 非法剔除——但广播守卫看原始 payload，坏值定义即触发一次无害重同步（同坏宽度既有语义）
+    const clamped = await host(sender(), { api: 'settings:set', payload: { outlineFlowSpeed: 0 } })
+    expect((clamped.data as AppSettings).outlineFlowSpeed).toBe(1)
+    const calls = vi.mocked(detached.applyThemeToAll).mock.calls.length
+    const bad = await host(sender(), { api: 'settings:set', payload: { outlineFlowSpeed: 'x' } })
+    expect(bad.ok).toBe(true)
+    expect(store.settings.outlineFlowSpeed).toBe(1)
+    expect(vi.mocked(detached.applyThemeToAll).mock.calls.length).toBe(calls + 1)
   })
 })
 

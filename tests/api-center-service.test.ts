@@ -43,7 +43,7 @@ const httpForm = {
   name: 'DeepL',
   endpoint: 'https://x.example.com/?q={text}&key={key}',
   method: 'GET' as const,
-  newApiKey: 'mk-9'
+  newSecrets: { apiKey: 'mk-9' }
 }
 
 describe('ApiCenterStore 边界', () => {
@@ -87,13 +87,13 @@ describe('replaceAll 备份导入', () => {
       services: {
         translate: {
           activeProviderId: 'p1',
-          providers: [{ id: 'p1', type: 'http-template', name: '导入', enabled: true, endpoint: 'https://a.example.com/x', apiKey: 'sk-import' }]
+          providers: [{ id: 'p1', type: 'http-template', name: '导入', enabled: true, endpoint: 'https://a.example.com/x', secrets: { apiKey: 'sk-import' } }]
         }
       }
     })
     expect(svc.status('translate')).toMatchObject({ configured: true, activeProviderId: 'p1', activeProviderName: '导入' })
-    expect(svc.config.services.translate.providers[0].apiKey).toBe('sk-import')
-    expect(svc.sanitized().services.translate.providers[0].hasKey).toBe(true)
+    expect(svc.config.services.translate.providers[0].secrets?.apiKey).toBe('sk-import')
+    expect(svc.sanitized().services.translate.providers[0].hasSecrets.apiKey).toBe(true)
   })
 })
 
@@ -165,6 +165,16 @@ describe('buildProvider 校验与 id 生成', () => {
     const view = await svc.upsertProvider(httpForm)
     expect(view.services.translate.providers[0].id).toMatch(/^u-[0-9a-f]{8}$/)
   })
+
+  it('secrets 首尾空白被 trim；全空白视为未填沿用旧值（密钥参与签名，空白会 54001）', async () => {
+    const svc = makeService()
+    await svc.load()
+    const view = await svc.upsertProvider({ ...httpForm, newSecrets: { apiKey: '  mk-9 \n' } })
+    const id = view.services.translate.providers[0].id
+    expect(svc.config.services.translate.providers[0].secrets?.apiKey).toBe('mk-9')
+    await svc.upsertProvider({ ...httpForm, id, name: '改名', newSecrets: { apiKey: '   ' } })
+    expect(svc.config.services.translate.providers[0].secrets?.apiKey).toBe('mk-9')
+  })
 })
 
 describe('translate 按 providerId 路由（聚合翻译切引擎）与 status.providers', () => {
@@ -186,7 +196,7 @@ describe('translate 按 providerId 路由（聚合翻译切引擎）与 status.p
 
   it('status().providers 概要含全部 provider（含禁用）且不泄露密钥', async () => {
     const { svc, deeplId } = await setupTwoProviders()
-    await svc.upsertProvider({ ...httpForm, id: deeplId, name: 'DeepL', newApiKey: '' })
+    await svc.upsertProvider({ ...httpForm, id: deeplId, name: 'DeepL', newSecrets: {} })
     const st = svc.status('translate')
     expect(st.providers.map((p) => p.name)).toEqual(['DeepL', '谷歌'])
     expect(st.providers.every((p) => !('apiKey' in p) && !('hasKey' in p))).toBe(true)

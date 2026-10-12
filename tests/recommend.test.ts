@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { PluginManifest, PluginMatcher } from '../sdk/manifest'
 import type { SearchEntry } from '../src/renderer/src/core/matcher'
 import type { MatchFile } from '../src/renderer/src/core/recommend'
@@ -349,5 +349,72 @@ describe('buildRecommendations', () => {
         clipboardText: secretClip
       })
     ).toEqual([])
+  })
+})
+
+describe('剪贴板分析 memo（同文本零重算）', () => {
+  const jsonTool = manifest('json-editor', { matchers: [{ type: 'json', label: '打开 JSON 编辑器' }] })
+
+  it('同一剪贴板 JSON 重复推荐不重复 JSON.parse', () => {
+    const spy = vi.spyOn(JSON, 'parse')
+    const clip = '{"order":"A-1001","items":[{"sku":"x","qty":2}]}'
+    const run = (): number => {
+      buildRecommendations({ query: '', manifests: [jsonTool], clipboardText: clip })
+      return spy.mock.calls.length
+    }
+    const first = run()
+    expect(first).toBeGreaterThan(0)
+    expect(run()).toBe(first)
+    expect(run()).toBe(first)
+    spy.mockRestore()
+  })
+
+  it('memo 不改变语义：敏感/非敏感文本交替判定与逐次现算一致', () => {
+    const plain = '{"note":"hello"}'
+    const secret = '{"password":"super-secret-123"}'
+    for (let i = 0; i < 3; i++) {
+      expect(buildRecommendations({ query: '', manifests: [jsonTool], clipboardText: plain })).toHaveLength(1)
+      expect(
+        buildRecommendations({ query: '', manifests: [jsonTool], clipboardText: secret }).filter(
+          (it) => it.source === 'json'
+        )
+      ).toHaveLength(0)
+    }
+  })
+})
+
+describe('float-image 粘贴直贴链路（主面板粘贴图片→img 推荐→pin-clipboard）', () => {
+  const floatImageManifest: PluginManifest = {
+    id: 'float-image',
+    name: '图片悬浮',
+    version: '0.1.0',
+    protocolVersion: 1,
+    icon: '📌',
+    keywords: ['float-image'],
+    activation: 'trigger',
+    permissions: [],
+    source: 'builtin',
+    entry: './index.vue',
+    commands: [
+      { id: 'pin-clipboard', title: '贴图：贴出剪贴板图片', keywords: ['tietu'] },
+      { id: 'pin-file', title: '贴图：选择图片文件', keywords: ['tupian'] }
+    ],
+    matchers: [
+      { type: 'files', extensions: ['png', 'jpg'], label: '贴图：悬浮图片文件', commandId: 'pin-file' },
+      { type: 'img', label: '贴图：贴出剪贴板图片', commandId: 'pin-clipboard' }
+    ]
+  }
+
+  it('img matcher 指向已存在的 pin-clipboard 命令（激活即回车直贴）', () => {
+    const img = floatImageManifest.matchers?.find((m) => (m as PluginMatcher).type === 'img') as PluginMatcher
+    expect(img).toBeDefined()
+    expect(floatImageManifest.commands?.some((c) => c.id === img.commandId)).toBe(true)
+  })
+
+  it('剪贴板有图（无拖入文件）：img 推荐产出且 commandId=pin-clipboard，无图不产出', () => {
+    const withImg = fileMatcherHits([], [floatImageManifest], true)
+    expect(withImg.map((h) => h.source)).toEqual(['img'])
+    expect(withImg[0]?.commandId).toBe('pin-clipboard')
+    expect(fileMatcherHits([], [floatImageManifest], false)).toEqual([])
   })
 })

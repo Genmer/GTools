@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   HEAL_DELAY_MS,
+  IDLE_POLL_MS,
   TICK_MS,
   TIMER_EVENT,
   TodoPomodoroBackend,
@@ -423,13 +424,43 @@ describe('快照与生命周期', () => {
     expect(h.lastSnapshot().totalCount).toBe(1)
   })
 
-  it('start 只挂一个 interval，stop 清理', async () => {
+  it('轮询分档：空闲慢档兜命令，会话激活快档，结束回慢档；start 幂等、stop 清理', async () => {
     const h = await makeHarness()
     expect(h.scheduler.live().length).toBe(1)
-    expect(h.scheduler.live()[0]!.ms).toBe(TICK_MS)
+    expect(h.scheduler.live()[0]!.ms).toBe(IDLE_POLL_MS) // 空闲：慢档仍接得住 start 命令
     await h.backend.start() // 幂等
     expect(h.scheduler.live().length).toBe(1)
+
+    h.sendCmd(startCmd())
+    await h.tick()
+    expect(h.scheduler.live()[0]!.ms).toBe(TICK_MS) // 活跃会话：500ms 快档
+
+    h.sendCmd({ type: 'stop' })
+    await h.tick()
+    expect(h.scheduler.live()[0]!.ms).toBe(IDLE_POLL_MS) // 回空闲：降慢档
+
     await h.backend.stop()
+    expect(h.scheduler.live().length).toBe(0)
+  })
+
+  it('统计自愈复查期保持快档，复查完降慢档', async () => {
+    const h = await makeHarness()
+    h.sendCmd(startCmd({ autoStartBreak: false }))
+    await h.tick()
+    h.setNow(T0 + 25 * MIN)
+    await h.tick() // 专注到期回空闲，heal 待复查 → 仍快档
+    expect(h.scheduler.live()[0]!.ms).toBe(TICK_MS)
+    h.setNow(T0 + 25 * MIN + HEAL_DELAY_MS + 100)
+    await h.tick() // 复查完成 → 降慢档
+    expect(h.scheduler.live()[0]!.ms).toBe(IDLE_POLL_MS)
+  })
+
+  it('stop 与在途 tick 并发：不重挂僵尸 interval', async () => {
+    const h = await makeHarness()
+    h.sendCmd(startCmd())
+    h.scheduler.live()[0]!.fn() // 触发本轮但不等它走完
+    await h.backend.stop() // stop 抢在 onTick 尾部 syncInterval 之前
+    await new Promise((r) => setTimeout(r, 0))
     expect(h.scheduler.live().length).toBe(0)
   })
 

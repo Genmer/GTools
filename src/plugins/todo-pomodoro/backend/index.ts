@@ -35,6 +35,11 @@ import { NOTE_HEIGHT, NOTE_WIDTH, buildNoteHtml, noteModelOf } from '../logic/fl
 import { dateKeyOf } from '../logic/todos'
 
 export const TICK_MS = 500
+/**
+ * 空闲档轮询周期：storage 是协议内唯一渲染层→backend 命令通道（events.on 在 backend 侧是空桩），
+ * 空闲期不能全停否则丢 start 命令，降频到 1s 只兜命令接续（get 命中主进程内存缓存，零盘读）。
+ */
+export const IDLE_POLL_MS = 1000
 /** 统计落盘自愈复查延迟：避开与并发写在同一毫秒窗口互相覆盖 */
 export const HEAL_DELAY_MS = 1500
 const TIMER_KEY = 'timer'
@@ -73,6 +78,8 @@ export class TodoPomodoroBackend implements PluginBackend {
   private noteId: string | null = null
   private lastSeq = 0
   private tick: unknown = null
+  private tickMs = 0
+  private gen = 0
   private heal: { entry: PomodoroEntry; at: number } | null = null
 
   constructor(
@@ -87,13 +94,15 @@ export class TodoPomodoroBackend implements PluginBackend {
 
   async start(): Promise<void> {
     if (this.tick !== null) return
+    // onTick 尾部按当前状态挂对应档位的 interval
     await this.onTick()
-    this.tick = this.scheduler.setInterval(() => void this.onTick(), TICK_MS)
   }
 
   async stop(): Promise<void> {
+    this.gen++ // 在途 onTick 的尾部不再重挂 interval
     if (this.tick !== null) this.scheduler.clearInterval(this.tick)
     this.tick = null
+    this.tickMs = 0
     await this.persistTimer()
   }
 
@@ -151,13 +160,25 @@ export class TodoPomodoroBackend implements PluginBackend {
   }
 
   private async onTick(): Promise<void> {
+    const g = this.gen
     try {
       await this.pollCommand()
       await this.advance()
       await this.checkHeal()
     } catch {
-      // 单轮失败静默放弃，下一轮 500ms 后重试
+      // 单轮失败静默放弃，下一轮重试
     }
+    if (g === this.gen) this.syncInterval() // stop 与本轮并发时不重挂
+  }
+
+  /** 轮询分档：活跃会话（含暂停）与统计自愈复查期走 500ms，空闲降 1s 慢档 */
+  private syncInterval(): void {
+    const active = this.state.status !== 'idle' || this.heal !== null
+    const ms = active ? TICK_MS : IDLE_POLL_MS
+    if (this.tick !== null && this.tickMs === ms) return
+    if (this.tick !== null) this.scheduler.clearInterval(this.tick)
+    this.tick = this.scheduler.setInterval(() => void this.onTick(), ms)
+    this.tickMs = ms
   }
 
   private async pollCommand(): Promise<void> {

@@ -5,13 +5,14 @@ import { restOf, router } from './router'
 import { arrowAction } from './searchbox-keys'
 import { resetSubInput, subInput } from '../core/subinput'
 
-const props = defineProps<{ manifests: PluginManifest[] }>()
+const props = defineProps<{ manifests: PluginManifest[]; pasteThumb?: string | null }>()
 const emit = defineEmits<{
   nav: [dir: 1 | -1, axis: 'x' | 'y']
   select: []
   exit: []
   settings: []
   detach: []
+  clearPaste: []
 }>()
 
 const inputRef = ref<HTMLInputElement | null>(null)
@@ -157,6 +158,16 @@ function onKeydown(e: KeyboardEvent): void {
         <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2" />
         <line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
       </svg>
+      <!-- 粘贴图片芯片：置于输入区左侧正文内（放右侧太隐蔽差点看不见），× 移除同时撤掉推荐行 -->
+      <div v-if="router.mode === 'global' && props.pasteThumb" class="paste-thumb" title="剪贴板图片，回车贴出悬浮窗">
+        <img :src="props.pasteThumb" alt="" />
+        <button class="thumb-x" title="移除" @mousedown.prevent @click="emit('clearPaste')">
+          <svg viewBox="0 0 24 24" width="8" height="8" aria-hidden="true">
+            <line x1="6" y1="6" x2="18" y2="18" stroke="currentColor" stroke-width="3" stroke-linecap="round" />
+            <line x1="18" y1="6" x2="6" y2="18" stroke="currentColor" stroke-width="3" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
       <input
         ref="inputRef"
         :value="router.query"
@@ -347,6 +358,44 @@ input::placeholder {
 .gear:hover,
 .detach:hover {
   color: var(--fg);
+  background: var(--hover);
+}
+/* 粘贴图片芯片：实底小背板 + hairline 勾边（玻璃面内不叠材质），× 角标 hover 提亮 */
+.paste-thumb {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-raised);
+}
+.paste-thumb img {
+  display: block;
+  height: 100%;
+  max-width: 52px;
+  object-fit: contain;
+}
+.thumb-x {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-raised);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.thumb-x:hover {
+  color: var(--danger);
   background: var(--hover);
 }
 </style>

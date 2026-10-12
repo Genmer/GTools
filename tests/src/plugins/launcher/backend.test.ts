@@ -159,6 +159,33 @@ describe('launcher backend 生命周期', () => {
     expect(emits).toEqual([])
   })
 
+  it('激活窗口外降冷档：刷新请求仍被接住，且接住后回快档', async () => {
+    const { ctx, map } = fakeCtx()
+    map.set('apps', freshCache())
+    let scanCalls = 0
+    const backend = createLauncherBackend({
+      deps: async () => fakeDeps,
+      scan: async () => {
+        scanCalls++
+        return []
+      },
+      pollMs: POLL_MS,
+      idlePollMs: 2500,
+      engageMs: 2000
+    })
+    await backend.init(ctx)
+    await backend.start()
+    await vi.advanceTimersByTimeAsync(5000) // 快档窗口 2s 已过 → 冷档
+
+    map.set('scanRequest', Date.now() + 1)
+    await vi.advanceTimersByTimeAsync(2500) // 冷档周期内被接住
+    expect(scanCalls).toBe(1)
+
+    map.set('scanRequest', Date.now() + 1) // 刚刷新过：处于激活窗口
+    await vi.advanceTimersByTimeAsync(POLL_MS) // 快档周期内即接住
+    expect(scanCalls).toBe(2)
+  })
+
   it('扫描失败：scan-error 事件 + 通知，且可重试', async () => {
     const { ctx, map, emits, notifications } = fakeCtx()
     let calls = 0

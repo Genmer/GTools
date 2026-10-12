@@ -9,6 +9,8 @@ export interface FloatWindowLike {
   readonly webContentsId: number
   loadURL(url: string): void
   setBounds(b: { x?: number; y?: number; width?: number; height?: number }): void
+  getPosition(): [number, number]
+  setPosition(x: number, y: number): void
   setAlwaysOnTop(v: boolean, level?: 'floating'): void
   setResizable(v: boolean): void
   setOpacity(v: number): void
@@ -202,6 +204,17 @@ export class FloatWindowManager implements FloatWindowApi {
   emitFromWebContents(webContentsId: number, event: string, payload: unknown): boolean {
     const rec = this.byWebContents.get(webContentsId)
     if (!rec) return false
+    // 内建窗口拖动：页面抓图拖 → 增量位移，主进程直移不走插件往返（图片本体不能挂
+    // -webkit-app-region:drag，会吞掉双击/滚轮，pointer 事件转发是唯一两全解）
+    if (event === 'drag-move') {
+      const dx = Number((payload as { dx?: unknown } | null)?.dx)
+      const dy = Number((payload as { dy?: unknown } | null)?.dy)
+      if (Number.isFinite(dx) && Number.isFinite(dy) && Math.abs(dx) <= 200 && Math.abs(dy) <= 200) {
+        const [x, y] = rec.win.getPosition()
+        rec.win.setPosition(Math.round(x + dx), Math.round(y + dy))
+      }
+      return true
+    }
     this.deps.onFloatEvent(rec.pluginId, { id: rec.id, event, payload })
     return true
   }

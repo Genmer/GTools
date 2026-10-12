@@ -30,6 +30,7 @@ export interface ServiceBag {
     readText(): Promise<string>
     writeText(t: string): Promise<void>
     readImage(): Promise<{ width: number; height: number; dataUrl: string } | null>
+    readImageThumb(maxHeight?: number): Promise<{ thumb: string; width: number; height: number } | null>
     writeImage(dataUrl: string): Promise<void>
   }
   storage: {

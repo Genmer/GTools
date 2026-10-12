@@ -7,6 +7,7 @@ import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as nodeFs from 'node:fs/promises'
 import type { ServiceBag } from './dispatch'
+import { gifScreenSize, parseFileUriList, pickImageCandidateTypes, sniffImageMime } from './clipboard-image-types'
 import type {
   DialogFileFilter,
   DialogOpenOptions,
@@ -148,10 +149,18 @@ async function convertIcnsViaSips(iconPath: string): Promise<Buffer | null> {
   }
 }
 
+/** 可收插件事件的最小窗口面（BrowserWindow 结构兼容，测试可 fake） */
+export interface RendererWindowLike {
+  isDestroyed(): boolean
+  webContents: { send(channel: string, payload: unknown): void }
+}
+
 export function createElectronServices(opts: {
   storageRoot: string
   appVersion: string
   getWindow: () => BrowserWindow | null
+  /** 全部窗口枚举（主窗 + 独立插件窗）：插件事件广播面，detached 窗依赖此回调收 plugin-event */
+  listWindows: () => RendererWindowLike[]
   apiCenter: ApiCenterService
 }): ServiceBag {
   const storage = new PluginStorageService(opts.storageRoot)
@@ -159,7 +168,14 @@ export function createElectronServices(opts: {
 
   const events = {
     emitToRenderer: (pluginId: string, event: string, payload: unknown): void => {
-      opts.getWindow()?.webContents.send(`plugin-event:${pluginId}`, { event, payload })
+      const channel = `plugin-event:${pluginId}`
+      for (const w of opts.listWindows()) {
+        try {
+          if (!w.isDestroyed()) w.webContents.send(channel, { event, payload })
+        } catch {
+          // 窗口销毁竞态：跳过该窗口
+        }
+      }
     }
   }
 
@@ -196,6 +212,8 @@ export function createElectronServices(opts: {
         webContentsId: win.webContents.id,
         loadURL: (u) => void win.loadURL(u),
         setBounds: (b) => win.setBounds(b),
+        getPosition: () => win.getPosition() as [number, number],
+        setPosition: (x, y) => win.setPosition(x, y),
         setAlwaysOnTop: (v, level) => win.setAlwaysOnTop(v, level ?? 'floating'),
         setResizable: (v) => win.setResizable(v),
         setOpacity: (v) => win.setOpacity(v),
@@ -299,23 +317,79 @@ export function createElectronServices(opts: {
     return w && w.isVisible() ? w : undefined
   }
 
+  // 剪贴板图像统一出口（Electron 44 无同步 readImage，W3C ClipboardItem 异步读）。
+  // 候选类型排序见 clipboard-image-types；取到字节后必须魔数嗅探——QQ 复制动图把 GIF
+  // 原始字节塞在名叫 TIFF 的 flavor 里且 nativeImage 解不了 GIF，动图靠字节透传保动画
+  interface ClipboardImageSource {
+    mime: string
+    buffer: Buffer
+    img: Electron.NativeImage | null // GIF 为 null（nativeImage 解码必败）
+  }
+
+  const imageSourceFromBytes = (buffer: Buffer): ClipboardImageSource | null => {
+    const mime = sniffImageMime(buffer)
+    if (mime === 'image/gif') return { mime, buffer, img: null }
+    const img = nativeImage.createFromBuffer(buffer)
+    return img.isEmpty() ? null : { mime: mime ?? 'image/png', buffer, img }
+  }
+
+  const readClipboardImageSource = async (): Promise<ClipboardImageSource | null> => {
+    const items = await clipboard.read()
+    for (const item of items) {
+      for (const t of pickImageCandidateTypes(item.types)) {
+        try {
+          const blob = (await item.getType(t)) as Blob
+          const src = imageSourceFromBytes(Buffer.from(await blob.arrayBuffer()))
+          if (src) return src
+        } catch {
+          // 该格式取流或解码失败就换下一个候选（jp2/psd 等原生解不了属预期）
+        }
+      }
+    }
+    // uri 兜底：QQ/Finder 复制图片文件时 flavor 里只有引用（或仅静态 TIFF），本体在文件里
+    for (const item of items) {
+      if (!item.types.includes('text/uri-list')) continue
+      try {
+        const blob = (await item.getType('text/uri-list')) as Blob
+        const path = parseFileUriList(await blob.text())
+        if (!path) continue
+        const src = imageSourceFromBytes(await nodeFs.readFile(path))
+        if (src) return src
+      } catch {
+        // 文件已移走/不可读属正常，跳过
+      }
+    }
+    return null
+  }
+
+  const gifDataUrl = (src: ClipboardImageSource): string => `data:image/gif;base64,${src.buffer.toString('base64')}`
+
   return {
     clipboard: {
       // Electron 44 clipboard 已 W3C 异步化（无同步 readImage/writeImage），图片走 ClipboardItem + Blob
       readText: () => clipboard.readText(),
       writeText: (t) => clipboard.writeText(t),
       readImage: async () => {
-        const items = await clipboard.read()
-        for (const item of items) {
-          if (!item.types.includes('image/png')) continue
-          const blob = (await item.getType('image/png')) as Blob
-          const img = nativeImage.createFromBuffer(Buffer.from(await blob.arrayBuffer()))
-          if (!img.isEmpty()) {
-            const size = img.getSize()
-            return { width: size.width, height: size.height, dataUrl: img.toDataURL() }
-          }
+        const src = await readClipboardImageSource()
+        if (!src) return null
+        if (src.mime === 'image/gif') {
+          const size = gifScreenSize(src.buffer) ?? { width: 0, height: 0 }
+          return { width: size.width, height: size.height, dataUrl: gifDataUrl(src) }
         }
-        return null
+        const size = src.img!.getSize()
+        return { width: size.width, height: size.height, dataUrl: src.img!.toDataURL() }
+      },
+      // 粘贴芯片缩略图：主进程降采样（渲染层 getAsFile/canvas 路径在 mac 实测不可靠，已弃用）；
+      // GIF 解不了不给降采样，直接用原图 dataUrl 由芯片 CSS 缩放（还能播动画）
+      readImageThumb: async (maxHeight = 48) => {
+        const src = await readClipboardImageSource()
+        if (!src) return null
+        if (src.mime === 'image/gif') {
+          const size = gifScreenSize(src.buffer) ?? { width: 0, height: 0 }
+          return { thumb: gifDataUrl(src), width: size.width, height: size.height }
+        }
+        const size = src.img!.getSize()
+        return { thumb: src.img!.resize({ height: maxHeight }).toDataURL(), width: size.width, height: size.height }
       },
       writeImage: writeImageToClipboard
     },

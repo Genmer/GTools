@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onErrorCaptured, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, h, nextTick, onErrorCaptured, ref, watch } from 'vue'
+import type { Component } from 'vue'
 import type { PluginManifest } from '@sdk/manifest'
 import { getPluginEntryLoader, loadWithRetry } from '../core/registry'
 import { createHostClient } from '../core/host-client'
@@ -12,6 +13,12 @@ const errored = ref<string | null>(null)
 const retryKey = ref(0)
 const bodyRef = ref<HTMLDivElement | null>(null)
 
+// 异步 chunk 拉取期占位：消除进入插件时的空白一闪；80ms 延迟避免秒开场景占位自身闪烁
+const PluginLoading: Component = {
+  name: 'PluginLoading',
+  setup: () => () => h('div', { class: 'plugin-loading' }, '插件加载中…')
+}
+
 const manifest = computed(() => props.manifests.find((m) => m.id === router.activePluginId) ?? null)
 const rest = computed(() => restOf(router.query, props.manifests))
 // 依赖 retryKey：重试时强制重建异步组件；loader 经指数退避重试后再交错误降级
@@ -19,7 +26,13 @@ const comp = computed(() => {
   void retryKey.value
   if (!manifest.value) return null
   const loader = getPluginEntryLoader(manifest.value.id)
-  return loader ? defineAsyncComponent(() => loadWithRetry(loader)) : null
+  return loader
+    ? defineAsyncComponent({
+        loader: () => loadWithRetry(loader),
+        loadingComponent: PluginLoading,
+        delay: 80
+      })
+    : null
 })
 const ctx = computed(() =>
   manifest.value ? { manifest: manifest.value, host: createHostClient(manifest.value.id) } : null
@@ -126,6 +139,25 @@ defineExpose({ focusContent })
   align-items: center;
   justify-content: center;
   gap: var(--sp-1);
+}
+/* 加载占位（loadingComponent 根节点继承本组件 scope attr，scoped 规则可命中） */
+.plugin-loading {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-dim);
+  font-size: var(--fs-sub);
+  animation: plugin-loading-pulse 1.2s ease-in-out infinite;
+}
+@keyframes plugin-loading-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }
 .msg {
   color: var(--danger);

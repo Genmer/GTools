@@ -672,16 +672,20 @@ backend（主进程模块）import 白名单在原有基础上**增加 `node:` �
 - 主进程内部配置结构（**不进 sdk**——插件只需要 B.2 的调用面）：
 
 ```ts
+type ProviderType =
+  | 'mymemory' | 'http-template'                        // 宿主内置形态
+  | 'deepl' | 'baidu' | 'youdao' | 'iflytek' | 'hunyuan' | 'volcano'  // 厂商 preset（B.7）
+
 interface ApiProviderConfig {
   id: string                  // 'builtin:mymemory' 或 'u-<8位随机>'
-  type: 'mymemory' | 'http-template'
+  type: ProviderType
   name: string
   enabled: boolean
-  endpoint?: string           // http-template 的 URL 模板，占位符 {text} {from} {to} {key}
-  apiKey?: string             // 明文只存本机此文件，永不下发渲染层
+  endpoint?: string           // 仅 http-template：URL 模板，占位符 {text} {from} {to} {key}
   method?: 'GET' | 'POST'
-  bodyTemplate?: string       // POST 请求体模板，占位符同上
-  resultPath?: string         // 点分结果字段路径，如 translations.0.text
+  bodyTemplate?: string       // 仅 http-template：POST 请求体模板，占位符同上
+  resultPath?: string         // 仅 http-template：点分结果字段路径，如 translations.0.text
+  secrets?: Record<string, string>  // 凭证字段，键集合由该 type 的 preset 声明（B.7 表）；明文只存本机此文件，永不下发渲染层
 }
 interface ApiServicesConfig {
   services: {
@@ -691,7 +695,7 @@ interface ApiServicesConfig {
 ```
 
 - **默认值即 0.1.0 行为**：providers 为空、activeProviderId 为 `''` 时，执行器回退内置 MyMemory 免 key（全新环境开箱即用，迁移验收基线）。
-- sanitize：activeProviderId 必须指向存在且 enabled 的 provider 或 `''`；各字段类型校验，坏值丢弃回默认（手改文件场景与 sanitizePatch 同哲学）。
+- sanitize：activeProviderId 必须指向存在且 enabled 的 provider 或 `''`；type 八值枚举外整条丢弃；secrets 只保留 preset 声明的键且值非空；preset 类型的 endpoint/method/bodyTemplate/resultPath 强制清空（防手改文件残留）。**读时兼容**：旧结构顶层 `apiKey` 非空且无 `secrets.apiKey` 时自动转 `secrets: { apiKey }`（0.1.0 迁移产物与备份 v2 导入同一通道，零额外迁移代码）。
 
 ### B.1 设置页「API 服务」区块（交互）
 
@@ -707,11 +711,12 @@ interface ApiServicesConfig {
 
 | api | payload | 返回 |
 |---|---|---|
-| `api-services:get` | — | 脱敏配置（apiKey → hasKey） |
-| `api-services:upsert-provider` | provider 脱敏表单（newApiKey 可选） | 保存后脱敏配置 |
+| `api-services:get` | — | `{ services: 脱敏配置（secrets → hasSecrets）, presets: ProviderPresetMeta[] }`（presets 供设置页表驱动下拉与凭证框；广播 `api-services-changed` 仍是裸脱敏视图形状） |
+| `api-services:upsert-provider` | provider 脱敏表单（newSecrets 可选，键集合 ⊆ preset.credentials） | 保存后脱敏配置 |
 | `api-services:remove-provider` | `{ id }` | 脱敏配置 |
 | `api-services:set-active` | `{ id: string \| '' }` | 脱敏配置 |
-| `api-services:test` | `{ id, draft? }` | `{ ok, resultText?, error? }` |
+| `api-services:test` | `{ id, draft? }` | `{ ok, resultText?, error? }`（executeOne 直连目标，不进容灾循环、不 trip 熔断） |
+| `api-services:open-console` | `{ type }` | 渲染层只传类型意图；主进程查 PROVIDER_PRESETS 得 consoleUrl（null/未知 type 报错），assertHttpUrl 后 shell.openExternal |
 
 ### B.2 插件侧契约（HostApi.apis，主进程代理——评估后定案）
 
@@ -722,7 +727,16 @@ sdk/api.ts 新增（apiVersion 仍为 1——只加面不改旧面，protocolVer
 ```ts
 export type ApiServiceId = 'translate'        // 封闭枚举，扩服务=发版时在此加
 export interface TranslateRequest { text: string; from: string; to: string }
-export interface TranslateResult { resultText: string; detectedFrom?: string; providerId: string }
+export interface TranslateResult {
+  resultText: string
+  detectedFrom?: string
+  providerId: string
+  fallback?: TranslateFallbackInfo            // 可选字段：首选引擎失败已容灾切换时附带，旧消费方零影响（apiVersion 不升）
+}
+export interface TranslateFallbackInfo {
+  requestedProviderId: string                 // '' = 内置默认 MyMemory
+  reason: string                              // 格式 `${kind}: ${简述}`
+}
 export interface ApiServiceStatus {
   service: ApiServiceId
   configured: boolean                          // false = 未配置且回退默认 MyMemory
@@ -741,7 +755,7 @@ apis: {
 
 - `API_PERMISSIONS` 增两行：`'apis.translate': 'apis:translate'`、`'apis.translate.status': 'apis:translate'`（host-client 把 `apis.invoke('translate', p)` 包装成 api 名 `apis.translate`；service 是 ApiServiceId 字面量类型，模板拼接安全）。dispatchApi 查表逻辑零改动（dispatch.ts:84-87）。
 - `Permission` 联合与 `ALL_PERMISSIONS` 增 `'apis:translate'`（sdk/manifest.ts）。
-- `ApiCallError` 联合增 `'SERVICE_UNCONFIGURED'`（无可用 provider）与 `'SERVICE_ERROR'`（执行失败；message 前缀分类 `timeout/network/http/quota/parse/config`，沿用 translate/providers/types.ts 的 TranslateErrorKind 六类）。
+- `ApiCallError` 联合增 `'SERVICE_UNCONFIGURED'`（无可用 provider）与 `'SERVICE_ERROR'`（执行失败；message 前缀分类 `timeout/network/http/quota/auth/parse/config` 七类，`auth` = 凭证无效或未授权，沿用 translate/providers/types.ts 的 TranslateErrorKind 六类并扩展）。
 - 未声明 `apis:translate` 的插件调用 → 现有 PERMISSION_DENIED 语义；执行器统一走 fetchViaNet（net-guard 的 http(s) 限制与超时对 API 中心同样生效）。
 
 ### B.3 通用 API vs 插件专属 API（判定规则，后续插件必须遵守）
@@ -773,7 +787,32 @@ external manifest 的 permissions 含 `apis:<service>` 视为合法项（通过�
 
 ### B.6 备份集成
 
-`BACKUP_VERSION` 1→2（backup.ts:4）；备份文件增加可选顶层段 `apiServices?: ApiServicesConfig`，导出时经既有 tokenizePathValues 深遍历（backup.ts:127-146，密钥为不透明字符串原样保留，endpoint 内不含本机路径）。导入：版本门槛是 `> BACKUP_VERSION` 才拒（backup.ts:132-134），升到 2 后 v1（无该段）/v2 备份都可导入；apiServices 段 sanitize 后整体替换。导入完成即广播 `api-services-changed`——api-center 是主进程内存态，无需重启即生效（与常驻 backend 的 restartRecommended 不同）。
+`BACKUP_VERSION` 1→2（backup.ts:4）；备份文件增加可选顶层段 `apiServices?: ApiServicesConfig`，导出时经既有 tokenizePathValues 深遍历（backup.ts:127-146，密钥为不透明字符串原样保留，endpoint 内不含本机路径）。导入：版本门槛是 `> BACKUP_VERSION` 才拒（backup.ts:132-134），升到 2 后 v1（无该段）/v2 备份都可导入；apiServices 段 sanitize 后整体替换。**备份格式不随 secrets 结构调整升版本**：旧结构（顶层 apiKey）备份导入时由 sanitize 读时兼容自动转换（B.0），新旧结构备份均可导入。导入完成即广播 `api-services-changed`——api-center 是主进程内存态，无需重启即生效（与常驻 backend 的 restartRecommended 不同）。
+
+### B.7 厂商预设、错误分类与容灾语义（第四期扩展）
+
+**厂商 preset 表**（`api-center/presets.ts` 的 `PROVIDER_PRESETS`，设置页类型下拉/凭证框/控制台跳转的单一数据源；`quotaNote` 为类型下拉名词后的免费额度短句，仅 UI 展示；executors 凭证键校验同源）：
+
+| type | 端点 | 凭证键（secrets） | 签名/鉴权摘要 | 默认超时 |
+|---|---|---|---|---|
+| deepl | `api(-free).deepl.com/v2/translate`（密钥 `:fx` 结尾走 free） | authKey | `Authorization: DeepL-Auth-Key`；body `{text,target_lang,source_lang?}`（auto 省略 source_lang） | 10s |
+| baidu | `fanyi-api.baidu.com/api/trans/vip/translate`（form） | appId, secretKey | `sign=md5hex(appId+原文+salt+secretKey)`，salt=randomBytes(8) hex | 10s |
+| youdao | `openapi.youdao.com/api`（form） | appKey, appSecret | v3：`sign=sha256hex(appKey+input+salt+curtime+appSecret)`，input=原文(≤20)或前10+长度+后10 | 10s |
+| iflytek | `itrans.xf-yun.com/v1/its`（鉴权全在 query） | appId, apiKey, apiSecret | `authorization=b64('api_key=…signature="b64(HMAC-SHA256(host/date/request-line, apiSecret))"')`；文本 base64 进 body，>5000 字符预检拒绝；auto 语种不支持 | 10s |
+| hunyuan | `api.hunyuan.cloud.tencent.com/v1/chat/completions` | apiKey | `Bearer`；模型 `hunyuan-turbos-latest`、temperature=0，系统提示词声明语向；响应剥离成对引号/代码围栏 | 15s |
+| volcano | `translate.volcengineapi.com/?Action=TranslateText&Version=2020-06-01` | accessKeyId, secretAccessKey | V4：CanonicalRequest(含 x-content-sha256/x-date) → StringToSign → 四级 HMAC 密钥链 → hex 签名；SourceLanguage 省略=自动检测 | 10s |
+
+**错误分类**：`ApiErrorKind` 七类（timeout/network/http/quota/**auth**/parse/config）。HTTP 状态经 `executors/error-rules.ts` 的 `httpStatusToKind`（5xx→http、401→auth、429/456/482→quota、其余 4xx→config；各家特判以 overrides 传入，如 mymemory 403→quota）；各家 body 错误码表就近放各自 executor（百度 error_code、有道 errorCode、讯飞 header.code、火山 Response.Error.Code 的含字断言）。**5xx 归 http 参与容灾**（而非立即终止）：网关瞬断/上游抖动换一家即恢复，是最典型的容灾场景。
+
+**容灾循环**（`ApiCenterService.translate`）：
+
+- 显式 `providerId`：只打该引擎，失败立即报 SERVICE_ERROR，**不容灾、不 trip 熔断**。
+- 全局路径候选序：未设 active = `[内置 MyMemory, ...启用引擎]`；设过 active = `[active, ...其余启用引擎]`（**内置不进候选**；active 已删/禁用 → 防御回退内置语义）。禁用引擎永不进候选。
+- 逐候选尝试：失败类别 ∈ `FALLBACK_ELIGIBLE_KINDS = {auth, quota, http}` → trip 该引擎熔断（120s 冷却，阈值 1 次）并切下一家；非容灾类别（timeout/network/parse/config）→ 立即终止（换家大概率同因）。全候选熔断中 → 忽略熔断硬试兜底。成功即 clear 该引擎熔断记录。
+- 全挂：报错 message 附尝试轨迹（`名称(kind) → 名称(kind)`）；切换成功：结果附 `fallback: { requestedProviderId, reason }`（'' = 内置默认），translate 插件页脚小字提示「首选 X 因 … 失败，已自动切换」。
+- `testProvider` 走 `executeOne` 直连目标（draft 优先、不落库、不进循环、不 trip）。
+
+**黄金值测试**：`tests/api-center-providers.test.ts` 的签名/请求断言值由一次性脚本按官方规则独立生成后硬编码（脚本用完即删，不进仓库），测试内再用与 executor 不同的组装路径（手动字符串拼接 + node:crypto）复算交叉验证——自生成双路径交叉，非对拍真实服务。
 
 ---
 

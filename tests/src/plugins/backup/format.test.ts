@@ -35,6 +35,8 @@ describe('backup format：序列化与文件名', () => {
     expect(b.createdAt).toBe('2026-01-02T03:04:05.000Z')
     expect(b.sourcePlatform).toBe('darwin')
     expect(b.appVersion).toBe('0.1.0')
+    // 新增视觉偏好字段随 structuredClone(settings) 自动带出
+    expect(b.settings.outlineCustomColor).toBe('#42a5f5')
     expect(Object.keys(b.pluginStorage)).toEqual(['clipboard', 'backup'])
 
     const withApi = serializeBackup({
@@ -176,6 +178,53 @@ describe('backup format：parseBackup 校验（宁可拒绝也不猜）', () => 
       expect(r.backup.settings).toEqual(DEFAULT_SETTINGS)
     }
   })
+
+  it('轮廓环宽/色随备份往返：合法保留，非法回退默认', () => {
+    const ok = parseBackup(
+      JSON.stringify({
+        ...sampleBackup(),
+        settings: {
+          ...DEFAULT_SETTINGS,
+          outlineEnabled: true,
+          outlineWidth: 4,
+          outlineColor: 'custom',
+          outlineCustomColor: '#aabbcc'
+        }
+      })
+    )
+    expect(ok.ok).toBe(true)
+    if (ok.ok) {
+      expect(ok.backup.settings.outlineWidth).toBe(4)
+      expect(ok.backup.settings.outlineColor).toBe('custom')
+      expect(ok.backup.settings.outlineCustomColor).toBe('#aabbcc')
+    }
+    const bad = parseBackup(
+      JSON.stringify({
+        ...sampleBackup(),
+        settings: { ...DEFAULT_SETTINGS, outlineWidth: 'fat', outlineColor: 'red', outlineCustomColor: 'nope' }
+      })
+    )
+    expect(bad.ok).toBe(true)
+    if (bad.ok) {
+      expect(bad.backup.settings.outlineWidth).toBe(3)
+      expect(bad.backup.settings.outlineColor).toBe('auto')
+      expect(bad.backup.settings.outlineCustomColor).toBe('#42a5f5')
+    }
+  })
+
+  it('旧备份（v1）settings 无轮廓环两字段：解析后回退默认 3/auto（outlineEnabled 同回默认 true）', () => {
+    const r = parseBackup(
+      JSON.stringify({ ...sampleBackup(), version: 1, settings: { theme: 'dark' } })
+    )
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.backup.settings.outlineWidth).toBe(3)
+      expect(r.backup.settings.outlineColor).toBe('auto')
+      expect(r.backup.settings.outlineCustomColor).toBe('#42a5f5')
+      expect(r.backup.settings.outlineEnabled).toBe(true)
+      expect(r.backup.settings.theme).toBe('dark')
+    }
+  })
 })
 
 describe('canonicalJson', () => {
@@ -200,7 +249,11 @@ describe('normalizeSettings', () => {
       // 偏好/机器相关字段不从备份读取（sdk/settings.ts：导入恢复不覆盖），保持本机默认
       launchAtLogin: true,
       clipboardSuggest: false,
-      hideOnBlur: false
+      hideOnBlur: false,
+      outlineEnabled: false,
+      outlineWidth: 5,
+      outlineColor: 'rainbow-gradient',
+      outlineCustomColor: '#abcdef'
     })
     expect(s).toEqual({
       theme: 'glass',
@@ -210,7 +263,27 @@ describe('normalizeSettings', () => {
       launchAtLogin: false,
       clipboardSuggest: true,
       hideOnBlur: true,
-      commandHotkeys: []
+      outlineEnabled: false,
+      outlineWidth: 5,
+      outlineColor: 'rainbow-gradient',
+      outlineCustomColor: '#abcdef',
+      outlineFlowSpeed: 3,
+      commandHotkeys: [],
+      windowPos: null
     })
+  })
+  it('轮廓环宽/色/流速：合法值往返保留，环宽越界夹取，非法值回退默认 3/auto/3档', () => {
+    const ok = normalizeSettings({ outlineWidth: 2, outlineColor: 'rainbow' })
+    expect(ok.outlineWidth).toBe(2)
+    expect(ok.outlineColor).toBe('rainbow')
+    expect(normalizeSettings({ outlineColor: 'custom', outlineCustomColor: '#abc' }).outlineCustomColor).toBe('#aabbcc')
+    expect(normalizeSettings({ outlineCustomColor: 'nope' }).outlineCustomColor).toBe('#42a5f5')
+    expect(normalizeSettings({ outlineWidth: 9 }).outlineWidth).toBe(5)
+    expect(normalizeSettings({ outlineWidth: 2.6 }).outlineWidth).toBe(3)
+    expect(normalizeSettings({ outlineWidth: 'x' }).outlineWidth).toBe(3)
+    expect(normalizeSettings({ outlineColor: 'red' }).outlineColor).toBe('auto')
+    expect(normalizeSettings({ outlineFlowSpeed: 9 }).outlineFlowSpeed).toBe(9)
+    expect(normalizeSettings({ outlineFlowSpeed: 99 }).outlineFlowSpeed).toBe(10)
+    expect(normalizeSettings({ outlineFlowSpeed: 'fast' }).outlineFlowSpeed).toBe(3)
   })
 })

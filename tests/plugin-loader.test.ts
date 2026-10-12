@@ -138,6 +138,66 @@ describe('plugin-loader backend 生命周期', () => {
     expect(log).toEqual(['init', 'start'])
   })
 
+  it('load 传 startResidentBackends:false 只装配不起 backend，startResidentBackends 再起', async () => {
+    const log: string[] = []
+    const be = fakeBackend(log)
+    const loader = makeLoader({
+      manifests: [manifest({ id: 'res4', activation: 'resident', backend: './backend/index.ts', keywords: ['res4'] })],
+      backends: { res4: be }
+    })
+    await loader.load([], { startResidentBackends: false })
+    expect(log).toEqual([])
+    await loader.startResidentBackends()
+    expect(log).toEqual(['init', 'start'])
+  })
+
+  it('并发 ensureBackendStarted 共享同一次启动（load+init+start 各一次，防双 interval）', async () => {
+    const calls: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const be: PluginBackend = {
+      async init() {
+        calls.push('init')
+      },
+      async start() {
+        calls.push('start')
+        await gate
+      },
+      async stop() {}
+    }
+    const loader = makeLoader({
+      manifests: [manifest({ id: 'trig2', backend: './backend/index.ts', keywords: ['trig2'] })],
+      backends: { trig2: be }
+    })
+    await loader.load([])
+    const all = Promise.all([loader.ensureBackendStarted('trig2'), loader.ensureBackendStarted('trig2'), loader.ensureBackendStarted('trig2')])
+    release()
+    await all
+    expect(calls).toEqual(['init', 'start'])
+  })
+
+  it('startResidentBackends 单插件 init 失败不阻断其余（错误进 issues）', async () => {
+    const log: string[] = []
+    const bad: PluginBackend = {
+      async init() {
+        throw new Error('boom')
+      },
+      async start() {},
+      async stop() {}
+    }
+    const loader = makeLoader({
+      manifests: [
+        manifest({ id: 'bad-res', activation: 'resident', backend: './b', keywords: ['badres'] }),
+        manifest({ id: 'good-res', activation: 'resident', backend: './b', keywords: ['goodres'] })
+      ],
+      backends: { 'bad-res': bad, 'good-res': fakeBackend(log) }
+    })
+    await loader.load([], { startResidentBackends: false })
+    await expect(loader.startResidentBackends()).resolves.toBeUndefined()
+    expect(log).toEqual(['init', 'start'])
+    expect(loader.issues.some((i) => i.pluginId === 'bad-res' && i.message.includes('boom'))).toBe(true)
+  })
+
   it('禁用 resident 插件立即 stop，重新启用恢复 start（B3）', async () => {
     const log: string[] = []
     const be = fakeBackend(log)
@@ -250,5 +310,126 @@ describe('plugin-loader 外部插件（协议预留：仅解析校验，不实�
     expect(loader.issues.some((i) => i.message.includes('JSON'))).toBe(true)
     expect(loader.issues.some((i) => i.message.includes('协议版本'))).toBe(true)
     await rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe('backend 生命周期超时兜底', () => {
+  const hangBackend = (): PluginBackend => ({
+    async init() {
+      await new Promise(() => {}) // 永不 resolve
+    },
+    async start() {
+      await new Promise(() => {})
+    },
+    async stop() {
+      await new Promise(() => {})
+    }
+  })
+
+  function makeTimedLoader(backends: Record<string, PluginBackend>): PluginLoader {
+    return new PluginLoader(
+      {
+        builtinManifests: [
+          manifest({ id: 'hang', activation: 'resident', backend: './backend/index.ts', keywords: ['hang'] })
+        ],
+        loadBackend: async (id) => backends[id] ?? null,
+        externalDir: null,
+        createBackendContext: ctxFactory
+      },
+      { startMs: 20, stopMs: 20 }
+    )
+  }
+
+  it('init 挂起：ensureBackendStarted 按超时返回，标记已启动防重复 start，issues 留痕', async () => {
+    const loader = makeTimedLoader({ hang: hangBackend() })
+    await loader.load([], { startResidentBackends: false })
+    const t0 = Date.now()
+    await loader.ensureBackendStarted('hang')
+    expect(Date.now() - t0).toBeLessThan(2000)
+    expect(loader.registry.get('hang')?.backendStarted).toBe(true)
+    expect(loader.issues.some((i) => i.pluginId === 'hang' && i.message.includes('超时'))).toBe(true)
+  })
+
+  it('stop 挂起：setEnabled(false) 按超时返回不再永久阻塞', async () => {
+    const backend = hangBackend()
+    const loader = makeTimedLoader({ hang: backend })
+    await loader.load([], { startResidentBackends: false })
+    const entry = loader.registry.get('hang')
+    if (entry) {
+      // 直接置位避开 start 挂起，聚焦 stop 路径（backend 需就位，否则跳过 stop 分支）
+      entry.backend = backend
+      entry.backendStarted = true
+    }
+    const t0 = Date.now()
+    const r = await loader.setEnabled('hang', false)
+    expect(r.ok).toBe(true)
+    expect(Date.now() - t0).toBeLessThan(2000)
+    expect(loader.registry.get('hang')?.backendStarted).toBe(false)
+  })
+
+  it('disposeAll 遇挂起的 stop/dispose 也能有界返回', async () => {
+    const backend = { ...hangBackend(), dispose: async () => new Promise<void>(() => {}) }
+    const loader = makeTimedLoader({ hang: backend })
+    await loader.load([], { startResidentBackends: false })
+    const entry = loader.registry.get('hang')
+    if (entry) {
+      entry.backend = backend
+      entry.backendStarted = true
+    }
+    const t0 = Date.now()
+    await loader.disposeAll()
+    expect(Date.now() - t0).toBeLessThan(3000)
+  })
+
+  it('超时等待期间并发调用共享同一次等待（init 一次、issue 一条）；超时后再调用立即返回不再重试', async () => {
+    let initCalls = 0
+    const backend: PluginBackend = {
+      init: async () => {
+        initCalls++
+        await new Promise(() => {}) // 挂起
+      },
+      start: async () => {},
+      stop: async () => {}
+    }
+    // startMs 放大到 200 以便区分「立即返回」与「再等一个超时」
+    const loader = new PluginLoader(
+      {
+        builtinManifests: [
+          manifest({ id: 'hang', activation: 'resident', backend: './backend/index.ts', keywords: ['hang'] })
+        ],
+        loadBackend: async () => backend,
+        externalDir: null,
+        createBackendContext: ctxFactory
+      },
+      { startMs: 200 }
+    )
+    await loader.load([], { startResidentBackends: false })
+    await Promise.all([loader.ensureBackendStarted('hang'), loader.ensureBackendStarted('hang')])
+    expect(initCalls).toBe(1)
+    expect(loader.issues.filter((i) => i.pluginId === 'hang' && i.message.includes('超时'))).toHaveLength(1)
+    const t0 = Date.now()
+    await loader.ensureBackendStarted('hang')
+    expect(Date.now() - t0).toBeLessThan(100)
+    expect(initCalls).toBe(1) // 已标记启动，不对挂死 backend 重复 start
+  })
+
+  it('init 抛错（非挂起）不受超时兜底影响：立即完成、记抛错 issue、可重试', async () => {
+    let initCalls = 0
+    const backend: PluginBackend = {
+      init: async () => {
+        initCalls++
+        throw new Error('boom')
+      },
+      start: async () => {},
+      stop: async () => {}
+    }
+    const loader = makeTimedLoader({ hang: backend })
+    await loader.load([], { startResidentBackends: false })
+    await loader.ensureBackendStarted('hang')
+    expect(loader.issues.some((i) => i.message.includes('boom'))).toBe(true)
+    expect(loader.issues.some((i) => i.message.includes('超时'))).toBe(false)
+    expect(loader.registry.get('hang')?.backendStarted).toBe(false)
+    await loader.ensureBackendStarted('hang') // 未标记已启动：下次进入可重试
+    expect(initCalls).toBe(2)
   })
 })

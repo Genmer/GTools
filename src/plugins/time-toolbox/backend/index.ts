@@ -22,6 +22,11 @@ import {
 } from '../logic/countdown'
 
 export const COUNTDOWN_TICK_MS = 500
+/**
+ * 空闲档轮询周期：storage 是协议内唯一渲染层→backend 命令通道（events.on 在 backend 侧是空桩），
+ * 倒计时未激活时不能全停否则丢 start 命令，降频到 1s 只兜命令接续（get 命中主进程内存缓存，零盘读）。
+ */
+export const COUNTDOWN_IDLE_POLL_MS = 1000
 
 export interface CountdownScheduler {
   setInterval(fn: () => void, ms: number): unknown
@@ -43,6 +48,8 @@ export class CountdownBackend implements PluginBackend {
   private state: CountdownState = { ...IDLE_COUNTDOWN }
   private lastSeq = 0
   private tick: unknown = null
+  private tickMs = 0
+  private gen = 0
 
   constructor(
     private readonly scheduler: CountdownScheduler = nodeScheduler,
@@ -57,13 +64,15 @@ export class CountdownBackend implements PluginBackend {
 
   async start(): Promise<void> {
     if (this.tick !== null) return
+    // onTick 尾部按当前状态挂对应档位的 interval
     await this.onTick()
-    this.tick = this.scheduler.setInterval(() => void this.onTick(), COUNTDOWN_TICK_MS)
   }
 
   async stop(): Promise<void> {
+    this.gen++ // 在途 onTick 的尾部不再重挂 interval
     if (this.tick !== null) this.scheduler.clearInterval(this.tick)
     this.tick = null
+    this.tickMs = 0
     await this.persist()
   }
 
@@ -109,12 +118,24 @@ export class CountdownBackend implements PluginBackend {
   }
 
   private async onTick(): Promise<void> {
+    const g = this.gen
     try {
       await this.pollCommand()
       await this.advance()
     } catch {
-      // 单轮失败静默放弃，下一轮 500ms 后重试
+      // 单轮失败静默放弃，下一轮重试
     }
+    if (g === this.gen) this.syncInterval() // stop 与本轮并发时不重挂
+  }
+
+  /** 轮询分档：running/paused 走 500ms（命令响应与到点判定），idle/expired 降 1s 慢档 */
+  private syncInterval(): void {
+    const active = this.state.status === 'running' || this.state.status === 'paused'
+    const ms = active ? COUNTDOWN_TICK_MS : COUNTDOWN_IDLE_POLL_MS
+    if (this.tick !== null && this.tickMs === ms) return
+    if (this.tick !== null) this.scheduler.clearInterval(this.tick)
+    this.tick = this.scheduler.setInterval(() => void this.onTick(), ms)
+    this.tickMs = ms
   }
 
   private async pollCommand(): Promise<void> {

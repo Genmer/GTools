@@ -39,7 +39,7 @@ const rawProvider = {
   name: 'DeepL',
   enabled: true,
   endpoint: 'https://x.example.com/?q={text}&key={key}',
-  apiKey: 'sk-1',
+  secrets: { apiKey: 'sk-1' },
   method: 'GET',
   bodyTemplate: '',
   resultPath: ''
@@ -76,7 +76,7 @@ describe('sanitizeApiServices（手改文件场景：坏值丢弃回默认）', 
       services: {
         translate: {
           providers: [
-            { id: 'x', type: 'http-template', name: 'n', enabled: 'yes', endpoint: 9, method: 'POST', apiKey: null },
+            { id: 'x', type: 'http-template', name: 'n', enabled: 'yes', endpoint: 9, method: 'POST', secrets: { apiKey: null, other: 'x' } },
             { id: 'y', type: 'mymemory', name: 'm' }
           ]
         }
@@ -85,7 +85,7 @@ describe('sanitizeApiServices（手改文件场景：坏值丢弃回默认）', 
     const p = out.services.translate.providers[0]
     expect(p.enabled).toBe(false) // 坏值按 false：避免手改错值意外启用
     expect(p.endpoint).toBe('')
-    expect(p.apiKey).toBe('')
+    expect(p.secrets).toBeUndefined() // 坏值/未声明键的凭证被过滤后不落空对象
     expect(p.method).toBe('POST')
     expect(out.services.translate.providers[1].enabled).toBe(true) // 缺省 = 启用
   })
@@ -135,7 +135,7 @@ describe('ApiCenterStore 读写与落盘', () => {
     const saved = JSON.parse(fs.files.get('/data/api-services.json') as string)
     expect(saved.services.translate.activeProviderId).toBe('u-abcd1234')
     // 明文密钥在主进程文件里（本机 userData），这是设计约定
-    expect(saved.services.translate.providers[0].apiKey).toBe('sk-1')
+    expect(saved.services.translate.providers[0].secrets.apiKey).toBe('sk-1')
   })
 
   it('flush 兜底：防抖窗口内强制落盘且幂等', async () => {

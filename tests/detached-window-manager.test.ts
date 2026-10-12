@@ -19,11 +19,13 @@ interface FakeWindow extends DetachedWindowLike {
   destroy: Mock<() => void>
   sent: { channel: string; payload: unknown }[]
   emitClosed(): void
+  emitReadyToShow(): void
   setDestroyed(): void
 }
 
 function makeFakeWindow(webContentsId: number): FakeWindow {
   const closedListeners: (() => void)[] = []
+  const readyListeners: (() => void)[] = []
   const sent: { channel: string; payload: unknown }[] = []
   let destroyed = false
   const win: FakeWindow = {
@@ -53,10 +55,16 @@ function makeFakeWindow(webContentsId: number): FakeWindow {
     on: (event: 'closed', cb: () => void): void => {
       if (event === 'closed') closedListeners.push(cb)
     },
+    once: (event: 'ready-to-show', cb: () => void): void => {
+      if (event === 'ready-to-show') readyListeners.push(cb)
+    },
     sent,
     emitClosed: (): void => {
       destroyed = true
       for (const cb of [...closedListeners]) cb()
+    },
+    emitReadyToShow: (): void => {
+      for (const cb of [...readyListeners]) cb()
     },
     setDestroyed: (): void => {
       destroyed = true
@@ -85,12 +93,15 @@ function makeManager(windows: FakeWindow[]): {
 }
 
 describe('DetachedWindowManager 单实例查重聚焦', () => {
-  it('同插件重复 open 只建一扇窗并聚焦复用', () => {
+  it('同插件重复 open 只建一扇窗并聚焦复用；show 等 ready-to-show 首帧再显', () => {
     const windows: FakeWindow[] = []
     const { manager, createWindow } = makeManager(windows)
     expect(manager.open('calc', '1+1')).toBe('created')
     expect(createWindow).toHaveBeenCalledTimes(1)
     expect(windows[0].loadURL).toHaveBeenCalledWith('app://renderer/#detached=true&plugin=calc&query=1%2B1')
+    // 首帧未就绪不显窗（防空窗闪现），就绪后补显
+    expect(windows[0].show).not.toHaveBeenCalled()
+    windows[0].emitReadyToShow()
     expect(windows[0].show).toHaveBeenCalled()
     expect(manager.has('calc')).toBe(true)
 
@@ -99,6 +110,14 @@ describe('DetachedWindowManager 单实例查重聚焦', () => {
     expect(windows[0].focus).toHaveBeenCalled()
     // 聚焦复用不重载 URL，保持窗口内现场
     expect(windows[0].loadURL).toHaveBeenCalledTimes(1)
+  })
+
+  it('ready-to-show 前窗口被销毁：不补 show（防销毁后调用）', () => {
+    const windows: FakeWindow[] = []
+    const { manager } = makeManager(windows)
+    manager.open('calc', '')
+    windows[0].emitClosed()
+    expect(() => windows[0].emitReadyToShow()).not.toThrow()
   })
 
   it('不同插件各建一扇窗，创建参数在工作区居中', () => {
@@ -153,18 +172,37 @@ describe('DetachedWindowManager 批量关闭与主题同步', () => {
     expect(() => manager.closeAll()).not.toThrow()
   })
 
-  it('applyThemeToAll 同步原生主题并向所有存活窗口广播 detached:theme', () => {
+  it('applyThemeToAll 同步原生主题并向所有存活窗口广播 detached:theme（含 outline）', () => {
     const windows: FakeWindow[] = []
     const { manager } = makeManager(windows)
     manager.open('calc', '')
     manager.open('markdown-notes', '')
     windows[1].setDestroyed()
     const tx = { enabled: true, opacity: 55, blur: true }
-    manager.applyThemeToAll('dark', tx)
+    const outline = { enabled: true, width: 4, color: 'rainbow' as const }
+    manager.applyThemeToAll('dark', tx, outline)
     expect(windows[0].applyTheme).toHaveBeenCalledWith('dark', tx)
-    expect(windows[0].sent).toEqual([{ channel: DETACHED_THEME_EVENT, payload: { theme: 'dark', transparency: tx } }])
+    expect(windows[0].sent).toEqual([{ channel: DETACHED_THEME_EVENT, payload: { theme: 'dark', transparency: tx, outline } }])
     // 已销毁窗口原生调用抛错被吞掉，CSS 事件也不再发送
     expect(windows[1].sent).toEqual([])
+  })
+
+  it('applyThemeToAll 轮廓环关闭（enabled=false）也广播：四字段原样传递，由接收端 data-ring=off 消化', () => {
+    const windows: FakeWindow[] = []
+    const { manager } = makeManager(windows)
+    manager.open('calc', '')
+    const outline = { enabled: false, width: 2, color: 'custom' as const, customColor: '#aabbcc' }
+    manager.applyThemeToAll('light', { enabled: false, opacity: 20, blur: false }, outline)
+    expect(windows[0].sent).toHaveLength(1)
+    const msg = windows[0].sent[0]
+    expect(msg.channel).toBe(DETACHED_THEME_EVENT)
+    // 载荷形状恰好三段 theme/transparency/outline，outline 四字段逐项原样（false 不丢、宽度不重夹取、hex 不重洗）
+    expect(Object.keys(msg.payload as object).sort()).toEqual(['outline', 'theme', 'transparency'])
+    expect(msg.payload).toEqual({
+      theme: 'light',
+      transparency: { enabled: false, opacity: 20, blur: false },
+      outline: { enabled: false, width: 2, color: 'custom', customColor: '#aabbcc' }
+    })
   })
 })
 

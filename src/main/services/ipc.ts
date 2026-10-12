@@ -5,11 +5,13 @@ import { dirname, join, sep as pathSep } from 'node:path'
 import type { PluginManifest } from '@sdk/manifest'
 import type { ApiCallResult } from '@sdk/api'
 import type { PluginLoader } from '../plugin-loader'
-import type { SettingsStore, AppSettings, ThemeName, CommandHotkey } from '../settings-store'
+import type { SettingsStore, AppSettings, ThemeName, CommandHotkey, OutlineColor } from '../settings-store'
 import type { ServiceBag } from './dispatch'
 import { dispatchApi } from './dispatch'
-import type { ApiCenterService, ProviderForm } from './api-center'
+import { PROVIDER_PRESETS, getPreset } from './api-center'
+import type { ApiCenterService, ProviderForm, ProviderType } from './api-center'
 import type { NativeAppsService } from './native-apps'
+import { assertHttpUrl } from './net-guard'
 import type { DetachedWindowManager } from '../detached-window-manager'
 import {
   applyHideOnBlur,
@@ -30,6 +32,7 @@ import {
   parseBackup,
   restorePathTokens,
   serializeBackup,
+  stringifyBackupChunked,
   tokenizePathValues
 } from './backup'
 import { createUpdater } from './updater'
@@ -77,6 +80,9 @@ async function prunePreImportFiles(dir: string): Promise<void> {
 
 // warnings 只在非空时附带：旧消费方按字段存在性判断，空数组也会被误判为「有警告」
 type HostResult<T = unknown> = { ok: true; data: T; warnings?: string[] } | { ok: false; error: string }
+
+// 剪贴板单次读取上限：渲染层逐键全量正则扫描，极端大文本会卡 UI；64K 兼顾大 JSON 匹配
+const CLIPBOARD_PEEK_MAX_CHARS = 65_536
 
 function pluginsSnapshot(loader: PluginLoader): { manifest: PluginManifest; enabled: boolean }[] {
   return loader.registry.all().map((e) => ({ manifest: e.manifest, enabled: e.enabled }))
@@ -263,7 +269,8 @@ export function setupIpc(deps: {
         })
     if (r.canceled || !r.filePath) return { ok: true, data: { path: null } }
     await nodeFs.mkdir(dirname(r.filePath), { recursive: true })
-    await nodeFs.writeFile(r.filePath, JSON.stringify(tokenized, null, 2), { encoding: 'utf-8' })
+    // 分块序列化：大备份不再同步 stringify 独占主进程
+    await nodeFs.writeFile(r.filePath, await stringifyBackupChunked(tokenized), { encoding: 'utf-8' })
     return { ok: true, data: { path: r.filePath } }
   }
 
@@ -316,7 +323,7 @@ export function setupIpc(deps: {
       const safetyDir = join(app.getPath('userData'), SAFETY_DIR)
       await nodeFs.mkdir(safetyDir, { recursive: true })
       safetyBackupPath = join(safetyDir, preImportFileName(new Date()))
-      await nodeFs.writeFile(safetyBackupPath, JSON.stringify(tokenizePathValues(snapshot, backupRoots()), null, 2), {
+      await nodeFs.writeFile(safetyBackupPath, await stringifyBackupChunked(tokenizePathValues(snapshot, backupRoots())), {
         encoding: 'utf-8'
       })
       await prunePreImportFiles(safetyDir)
@@ -333,6 +340,11 @@ export function setupIpc(deps: {
     const nextSettings = await settings.update({
       theme: backup.settings.theme,
       transparency: backup.settings.transparency,
+      outlineEnabled: backup.settings.outlineEnabled,
+      outlineWidth: backup.settings.outlineWidth,
+      outlineColor: backup.settings.outlineColor,
+      outlineCustomColor: backup.settings.outlineCustomColor,
+      outlineFlowSpeed: backup.settings.outlineFlowSpeed,
       hotkey: backup.settings.hotkey,
       disabledPlugins: nextDisabled
     })
@@ -367,7 +379,13 @@ export function setupIpc(deps: {
     }
 
     applyThemeToWindow(nextSettings.theme, nextSettings.transparency)
-    deps.detached.applyThemeToAll(nextSettings.theme, nextSettings.transparency)
+    deps.detached.applyThemeToAll(nextSettings.theme, nextSettings.transparency, {
+      enabled: nextSettings.outlineEnabled,
+      width: nextSettings.outlineWidth,
+      color: nextSettings.outlineColor,
+      customColor: nextSettings.outlineCustomColor,
+      flowSpeed: nextSettings.outlineFlowSpeed
+    })
     broadcast('settings-changed', nextSettings)
     broadcast('plugin-state-changed', { plugins: pluginsSnapshot(loader) })
     // 常驻 backend 内存态（如剪贴板历史）不会自动重载导入的数据
@@ -399,6 +417,11 @@ export function setupIpc(deps: {
             theme?: ThemeName
             transparency?: Partial<AppSettings['transparency']>
             hotkey?: Partial<AppSettings['hotkey']>
+            outlineEnabled?: boolean
+            outlineWidth?: number
+            outlineColor?: OutlineColor
+            outlineCustomColor?: string
+            outlineFlowSpeed?: number
             launchAtLogin?: boolean
             clipboardSuggest?: boolean
             hideOnBlur?: boolean
@@ -436,9 +459,16 @@ export function setupIpc(deps: {
             }
           }
           const next = await settings.update(p)
-          if (p.theme || p.transparency) {
+          // outlineEnabled/outlineCustomColor 必须用 !== undefined：false 是合法 falsy 变化，真值判断会漏同步
+          if (p.theme || p.transparency || p.outlineEnabled !== undefined || p.outlineWidth !== undefined || p.outlineColor !== undefined || p.outlineCustomColor !== undefined || p.outlineFlowSpeed !== undefined) {
             applyThemeToWindow(next.theme, next.transparency)
-            deps.detached.applyThemeToAll(next.theme, next.transparency)
+            deps.detached.applyThemeToAll(next.theme, next.transparency, {
+              enabled: next.outlineEnabled,
+              width: next.outlineWidth,
+              color: next.outlineColor,
+              customColor: next.outlineCustomColor,
+              flowSpeed: next.outlineFlowSpeed
+            })
           }
           if (typeof p.hideOnBlur === 'boolean') {
             applyHideOnBlur(next.hideOnBlur)
@@ -556,7 +586,19 @@ export function setupIpc(deps: {
         case 'backup:import':
           return await suspendBlurHide(() => importBackup())
         case 'api-services:get':
-          return { ok: true, data: apiCenter.sanitized() }
+          // presets 供设置页表驱动下拉与凭证框渲染；广播 api-services-changed 仍是裸视图形状
+          return { ok: true, data: { services: apiCenter.sanitized(), presets: PROVIDER_PRESETS } }
+        case 'api-services:open-console': {
+          // 渲染层只传 type 意图，URL 由主进程 preset 表决定后交 openExternal（assertHttpUrl 双保险）
+          const type = (req.payload as { type?: unknown } | null)?.type
+          const preset = typeof type === 'string' ? getPreset(type as ProviderType) : undefined
+          if (!preset || preset.consoleUrl === null) {
+            return { ok: false, error: '该服务商类型没有控制台链接' }
+          }
+          assertHttpUrl(preset.consoleUrl)
+          await services.shell.openExternal(preset.consoleUrl)
+          return { ok: true, data: null }
+        }
         case 'api-services:upsert-provider': {
           const form = (req.payload ?? {}) as ProviderForm
           return { ok: true, data: await apiCenter.upsertProvider(form) }
@@ -610,7 +652,13 @@ export function setupIpc(deps: {
         // 剪贴板推荐（宿主 UI 单次读取）：读完即返回，不落盘不缓存；剪贴板敏感故只认主搜索窗口
         case 'clipboard:peek': {
           if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
-          return { ok: true, data: await services.clipboard.readText() }
+          const text = await services.clipboard.readText()
+          return { ok: true, data: text.length > CLIPBOARD_PEEK_MAX_CHARS ? text.slice(0, CLIPBOARD_PEEK_MAX_CHARS) : text }
+        }
+        // 粘贴图片芯片缩略图：主进程 nativeImage 降采样出 48px dataUrl（无图返回 null）
+        case 'clipboard:peek-image': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          return { ok: true, data: await services.clipboard.readImageThumb() }
         }
         // 手动检查更新：不自动外联，只在用户点击时请求 GitHub releases/latest
         case 'update:check':
@@ -630,6 +678,25 @@ export function setupIpc(deps: {
         case 'app:relaunch': {
           if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
           app.relaunch()
+          // app.exit 不触发 will-quit：退出前手动执行同款清理（浮窗/独立窗回收、backend 停止、
+          // 防抖中的 settings 与 apiCenter 落盘），3s 超时兜底防清理挂死卡退出
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 3000)
+            void (async () => {
+              try {
+                services.window.float.closeAll()
+                deps.detached.closeAll()
+                await loader.disposeAll()
+                await settings.flush()
+                await apiCenter.flush()
+              } catch (err) {
+                console.error('GTools 重启前清理失败：', err)
+              } finally {
+                clearTimeout(timer)
+                resolve()
+              }
+            })()
+          })
           app.exit(0)
           return { ok: true, data: null }
         }

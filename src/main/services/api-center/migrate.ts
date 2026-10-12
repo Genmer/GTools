@@ -18,17 +18,18 @@ export function legacyTranslateToProvider(raw: unknown, generateId: () => string
     typeof s.apiKeys === 'object' && s.apiKeys !== null && typeof (s.apiKeys as Record<string, unknown>).manual === 'string'
       ? ((s.apiKeys as Record<string, unknown>).manual as string)
       : ''
-  return {
+  const provider: ApiProviderConfig = {
     id: generateId(),
     type: 'http-template',
     name: '自定义 HTTP 接口（旧配置迁移）',
     enabled: true,
     endpoint: urlTemplate,
-    apiKey,
     method: manual.method === 'POST' ? 'POST' : 'GET',
     bodyTemplate: typeof manual.bodyTemplate === 'string' ? manual.bodyTemplate : '',
     resultPath: typeof manual.resultPath === 'string' ? manual.resultPath : ''
   }
+  if (apiKey !== '') provider.secrets = { apiKey }
+  return provider
 }
 
 export interface LegacyStorageLike {

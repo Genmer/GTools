@@ -12,18 +12,13 @@ function resolveIconPath(fileName: string): string {
 
 /** 无 Dock/任务栏常驻时，托盘是唯一显式退出入口 */
 export function createTray(onOpenSettings: () => void): Tray {
-  const isDarwin = process.platform === 'darwin'
-  const primaryName = isDarwin ? 'trayTemplate.png' : 'tray.png'
-  let image = nativeImage.createFromPath(resolveIconPath(primaryName))
-
-  // macOS 容错降级至彩色托盘，双重缺失回退空图保证不阻塞启动
-  if (image.isEmpty() && isDarwin) {
-    image = nativeImage.createFromPath(resolveIconPath('tray.png'))
+  // 彩色渐变 logo 不适合 Template 化（16px 剪影糊成团），全平台统一彩色托盘
+  let image = nativeImage.createFromPath(resolveIconPath('tray.png'))
+  if (image.isEmpty()) {
+    image = nativeImage.createFromPath(resolveIconPath('tray@2x.png'))
   }
   if (image.isEmpty()) {
     image = nativeImage.createEmpty()
-  } else if (isDarwin) {
-    image.setTemplateImage(true)
   }
 
   tray = new Tray(image)

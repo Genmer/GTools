@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { PluginManifest } from '@sdk/manifest'
+import { rimFlowPeriodSeconds, sanitizeOutlineCustomColor } from '@sdk/settings'
 import { router } from './router'
+import { RIM_SEGMENTS_GRADIENT, RIM_SEGMENTS_RAINBOW } from './rim-ring-segments'
 import PluginViewHost from './PluginViewHost.vue'
 
 const props = defineProps<{ manifests: PluginManifest[] }>()
@@ -31,9 +33,13 @@ function onKeydown(e: KeyboardEvent): void {
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
   // 主题/透明变化主进程只广播到本窗口（settings-changed 只发主窗），用专用事件同步；
-  // transparency 宽松读取保持两侧改动解耦（blur 字段旧载荷缺省视为开）
+  // transparency/outline 宽松读取保持两侧改动解耦（blur 字段旧载荷缺省视为开）
   window.gtools.on('detached:theme', (p) => {
-    const d = p as { theme?: string; transparency?: { enabled: boolean; opacity: number; blur?: boolean } }
+    const d = p as {
+      theme?: string
+      transparency?: { enabled: boolean; opacity: number; blur?: boolean }
+      outline?: { enabled: boolean; width: number; color: string; customColor?: string; flowSpeed?: number }
+    }
     if (typeof d?.theme === 'string') document.documentElement.dataset.theme = d.theme
     if (d?.transparency) {
       document.documentElement.dataset.transparency = d.transparency.enabled ? 'on' : 'off'
@@ -44,6 +50,25 @@ onMounted(() => {
       document.documentElement.style.setProperty('--txp', Math.pow(1 - t, 3).toFixed(4))
       document.documentElement.style.setProperty('--txf', Math.pow(1 - t, 0.9).toFixed(4))
     }
+    if (d?.outline) {
+      // 同主窗：off 注 0px 内联防回落 CSS 被透明组特异性压过；width 坏值回退 3
+      const w = typeof d.outline.width === 'number' && Number.isFinite(d.outline.width) ? d.outline.width : 3
+      document.documentElement.dataset.ring = d.outline.enabled ? 'on' : 'off'
+      document.documentElement.style.setProperty('--rim-width', d.outline.enabled ? `${w}px` : '0px')
+      if (d.outline.color === 'auto') delete document.documentElement.dataset.rimColor
+      else if (d.outline.color === 'white' || d.outline.color === 'black' || d.outline.color === 'rainbow' || d.outline.color === 'rainbow-gradient' || d.outline.color === 'custom') {
+        document.documentElement.dataset.rimColor = d.outline.color
+      }
+      if (d.outline.color === 'custom') {
+        const hex = sanitizeOutlineCustomColor(d.outline.customColor)
+        if (hex) document.documentElement.style.setProperty('--rim-custom', hex)
+      }
+      // 流动周期：载荷缺省/坏值时公式内回退 12s（同 App.vue 公式，两窗不漂移）
+      document.documentElement.style.setProperty('--rim-flow-period', `${rimFlowPeriodSeconds(d.outline.flowSpeed)}s`)
+      // 同 App.vue applyVisualSettings：流动与 rimColor 原子同步，关环置 off 消除空帧动画
+      const rimFlow = (d.outline.color === 'rainbow' || d.outline.color === 'rainbow-gradient') && d.outline.enabled
+      document.documentElement.dataset.rimFlow = rimFlow ? 'on' : 'off'
+    }
   })
 })
 onBeforeUnmount(() => {
@@ -53,6 +78,25 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="detached">
+    <!-- 同 App.vue 的七彩环承载层：常驻挂载，显隐/几何/动画全交 themes.css；段列共享 rim-ring-segments -->
+    <svg class="rim-ring" aria-hidden="true">
+      <g class="g-rainbow">
+        <rect
+          v-for="(s, i) in RIM_SEGMENTS_RAINBOW"
+          :key="`rb${i}`"
+          pathLength="100"
+          :style="{ stroke: s.color, strokeDashoffset: s.offset, animationDelay: s.delay }"
+        />
+      </g>
+      <g class="g-gradient">
+        <rect
+          v-for="(s, i) in RIM_SEGMENTS_GRADIENT"
+          :key="`gd${i}`"
+          pathLength="100"
+          :style="{ stroke: s.color, strokeDashoffset: s.offset, animationDelay: s.delay }"
+        />
+      </g>
+    </svg>
     <header class="topbar" :class="{ mac: isMac }">
       <span class="title">{{ name }}</span>
       <div class="actions">
@@ -85,10 +129,12 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid transparent;
+  /* 与 .app 同构：1px 边框 glass 下上色深勾边（--panel-edge） */
+  border: 1px solid var(--panel-edge, transparent);
   /* 全工程唯一投影只挂窗口根；与主窗 .app 同款 padding-box 背景（sheen 高光层 + tint 层）：
-     受光边走 --window-ring inset shadow，border-box 渐变会透过半透明 tint 漏满整窗（白纱根因） */
-  box-shadow: var(--window-ring, none), var(--shadow-window);
+     受光边走 --window-ring inset shadow，border-box 渐变会透过半透明 tint 漏满整窗（白纱根因）；
+     --panel-halo 同 .app：glass 深勾边挂面板自身防 overflow 裁剪 */
+  box-shadow: var(--panel-halo, none), var(--window-ring, none), var(--shadow-window);
   background:
     linear-gradient(115deg, rgba(255, 255, 255, var(--glass-sheen)), rgba(255, 255, 255, 0) 46%) padding-box,
     linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;

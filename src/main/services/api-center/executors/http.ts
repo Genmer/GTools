@@ -1,14 +1,24 @@
 import type { HostFetchInit, HostFetchResult } from '@sdk/api'
+import type { ApiErrorKind } from '../types'
+import { httpStatusToKind } from './error-rules'
 import { TranslateExecutorError, type ExecutorRuntime } from './types'
 
-/** fetchViaNet 不会对 HTTP 非 2xx 抛错（返回 ok:false），服务层异常（如超时）是普通 Error */
-const QUOTA_STATUSES = new Set([403, 429, 482])
+/** 与宿主 net.fetch 同构的注入面：装配时传 fetchViaNet，测试传 fake */
+export type FetchFn = (url: string, init?: HostFetchInit) => Promise<HostFetchResult>
 
-/** 所有 executor 共用的请求出口：异常按超时/断网分类，HTTP 非 2xx 按 403/429/482 归配额 */
+export interface FetchCheckedOpts {
+  /** 该引擎的 HTTP 状态特判表（如 mymemory 403→quota），其余状态走 httpStatusToKind 默认规则 */
+  statusKinds?: Record<number, ApiErrorKind>
+  /** true 时非 2xx 不抛，返回响应由调用方读 body 错误文案后自行分类（DeepL/混元等需要 body message 的引擎用） */
+  passHttpError?: boolean
+}
+
+/** 所有 executor 共用的请求出口：异常按超时/断网分类，HTTP 非 2xx 按 httpStatusToKind 归类 */
 export async function fetchChecked(
   url: string,
   rt: ExecutorRuntime,
-  init?: HostFetchInit
+  init?: HostFetchInit,
+  opts?: FetchCheckedOpts
 ): Promise<HostFetchResult> {
   let res: HostFetchResult
   try {
@@ -20,13 +30,18 @@ export async function fetchChecked(
     }
     throw new TranslateExecutorError('network', `网络请求失败：${msg}`)
   }
-  if (!res.ok) {
-    if (QUOTA_STATUSES.has(res.status)) {
-      throw new TranslateExecutorError('quota', `翻译服务返回 ${res.status}：免费额度受限或请求过于频繁`)
-    }
-    throw new TranslateExecutorError('http', `翻译服务返回 HTTP ${res.status}`)
+  if (!res.ok && !opts?.passHttpError) {
+    const kind = httpStatusToKind(res.status, opts?.statusKinds)
+    throw new TranslateExecutorError(kind, httpStatusMessage(res.status, kind))
   }
   return res
+}
+
+function httpStatusMessage(status: number, kind: ApiErrorKind): string {
+  if (kind === 'quota') return `翻译服务返回 ${status}：免费额度受限或请求过于频繁`
+  if (kind === 'auth') return `翻译服务返回 HTTP ${status}：凭证无效或未授权`
+  if (kind === 'config') return `翻译服务返回 HTTP ${status}：请求被服务方拒绝`
+  return `翻译服务返回 HTTP ${status}`
 }
 
 const NAMED_ENTITIES: Record<string, string> = {

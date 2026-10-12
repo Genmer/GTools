@@ -39,8 +39,29 @@ const JSON_PARSE_MAX_LENGTH = 100_000
 const PAYLOAD_MAX_LENGTH = 2000
 const REC_CAP = 4
 
+// 单字符串入参的布尔函数按输入 memo（LRU：命中重插保温）：剪贴板文本每次唤起只变一次，
+// 每键重跑的大 JSON.parse 与敏感正则 ×5 借此归零；query 侧短文本照常现算
+function memoizeByInput(fn: (s: string) => boolean, cap: number): (s: string) => boolean {
+  const m = new Map<string, boolean>()
+  return (s: string): boolean => {
+    const hit = m.get(s)
+    if (hit !== undefined) {
+      m.delete(s)
+      m.set(s, hit)
+      return hit
+    }
+    const r = fn(s)
+    if (m.size >= cap) {
+      const oldest = m.keys().next().value
+      if (oldest !== undefined) m.delete(oldest)
+    }
+    m.set(s, r)
+    return r
+  }
+}
+
 /** trim 后以 {/[ 开头且可解析且顶层为 object/array 才算 JSON */
-export function looksLikeJson(text: string): boolean {
+export const looksLikeJson = memoizeByInput((text: string): boolean => {
   const t = text.trim()
   if (t === '' || t.length > JSON_PARSE_MAX_LENGTH) return false
   if (!t.startsWith('{') && !t.startsWith('[')) return false
@@ -50,7 +71,10 @@ export function looksLikeJson(text: string): boolean {
   } catch {
     return false
   }
-}
+}, 8)
+
+// 剪贴板敏感检测 memo（容量 4：当前剪贴板 + 近几次唤起的旧文本）
+const clipSensitive = memoizeByInput(isSensitiveText, 4)
 
 /** 沾边关键词长度门槛：ASCII ≥3（wx/fy 等短缩写噪声大），CJK ≥2 */
 function keywordLongEnough(kw: string): boolean {
@@ -255,7 +279,7 @@ export function buildRecommendations(input: BuildRecommendationsInput): RecItem[
   const q = input.query.trim()
   const qSensitive = isSensitiveText(input.query)
   const safeClip =
-    input.clipboardText !== undefined && isSensitiveText(input.clipboardText) ? '' : input.clipboardText
+    input.clipboardText !== undefined && clipSensitive(input.clipboardText) ? '' : input.clipboardText
   const json: RecItem[] = []
   const files: RecItem[] = []
   const img: RecItem[] = []

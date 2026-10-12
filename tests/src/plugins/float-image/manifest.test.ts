@@ -38,9 +38,12 @@ describe('float-image manifest', () => {
     expect(ids).toEqual(['pin-clipboard', 'pin-file'])
   })
 
-  it('matchers 包含 files 图片类型匹配', () => {
+  it('matchers 包含 files 图片匹配与 img 剪贴板粘贴匹配（commandId 均指向已存在命令）', () => {
     expect(manifest.matchers).toEqual([
-      { type: 'files', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'], label: '贴图：悬浮图片文件', commandId: 'pin-file' }
+      { type: 'files', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'], label: '贴图：悬浮图片文件', commandId: 'pin-file' },
+      { type: 'img', label: '贴图：贴出剪贴板图片', commandId: 'pin-clipboard' }
     ])
+    const imgMatcher = manifest.matchers?.find((m) => m.type === 'img')
+    expect(manifest.commands?.some((c) => c.id === imgMatcher?.commandId)).toBe(true)
   })
 })

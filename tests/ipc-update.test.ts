@@ -63,38 +63,67 @@ const releaseBody = (): string =>
     ]
   })
 
-/** boot 时注入 fake net.fetch / shell.openExternal / app 三元组，返回其引用供断言 */
-async function boot(): Promise<{ host: Host; fetch: Mock; openExternal: Mock }> {
+/** boot 时注入 fake net.fetch / shell.openExternal / app 三元组，返回其引用供断言；readText 可覆写（clipboard:peek 用例） */
+async function boot(readText: () => Promise<string> = async () => ''): Promise<{
+  host: Host
+  fetch: Mock
+  openExternal: Mock
+  cleanupOrder: string[]
+}> {
   const store = new SettingsStore('C:\\tmp\\gtools-test', noopFs, 1)
+  const cleanupOrder: string[] = []
   const loader = {
     registry: { all: () => [], get: vi.fn() },
     issues: [],
     externalDetected: [],
     ensureBackendStarted: vi.fn(async () => undefined),
-    setEnabled: vi.fn(async () => ({ ok: true }))
+    setEnabled: vi.fn(async () => ({ ok: true })),
+    disposeAll: vi.fn(async () => {
+      cleanupOrder.push('disposeAll')
+    })
   }
   const fetch = vi.fn(async () => ({ ok: true, status: 200, body: releaseBody() }))
   const openExternal = vi.fn(async () => {})
+  // settings.flush 走实例 spy 记序（真实实现本就用 noopFs，替换无副作用）
+  vi.spyOn(store, 'flush').mockImplementation(async () => {
+    cleanupOrder.push('settings.flush')
+  })
+  const apiFlush = vi.fn(async () => {
+    cleanupOrder.push('apiCenter.flush')
+  })
+  const floatCloseAll = vi.fn(() => {
+    cleanupOrder.push('float.closeAll')
+  })
+  const detachedCloseAll = vi.fn(() => {
+    cleanupOrder.push('detached.closeAll')
+  })
   unregisterAllHotkeys()
   setupIpc({
     loader,
     settings: store,
     services: {
-      window: { float: { closeAllForPlugin: vi.fn() } },
+      window: { float: { closeAllForPlugin: vi.fn(), closeAll: floatCloseAll } },
       storage: { dumpAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) },
       app: { version: '0.0.1', platform: 'darwin', arch: 'arm64' },
-      clipboard: { readText: vi.fn(async () => '') },
+      clipboard: { readText: vi.fn(readText) },
       net: { fetch },
       shell: { openExternal }
     },
-    apiCenter: { config: {}, sanitized: () => ({}), replaceAll: vi.fn(async () => {}) },
+    apiCenter: { config: {}, sanitized: () => ({}), replaceAll: vi.fn(async () => {}), flush: apiFlush },
     nativeApps: {},
-    detached: { applyThemeToAll: vi.fn(), closeForPlugin: vi.fn(), open: vi.fn(), closeByWebContents: vi.fn(), setAlwaysOnTopFor: vi.fn() },
+    detached: {
+      applyThemeToAll: vi.fn(),
+      closeForPlugin: vi.fn(),
+      closeAll: detachedCloseAll,
+      open: vi.fn(),
+      closeByWebContents: vi.fn(),
+      setAlwaysOnTopFor: vi.fn()
+    },
     onHotkeyToggle: vi.fn()
   } as unknown as Parameters<typeof setupIpc>[0])
   const call = (ipcMain.handle as unknown as Mock).mock.calls.find(([ch]) => ch === 'gtools:host')
   if (!call) throw new Error('gtools:host 未注册')
-  return { host: call[1] as Host, fetch, openExternal }
+  return { host: call[1] as Host, fetch, openExternal, cleanupOrder }
 }
 
 beforeEach(() => {
@@ -193,13 +222,39 @@ describe('gtools:host app:relaunch', () => {
     expect(app.exit).not.toHaveBeenCalled()
   })
 
-  it('主搜索窗口 sender：app.relaunch + app.exit(0) 拉起新进程', async () => {
-    const { host } = await boot()
+  it('主搜索窗口 sender：relaunch 后先执行与 will-quit 相同的清理链再 exit(0)', async () => {
+    const { host, cleanupOrder } = await boot()
     withFakeWindow()
     const r = await host(sender(), { api: 'app:relaunch' })
     expect(r).toEqual({ ok: true, data: null })
     expect(app.relaunch).toHaveBeenCalledTimes(1)
+    // app.exit 不触发 will-quit：清序 = 浮窗/独立窗回收 → backend disposeAll → settings/apiCenter flush → exit
+    expect(cleanupOrder).toEqual(['float.closeAll', 'detached.closeAll', 'disposeAll', 'settings.flush', 'apiCenter.flush'])
     expect(app.exit).toHaveBeenCalledWith(0)
+    expect(app.exit).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('gtools:host clipboard:peek', () => {
+  it('超出 64K 的剪贴板文本被截断到 64K', async () => {
+    const { host } = await boot(async () => 'x'.repeat(70_000))
+    withFakeWindow()
+    const r = await host(sender(), { api: 'clipboard:peek' })
+    expect(r.ok).toBe(true)
+    expect(r.data).toBe('x'.repeat(65_536))
+  })
+
+  it('短文本原样返回（不截断）', async () => {
+    const { host } = await boot(async () => 'short')
+    withFakeWindow()
+    const r = await host(sender(), { api: 'clipboard:peek' })
+    expect(r).toEqual({ ok: true, data: 'short' })
+  })
+
+  it('非主搜索窗口 sender 拒绝读取', async () => {
+    const { host } = await boot(async () => 'x')
+    const r = await host(sender(), { api: 'clipboard:peek' })
+    expect(r).toEqual({ ok: false, error: '仅主搜索窗口可调用' })
   })
 })
 

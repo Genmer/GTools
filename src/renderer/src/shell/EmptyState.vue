@@ -380,6 +380,7 @@ function letterOf(name: string): string {
 .empty-state {
   height: 100%;
   overflow-y: auto;
+  overflow-x: hidden; /* overflow-y 非 visible 会把 x 隐式算成 auto，显式禁掉横向滚动 */
   /* 内容层实色面板（与导航玻璃分层）；顶部 68px 让位悬浮玻璃胶囊（64px 栏 + 4px 呼吸） */
   padding: 68px 16px 14px;
   scroll-padding-top: 68px; /* 键盘导航 scrollIntoView 不把项送进胶囊底下 */
@@ -483,10 +484,10 @@ function letterOf(name: string): string {
   color: var(--tile-teal-fg);
 }
 
-/* 统一 9 列图标网格（最近打开、应用栏与搜索结果共享） */
+/* 统一 9 列图标网格（最近打开、应用栏与搜索结果共享）；minmax(0,…) 必需：1fr 隐含 auto 下限，nowrap 长名会把轨道撑破容器宽 */
 .app-grid {
   display: grid;
-  grid-template-columns: repeat(9, 1fr);
+  grid-template-columns: repeat(9, minmax(0, 1fr));
   gap: var(--sp-2) var(--sp-1);
 }
 .app-cell {

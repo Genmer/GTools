@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { ApiServiceStatus, PluginContext } from '@sdk/api'
+import type { ApiServiceStatus, PluginContext, TranslateFallbackInfo } from '@sdk/api'
 import {
   DEFAULT_PREFS,
   DEMO_INPUT,
@@ -31,6 +31,8 @@ const copied = ref(false)
 const tip = ref('')
 // 实际产出当前译文的 provider（页脚署名用；engineId 只是用户选择，回退时两者不同）
 const servedBy = ref('')
+// 容灾切换信息：非首选引擎产出时页脚提示「首选 X 失败已自动切换」
+const fallbackInfo = ref<TranslateFallbackInfo | null>(null)
 
 const statusData = ref<ApiServiceStatus | null>(null)
 // '' = 默认引擎（不指定 providerId，主进程按全局 active 回退）
@@ -104,6 +106,16 @@ const resultMeta = computed(() => {
   if (result.value === '') return ''
   const engine = providerName(servedBy.value)
   return lastPair.value !== null ? `${engine} · ${langLabel(lastPair.value.from)} → ${langLabel(lastPair.value.to)}` : engine
+})
+
+// 容灾页脚小字：reason 去掉 kind 前缀后截断，完整 reason 放 title
+const fallbackHint = computed(() => {
+  const f = fallbackInfo.value
+  if (f === null || result.value === '') return ''
+  const name = f.requestedProviderId === '' ? '内置引擎' : providerName(f.requestedProviderId)
+  const bare = f.reason.replace(/^[a-z]+: /, '')
+  const brief = bare.length > 30 ? `${bare.slice(0, 30)}…` : bare
+  return `首选 ${name} 因 ${brief} 失败，已自动切换`
 })
 
 const statusLine = computed(() => {
@@ -180,6 +192,7 @@ watch(input, (v) => {
     result.value = ''
     error.value = ''
     loading.value = false
+    fallbackInfo.value = null
     requestSeq++
     return
   }
@@ -212,10 +225,12 @@ async function doTranslate(): Promise<void> {
     result.value = out.resultText
     lastPair.value = { from: out.detectedFrom ?? from, to }
     servedBy.value = out.providerId
+    fallbackInfo.value = out.fallback ?? null
   } catch (err) {
     if (seq !== requestSeq) return
     result.value = ''
     servedBy.value = ''
+    fallbackInfo.value = null
     error.value = err instanceof Error && err.message !== '' ? err.message : '翻译失败，请稍后重试'
   } finally {
     if (seq === requestSeq) loading.value = false
@@ -255,6 +270,7 @@ function onSwap(): void {
     result.value = ''
     lastPair.value = null
     servedBy.value = ''
+    fallbackInfo.value = null
   } else if (input.value.trim() !== '') {
     void doTranslate()
   }
@@ -410,6 +426,7 @@ function speak(): void {
         </div>
         <footer class="pane-foot">
           <span class="foot-hint" :title="resultMeta">{{ resultMeta }}</span>
+          <span v-if="fallbackHint !== ''" class="foot-hint fallback" :title="fallbackInfo?.reason ?? ''">{{ fallbackHint }}</span>
           <span class="spacer"></span>
           <button class="ghost" :disabled="result === ''" @click="copyResult">
             <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
@@ -566,6 +583,11 @@ function speak(): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 容灾提示行：可收缩，完整 reason 由 title 承载 */
+.foot-hint.fallback {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .ghost {

@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PluginManifest } from '@sdk/manifest'
-import type { AppSettings } from '@sdk/settings'
+import { rimFlowPeriodSeconds, type AppSettings } from '@sdk/settings'
 import type { HostInitResult } from '../env'
 import { buildAppEntries, buildEntries } from '../core/entries'
 import { calc } from '../core/calc'
-import { matchEntryBest } from '../core/pinyin-index'
+import { matchEntryBest, warmupPinyinIndex } from '../core/pinyin-index'
 import type { SearchEntry } from '../core/matcher'
 import { buildUtoolsEntries, UTOOLS_PLUGIN_ID, type UtoolsEntryScan } from '../core/utools-entries'
 import { buildRecommendations, fileMatcherHits, type MatchFile, type RecItem } from '../core/recommend'
@@ -26,6 +26,7 @@ import {
   type EmptyTargetsInput
 } from '../core/empty-targets'
 import { applyDeepLink, parseDeepLink } from './deep-link'
+import { RIM_SEGMENTS_GRADIENT, RIM_SEGMENTS_RAINBOW } from './rim-ring-segments'
 import { enterPlugin, enterSettings, exitLevel, isSettingsEntry, resetForShow, restOf, router, syncMode } from './router'
 import {
   APPS_FOLD_COUNT,
@@ -178,11 +179,37 @@ const clipboardSuggestOn = computed(
 // 拖入集（文件/图片推荐源）与常驻插件推送行；两者都只存内存，激活/清空输入/窗口隐藏时释放
 const dropFiles = ref<MatchFile[]>([])
 const hasDropImage = ref(false)
+// 主面板粘贴图片（uTools 式：粘贴→空态出「贴图」推荐→回车直贴）；贴图无文件路径，
+// 激活走 float-image 的 pin-clipboard 命令由插件自读剪贴板；缩略图只做输入框芯片展示
+const pasteImage = ref(false)
+const pasteThumb = ref<string | null>(null)
 const pushedItems = ref<PushedItem[]>([])
 
 function releaseDrop(): void {
   dropFiles.value = []
   hasDropImage.value = false
+  pasteImage.value = false
+  pasteThumb.value = null
+}
+
+function onDocPaste(e: ClipboardEvent): void {
+  const items = e.clipboardData?.items
+  if (!items) return
+  // 判定不依赖 DOM flavor 转换（mac 各 App 形状差异大：QQ 动图只有 uri 引用无 image 项），
+  // 一律主进程读板定夺；纯文本粘贴时 peek 返 null 自动无芯片
+  void refreshPasteThumb()
+}
+
+async function refreshPasteThumb(): Promise<void> {
+  const r = await window.gtools.host('clipboard:peek-image')
+  const data = r.ok ? ((r.data as { thumb: string } | null) ?? null) : null
+  pasteImage.value = data !== null
+  pasteThumb.value = data?.thumb ?? null
+}
+
+function clearPaste(): void {
+  pasteImage.value = false
+  pasteThumb.value = null
 }
 
 // 常驻插件推送订阅（main-push）：plugin-event: 前缀已在 preload 白名单，on 返回退订函数。
@@ -259,8 +286,8 @@ const clipboardRecs = computed(() =>
   dedupeRecs([
     ...pushedRecs.value,
     ...buildRecommendations({ query: '', clipboardText: clipboardText.value, manifests: enabledManifests.value, enabled: clipboardSuggestOn.value }),
-    // 空 query 下 buildRecommendations 不产出 files/img（只认剪贴板 json），空态拖入行直调 fileMatcherHits 补上
-    ...fileMatcherHits(dropFiles.value, enabledManifests.value, hasDropImage.value)
+    // 空 query 下 buildRecommendations 不产出 files/img（只认剪贴板 json），空态拖入/粘贴行直调 fileMatcherHits 补上
+    ...fileMatcherHits(dropFiles.value, enabledManifests.value, hasDropImage.value || pasteImage.value)
   ])
 )
 const resultKeys = computed(() => new Set(visibleResults.value.map((i) => i.entry.key)))
@@ -277,7 +304,7 @@ const recommendations = computed(() =>
           manifests: enabledManifests.value,
           clipboardText: clipboardText.value,
           files: dropFiles.value,
-          hasImage: hasDropImage.value
+          hasImage: hasDropImage.value || pasteImage.value
         })
       ])
 )
@@ -321,6 +348,19 @@ watch(
 watch(enabledManifests, () => {
   syncMode(enabledManifests.value)
 })
+// 拼音索引空闲预建：首键不再停顿；词条池随插件/应用/utools 词条异步就绪逐步补齐（已建自动跳过）
+watch(
+  entries,
+  (list) => {
+    const titles: string[] = []
+    for (const e of list) {
+      titles.push(e.title)
+      for (const k of e.keywords ?? []) titles.push(k)
+    }
+    warmupPinyinIndex(titles)
+  },
+  { immediate: true }
+)
 watch(
   () => emptyTargets.value.length,
   (n) => {
@@ -328,30 +368,44 @@ watch(
   }
 )
 
-// 窗口高度自适应（§1.5）：空态与搜索结果均由内容实测自然高度决定，超限由主进程夹紧
+// 窗口高度自适应（§1.5）：空态与搜索结果均由内容实测自然高度决定，超限由主进程夹紧。
+// 上报节流：rAF 合帧 + 最小变化阈值（ResultList 已按行数分档，同档不重复报高，输入不逐键 resize）
 let lastSentHeight = WINDOW_NORMAL_H
 const measuredH = ref(0)
 function onContentResize(height: number): void {
   measuredH.value = height
 }
+const MIN_HEIGHT_DELTA = 8
+let pendingHeight: number | null = null
+let heightRaf = 0
+function flushHeight(): void {
+  heightRaf = 0
+  const h = pendingHeight
+  pendingHeight = null
+  if (h === null || Math.abs(h - lastSentHeight) < MIN_HEIGHT_DELTA) return
+  lastSentHeight = h
+  void window.gtools.host('window:set-height', { height: h })
+}
+function sendHeight(h: number): void {
+  pendingHeight = h
+  // 隐藏文档的 rAF 被暂停：隐藏期改走同步直发，保证再唤起首帧高度就位（配合隐藏清场）
+  if (document.hidden) {
+    flushHeight()
+    return
+  }
+  if (heightRaf === 0) heightRaf = requestAnimationFrame(flushHeight)
+}
+function contentHeight(): number {
+  if (router.mode !== 'global') return WINDOW_NORMAL_H // 已是内容口径，主进程负责加边距
+  if (measuredH.value <= 0) return WINDOW_NORMAL_H
+  // 实测值含透明窗边距（视口坐标），按内容口径扣掉
+  return document.documentElement.dataset.wintx === '1' ? measuredH.value - WIN_TX_MARGIN : measuredH.value
+}
 watch(emptyVisible, (visible) => {
   if (!visible && appsExpanded.value) appsExpanded.value = false
 })
-watch(
-  () => {
-    if (router.mode !== 'global') return WINDOW_NORMAL_H // 已是内容口径，主进程负责加边距
-    if (measuredH.value <= 0) return WINDOW_NORMAL_H
-    // 实测值含透明窗边距（视口坐标），按内容口径扣掉
-    return document.documentElement.dataset.wintx === '1' ? measuredH.value - WIN_TX_MARGIN : measuredH.value
-  },
-  (h) => {
-    if (h === lastSentHeight) return
-    lastSentHeight = h
-    void window.gtools.host('window:set-height', { height: h })
-  },
-  // immediate：热重载/挂载即对齐一次窗口高度，否则停留在旧高度（如 560）显得下方留白过大
-  { immediate: true }
-)
+// immediate：热重载/挂载即对齐一次窗口高度，否则停留在旧高度（如 560）显得下方留白过大
+watch(contentHeight, sendHeight, { immediate: true })
 
 async function loadApps(force = false): Promise<void> {
   if (isDemo.value) return
@@ -704,6 +758,12 @@ function toggleSettings(): void {
 // 插件态窗口级按键：Cmd/Ctrl+D 独立窗口打开；Esc 逐级退出兜底（插件已消费的 Esc 不劫持）；独立窗口不归主窗外壳管
 function onWindowKeydown(e: KeyboardEvent): void {
   if (isDetachedWindow.value) return
+  // 设置页 Esc：焦点常落在页面控件上（搜索框之外），SearchBox 收不到，须窗口级兜底（已消费的 Esc 不劫持）
+  if (e.key === 'Escape' && router.mode === 'settings' && !e.isComposing && !e.defaultPrevented) {
+    e.preventDefault()
+    exitToGlobal()
+    return
+  }
   if (router.mode === 'plugin' && !e.isComposing && (e.key === 'd' || e.key === 'D') && (e.metaKey || e.ctrlKey)) {
     e.preventDefault()
     detachActivePlugin()
@@ -732,11 +792,24 @@ function applyVisualSettings(s: AppSettings): void {
   // 玻璃主题自身即玻璃面板，透明属性强制开启（透明度滑杆仍调节玻璃密度）
   document.documentElement.dataset.transparency = s.transparency.enabled || s.theme === 'glass' ? 'on' : 'off'
   document.documentElement.dataset.blur = s.transparency.blur ? 'on' : 'off'
+  // 轮廓环总开关：关=伪元素环宽归零（黑/白线与七彩环共用 --rim-width）
+  document.documentElement.dataset.ring = s.outlineEnabled ? 'on' : 'off'
   document.documentElement.style.setProperty('--tx', (s.transparency.opacity / 100).toFixed(2))
   // (1-tx)³ 感知曲线：玻璃主题专用——滑杆低段陡增保证 0 档够白可读，高段维持清玻璃
   document.documentElement.style.setProperty('--txp', Math.pow(1 - s.transparency.opacity / 100, 3).toFixed(4))
   // 霜曲线：(1-t)^0.9 幂次 CSS calc 表达不了，JS 算好注入（themes.css 玻璃块 blur 消费）
   document.documentElement.style.setProperty('--txf', Math.pow(1 - s.transparency.opacity / 100, 0.9).toFixed(4))
+  // off 注入 0px 而非清内联——清后回落 CSS 竞争会被透明组特异性压过致环复活
+  document.documentElement.style.setProperty('--rim-width', s.outlineEnabled ? `${s.outlineWidth}px` : '0px')
+  if (s.outlineColor === 'auto') delete document.documentElement.dataset.rimColor
+  else document.documentElement.dataset.rimColor = s.outlineColor
+  // 自定义环色无条件注入（store sanitize 已保证合法 hex，未选中时仅闲置）
+  document.documentElement.style.setProperty('--rim-custom', s.outlineCustomColor)
+  // 流动周期由速度档位算出（36/s 秒）；settings-store 已夹 1..10，坏值公式内回退 12s
+  document.documentElement.style.setProperty('--rim-flow-period', `${rimFlowPeriodSeconds(s.outlineFlowSpeed)}s`)
+  // 流动开关与 rimColor 同步原子写入；关环置 off 消除 0 宽 border 的空帧动画开销
+  const rimFlow = (s.outlineColor === 'rainbow' || s.outlineColor === 'rainbow-gradient') && s.outlineEnabled
+  document.documentElement.dataset.rimFlow = rimFlow ? 'on' : 'off'
 }
 
 
@@ -744,6 +817,7 @@ function applyVisualSettings(s: AppSettings): void {
 onMounted(async () => {
   loadRecent()
   loadHistory()
+  document.addEventListener('paste', onDocPaste)
   const r = await window.gtools.host('app:init')
   if (r.ok) {
     const init = r.data as HostInitResult
@@ -795,6 +869,9 @@ onMounted(async () => {
       pushedItems.value = []
       clipboardText.value = ''
       releaseDrop()
+      // 主搜索态隐藏即清场：再唤起首帧即空态、高度同步就位，不再「旧内容闪换+二次 resize」；
+      // 插件/设置态不清（resetForShow 无 force 分支原样保留现场）
+      resetForShow()
       return
     }
     if (router.mode === 'global') {
@@ -822,6 +899,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onWindowKeydown)
+  document.removeEventListener('paste', onDocPaste)
+  if (heightRaf !== 0) cancelAnimationFrame(heightRaf)
   for (const off of pushOffs.values()) off()
   for (const off of offFns) off()
 })
@@ -831,15 +910,37 @@ onBeforeUnmount(() => {
   <!-- 独立窗口：轻量宿主全屏承接插件视图，主窗外壳（空态/结果/设置）不渲染 -->
   <DetachedHost v-if="isDetachedWindow" :manifests="enabledManifests" />
   <div v-else class="app" @dragover.prevent @drop.prevent="onDrop">
+    <!-- 七彩环承载层：常驻挂载不加 v-if，显隐/几何/动画全交 themes.css 门控（防多模式双环）；
+         段列与浮窗共享 rim-ring-segments，流动=段列沿环带路径空间位移（dashoffset 推进） -->
+    <svg class="rim-ring" aria-hidden="true">
+      <g class="g-rainbow">
+        <rect
+          v-for="(s, i) in RIM_SEGMENTS_RAINBOW"
+          :key="`rb${i}`"
+          pathLength="100"
+          :style="{ stroke: s.color, strokeDashoffset: s.offset, animationDelay: s.delay }"
+        />
+      </g>
+      <g class="g-gradient">
+        <rect
+          v-for="(s, i) in RIM_SEGMENTS_GRADIENT"
+          :key="`gd${i}`"
+          pathLength="100"
+          :style="{ stroke: s.color, strokeDashoffset: s.offset, animationDelay: s.delay }"
+        />
+      </g>
+    </svg>
     <header class="topbar">
       <SearchBox
         ref="searchBox"
         :manifests="enabledManifests"
+        :paste-thumb="pasteThumb"
         @nav="onNav"
         @select="onEnter"
         @exit="onExitFromSearchBox"
         @settings="toggleSettings"
         @detach="detachActivePlugin"
+        @clear-paste="clearPaste"
       />
     </header>
     <main class="content">
@@ -911,10 +1012,13 @@ onBeforeUnmount(() => {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  border: 1px solid transparent;
+  /* 1px 边框本就存在（原 transparent）：glass 下上色成深勾边（--panel-edge），其余主题不变 */
+  border: 1px solid var(--panel-edge, transparent);
   overflow: hidden;
-  /* 全工程唯一投影，只挂窗口根（系统 DWM 影为主，此值为兜底轮廓） */
-  box-shadow: var(--window-ring, none), var(--shadow-window);
+  /* 全工程唯一投影，只挂窗口根（系统 DWM 影为主，此值为兜底轮廓）；
+     --panel-halo = glass 白环外侧深勾边（其余主题 none），须挂面板自身——环伪元素的
+     spread 影会被 overflow:hidden 裁剪 */
+  box-shadow: var(--panel-halo, none), var(--window-ring, none), var(--shadow-window);
   /* 只铺 padding-box：受光边绝不能走 border-box 层——透明窗 shell 是半透明白，
      border-box 渐变会透过它漏满整窗，即终审实测的 75-80% 白纱；窗缘受光全部由
      --window-ring 的 inset shadow 承担（分主题定义）。上层 115deg sheen 高光随磨砂度渐显 */
@@ -990,7 +1094,6 @@ html[data-wintx='0'][data-theme='glass'] .app {
   height: 26px;
   border-radius: 0 0 var(--r-pill) var(--r-pill);
   background: var(--strip-tint);
-  backdrop-filter: var(--strip-filter);
   /* mask 里 #000 只是 alpha 蒙版形状色，非 UI 颜色 */
   -webkit-mask-image: linear-gradient(to bottom, #000 30%, transparent);
   mask-image: linear-gradient(to bottom, #000 30%, transparent);
@@ -1039,7 +1142,6 @@ html[data-wintx='0'][data-theme='glass'] .app {
   height: 26px;
   border-radius: var(--r-xl) var(--r-xl) 0 0;
   background: var(--strip-tint);
-  backdrop-filter: var(--strip-filter);
   /* mask 里 #000 只是 alpha 蒙版形状色，非 UI 颜色 */
   -webkit-mask-image: linear-gradient(to top, #000 30%, transparent);
   mask-image: linear-gradient(to top, #000 30%, transparent);

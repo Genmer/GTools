@@ -6,8 +6,9 @@ export const FLOAT_THEME_VARS = ['--bg-raised', '--fg', '--fg-dim', '--border', 
 export type ThemeVarName = (typeof FLOAT_THEME_VARS)[number]
 
 const DATA_URL_RE = /^data:image\/(png|jpeg|gif|webp|bmp|svg\+xml);base64,[A-Za-z0-9+/]+={0,2}$/
-/** 主题变量值只许颜色记法字符，杜绝经变量注入 CSS */
-const COLOR_VALUE_RE = /^[-#a-zA-Z0-9 ,.%()/]{1,80}$/
+/** 主题变量值只许颜色记法字符（+* 为 calc 运算符：透明/玻璃主题下 Chromium 对未注册自定义属性
+ *  返回未化简 calc 原串如 rgba(255,255,255,calc(0.02 + 0.6 * 0.0911 …))，浮窗文档会自行求值），杜绝经变量注入 CSS */
+const COLOR_VALUE_RE = /^[-#a-zA-Z0-9 ,.%()+*/]{1,120}$/
 const DEFAULT_MAX_DATA_URL = 1_900_000
 
 export function sanitizeDataUrl(u: unknown, maxLen = DEFAULT_MAX_DATA_URL): string | null {
@@ -49,7 +50,7 @@ export function buildFloatHtml(dataUrl: string, opts: FloatHtmlOptions): string 
     ':root{' + varLines.join(';') + '}',
     '.pin{position:fixed;inset:0;border-radius:10px;overflow:hidden}',
     '.stage{position:absolute;inset:0}',
-    '.stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}',
+    '.stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;-webkit-user-drag:none;user-select:none;cursor:move}',
     // 控制条平时完全隐形（pointer-events:none 才不挡图片双击），hover 窗口任意处从底部浮出
     '.bar{position:absolute;left:50%;bottom:8px;transform:translate(-50%,10px);display:flex;align-items:center;',
     'gap:2px;height:34px;padding:0 6px;border-radius:10px;',
@@ -68,20 +69,29 @@ export function buildFloatHtml(dataUrl: string, opts: FloatHtmlOptions): string 
     '.b.close:hover{color:var(--danger);background:color-mix(in srgb,var(--danger) 14%,transparent)}'
   ].join('')
 
-  // 页面 JS 只用单引号字符串，避免与外层模板串冲突；尺寸/位置类交互全部经 gtoolsFloat.emit 回创建方处理
-  const script = [
-    "(function(){'use strict';",
-    "var img=document.getElementById('img'),op=document.getElementById('opacity'),opv=document.getElementById('opv');",
-    'function emit(n,p){try{window.gtoolsFloat.emit(n,p)}catch(e){}}',
-    "function setImgOpacity(){img.style.opacity=String(op.value/100);opv.textContent=op.value+'%'}",
-    "var lastSent='';",
-    'function report(force){var s={x:window.screenX,y:window.screenY,width:window.innerWidth,height:window.innerHeight,opacity:op.value/100};',
-    "var k=JSON.stringify(s);if(force!==true&&k===lastSent)return;lastSent=k;emit('state',s)}",
-    "function zoom(f){emit('zoom',{factor:f,width:window.innerWidth,height:window.innerHeight})}",
-    "function reset(){emit('reset',{naturalWidth:img.naturalWidth,naturalHeight:img.naturalHeight})}",
-    "window.addEventListener('wheel',function(e){e.preventDefault();zoom(e.deltaY<0?1.1:1/1.1)},{passive:false});",
-    "img.addEventListener('dblclick',reset);",
-    "document.getElementById('bar').addEventListener('click',function(e){",
+    // 页面 JS 只用单引号字符串，避免与外层模板串冲突；尺寸/位置类交互全部经 gtoolsFloat.emit 回创建方处理
+    const script = [
+      "(function(){'use strict';",
+      "var img=document.getElementById('img'),op=document.getElementById('opacity'),opv=document.getElementById('opv');",
+      'function emit(n,p){try{window.gtoolsFloat.emit(n,p)}catch(e){}}',
+      "function setImgOpacity(){img.style.opacity=String(op.value/100);opv.textContent=op.value+'%'}",
+      "var lastSent='';",
+      'function report(force){var s={x:window.screenX,y:window.screenY,width:window.innerWidth,height:window.innerHeight,opacity:op.value/100};',
+      "var k=JSON.stringify(s);if(force!==true&&k===lastSent)return;lastSent=k;emit('state',s)}",
+      "function zoom(f){emit('zoom',{factor:f,width:window.innerWidth,height:window.innerHeight})}",
+      "function reset(){emit('reset',{naturalWidth:img.naturalWidth,naturalHeight:img.naturalHeight})}",
+      "window.addEventListener('wheel',function(e){e.preventDefault();zoom(e.deltaY<0?1.1:1/1.1)},{passive:false});",
+      "img.addEventListener('dblclick',reset);",
+      // 抓图拖动：图片本体不是 -webkit-app-region:drag（会吞双击/滚轮），pointer 捕获后增量上报主进程移动窗口；
+      // 不 preventDefault，双击 1:1 与后续 mouse 事件全保留
+      "var dragging=false,lx=0,ly=0;",
+      "img.addEventListener('pointerdown',function(e){if(e.button!==0)return;dragging=true;lx=e.screenX;ly=e.screenY;",
+      "try{img.setPointerCapture(e.pointerId)}catch(err){}});",
+      "img.addEventListener('pointermove',function(e){if(!dragging)return;",
+      "emit('drag-move',{dx:e.screenX-lx,dy:e.screenY-ly});lx=e.screenX;ly=e.screenY});",
+      "img.addEventListener('pointerup',function(){dragging=false});",
+      "img.addEventListener('pointercancel',function(){dragging=false});",
+      "document.getElementById('bar').addEventListener('click',function(e){",
     "var b=e.target.closest('button[data-act]');if(!b)return;var a=b.getAttribute('data-act');",
     "if(a==='close'){emit('closing',null);try{window.gtoolsFloat.close()}catch(err){}return}",
     "if(a==='reset'){reset();return}",
@@ -97,7 +107,7 @@ export function buildFloatHtml(dataUrl: string, opts: FloatHtmlOptions): string 
   return (
     `<style>${style}</style>` +
     `<div id="pin" class="pin">` +
-    `<div class="stage"><img id="img" alt="" src="${safeUrl}"/></div>` +
+    `<div class="stage"><img id="img" alt="" draggable="false" src="${safeUrl}"/></div>` +
     `<div id="bar" class="bar drag">` +
     `<span class="grip" title="拖动移动">⋮⋮</span>` +
     `<button type="button" class="b no-drag" data-act="out" title="缩小">−</button>` +

@@ -1,4 +1,4 @@
-import { app, Notification, screen, shell } from 'electron'
+import { app, BrowserWindow, Notification, screen, shell } from 'electron'
 import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -13,10 +13,12 @@ import { createBackendContext } from './services/dispatch'
 import { setupIpc } from './services/ipc'
 import {
   applyHideOnBlur,
+  bindWindowPositionSink,
   createSearchWindow,
   createDetachedWindow,
   detachedEntryUrl,
   applyThemeToWindow,
+  setRememberedWindowPos,
   toggleSearchWindow,
   showSearchWindow,
   getSearchWindow
@@ -73,6 +75,8 @@ async function bootstrap(): Promise<void> {
     storageRoot: join(userData, 'storage'),
     appVersion: app.getVersion(),
     getWindow: getSearchWindow,
+    // 插件事件广播面 = 主窗 + 全部独立插件窗（浮窗/遮罩 preload 无订阅面，多发无害）
+    listWindows: () => BrowserWindow.getAllWindows(),
     apiCenter
   })
   servicesRef = services
@@ -93,19 +97,18 @@ async function bootstrap(): Promise<void> {
     externalDir: join(userData, 'plugins'),
     createBackendContext: (pluginId) => createBackendContext(loader!.registry, services, pluginId)
   })
-  await loader.load(settingsStore.settings.disabledPlugins)
+  // 装载只做清单注册；resident backend 起动移出启动链（见下方后台任务），窗口/托盘/热键先就绪
+  await loader.load(settingsStore.settings.disabledPlugins, { startResidentBackends: false })
 
   applyHideOnBlur(settingsStore.settings.hideOnBlur)
+  // 主窗位置记忆：启动注入上次位置，拖动后经 settings 持久化（防抖内建）
+  setRememberedWindowPos(settingsStore.settings.windowPos)
+  bindWindowPositionSink((p) => {
+    void settingsStore?.update({ windowPos: p })
+  })
   // 先镜像主题/透明再建窗（透明标志/材质依赖当前设置），建窗后自身完成材质应用
   applyThemeToWindow(settingsStore.settings.theme, settingsStore.settings.transparency)
   createSearchWindow()
-
-  // 登录项失败不阻断主功能（区别于快捷键失败弹通知），只留日志
-  try {
-    syncLoginItem(app, settingsStore.settings.launchAtLogin)
-  } catch (err) {
-    console.error('GTools 开机启动设置失败：', err)
-  }
 
   // 插件独立窗口管理器（每插件单实例，禁用插件/退出时统一回收）
   const detached = new DetachedWindowManager({
@@ -128,6 +131,19 @@ async function bootstrap(): Promise<void> {
 
   setupIpc({ loader, settings: settingsStore, services, apiCenter, nativeApps, detached, onHotkeyToggle: toggleSearchWindow })
 
+  // 登录项失败不阻断主功能（区别于快捷键失败弹通知），只留日志
+  try {
+    syncLoginItem(app, settingsStore.settings.launchAtLogin)
+  } catch (err) {
+    console.error('GTools 开机启动设置失败：', err)
+  }
+
+  // resident backend 后台起（init/start 可能耗时），失败只记日志不杀宿主；此时 IPC 已注册，
+  // 插件进入路径会经 ensureBackendStarted 的 in-flight 复用搭上同一次启动
+  void loader.startResidentBackends().catch((err) => {
+    console.error('GTools 常驻 backend 启动失败：', err)
+  })
+
   if (loader.externalDetected.length > 0) {
     const names = loader.externalDetected.map((d) => d.manifest.name).join('、')
     new Notification({ title: 'GTools', body: `检测到外部插件：${names}（动态加载将在后续版本支持）` }).show()
@@ -137,7 +153,11 @@ async function bootstrap(): Promise<void> {
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', () => showSearchWindow())
+  app.on('second-instance', () => {
+    // 无窗期（启动极早期）补建窗口再显，防唤起静默失效
+    if (!getSearchWindow()) createSearchWindow()
+    showSearchWindow()
+  })
 
   app.whenReady().then(() => {
     if (process.platform === 'darwin') app.dock?.hide()

@@ -5,6 +5,13 @@ import { isCacheStale, parseCache, type AppEntry, type AppsCache, type ScanDeps 
 const CACHE_KEY = 'apps'
 const REQUEST_KEY = 'scanRequest'
 const DEFAULT_POLL_MS = 1500
+/**
+ * 冷档轮询周期：激活窗口外只兜手动刷新请求的接续（storage.get 命中主进程内存缓存，零盘读）。
+ * backend 感知不到插件视图是否挂载（协议无 renderer→backend 唤醒通道），全停会丢刷新请求。
+ */
+const DEFAULT_IDLE_POLL_MS = 5000
+/** 激活窗口：backend 启动（≈插件首次进入）或最近一次刷新请求后保持快档的时长 */
+const DEFAULT_ENGAGE_MS = 60_000
 
 // web tsconfig 程序会收走 src/plugins 下所有 .ts 且无 node 类型，顶层 import node:* 会挂共享 typecheck；
 // 非字面量说明符的动态导入不参与类型解析，只在主进程运行期执行（backend 永不进渲染 bundle）
@@ -52,6 +59,10 @@ export interface LauncherBackendOptions {
   /** 注入扫描实现（测试注入失败/单飞），缺省 scanApps */
   scan?: (deps: ScanDeps) => Promise<AppEntry[]>
   pollMs?: number
+  /** 冷档轮询周期（激活窗口外），缺省 5s */
+  idlePollMs?: number
+  /** 激活窗口时长（快档保持期），缺省 60s */
+  engageMs?: number
 }
 
 /**
@@ -60,11 +71,16 @@ export interface LauncherBackendOptions {
  */
 export function createLauncherBackend(opts: LauncherBackendOptions = {}): PluginBackend {
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS
+  const idlePollMs = opts.idlePollMs ?? DEFAULT_IDLE_POLL_MS
+  const engageMs = opts.engageMs ?? DEFAULT_ENGAGE_MS
   const resolveDeps = opts.deps ?? buildDefaultDeps
   const scan = opts.scan ?? scanApps
 
   let ctx: BackendContext | null = null
   let timer: ReturnType<typeof setInterval> | null = null
+  let timerMs: number | null = null
+  let gen = 0
+  let lastEngage = 0
   let scanning = false
   let lastRequest: number | null = null
 
@@ -112,7 +128,24 @@ export function createLauncherBackend(opts: LauncherBackendOptions = {}): Plugin
       return
     }
     lastRequest = req
+    lastEngage = Date.now() // 用户刷新：重开激活窗口回快档
     await rescan('manual')
+  }
+
+  /** 轮询分档：激活窗口内按 pollMs，窗口外降冷档 idlePollMs（只兜刷新请求接续） */
+  function syncTimer(): void {
+    const ms = Date.now() - lastEngage < engageMs ? pollMs : idlePollMs
+    if (timer !== null && timerMs === ms) return
+    if (timer !== null) clearInterval(timer)
+    timer = setInterval(() => void pollTick(), ms)
+    timerMs = ms
+  }
+
+  async function pollTick(): Promise<void> {
+    const g = gen
+    await checkScanRequest()
+    if (g !== gen) return // stop 与本轮检查并发：不再重挂 interval
+    syncTimer()
   }
 
   return {
@@ -124,13 +157,16 @@ export function createLauncherBackend(opts: LauncherBackendOptions = {}): Plugin
       if (timer !== null) return
       const cache = await readCache()
       if (isCacheStale(cache, Date.now())) void rescan('stale') // 后台进行，不阻塞 start
-      timer = setInterval(() => void checkScanRequest(), pollMs)
+      lastEngage = Date.now() // 启动即插件首次进入：视作激活窗口起点
+      syncTimer() // 同步挂档：start 返回即有 interval，紧随的 stop 能清掉
       void checkScanRequest()
     },
     async stop(): Promise<void> {
+      gen++
       if (timer !== null) {
         clearInterval(timer)
         timer = null
+        timerMs = null
       }
       lastRequest = null
     }

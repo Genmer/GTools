@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { SearchEntry } from '../core/matcher'
 import { highlightSegments } from '../core/highlight'
 import type { RecItem } from '../core/recommend'
@@ -42,7 +42,15 @@ watch(
   }
 )
 
-// 实测自然高度上报：紧贴搜索结果网格行数，对齐 uTools
+// 实测自然高度上报：紧贴搜索结果网格行数，对齐 uTools。
+// 行数分档（9 列网格、格高固定、标题条只随区有无）：同档高度必然相同，档位不变即跳过测量，
+// 逐键过滤不再每键 scrollTop 复位 + 强制同步布局
+const GRID_COLS = 9
+const tierKey = computed(() => {
+  const rows = (n: number): number => (n === 0 ? 0 : Math.ceil(n / GRID_COLS))
+  return `${rows(props.items.length)}:${rows(props.recommendations.length)}`
+})
+
 function emitNaturalHeight(): void {
   const root = rootEl.value
   const last = root?.lastElementChild
@@ -54,11 +62,28 @@ function emitNaturalHeight(): void {
   emit('resize', Math.ceil(b.bottom + padB + (window.innerHeight - r.bottom)))
 }
 
-onMounted(() => void nextTick(emitNaturalHeight))
+let measureRaf = 0
+function scheduleMeasure(): void {
+  if (measureRaf !== 0) return
+  // rAF 在微任务（DOM 补丁）之后、绘制之前执行：同帧多次档位变化合并为一次测量
+  measureRaf = requestAnimationFrame(() => {
+    measureRaf = 0
+    emitNaturalHeight()
+  })
+}
+
+onMounted(scheduleMeasure)
+watch(tierKey, scheduleMeasure)
+// 新查询回顶：纯滚动写不读布局，无强制 reflow；档内不变时接替原「测量顺带回顶」的 UX
 watch(
-  () => [props.items.length, props.recommendations.length, props.query],
-  () => void nextTick(emitNaturalHeight)
+  () => props.query,
+  () => {
+    if (rootEl.value) rootEl.value.scrollTop = 0
+  }
 )
+onBeforeUnmount(() => {
+  if (measureRaf !== 0) cancelAnimationFrame(measureRaf)
+})
 </script>
 
 <template>
@@ -157,6 +182,7 @@ watch(
 .result-view {
   height: 100%;
   overflow-y: auto;
+  overflow-x: hidden; /* overflow-y 非 visible 会把 x 隐式算成 auto，显式禁掉横向滚动 */
   /* 内容层实色面板；顶部 68px 让位悬浮玻璃胶囊（64px 栏 + 4px 呼吸） */
   padding: 68px 16px 14px;
   scroll-padding-top: 68px;
@@ -189,7 +215,8 @@ watch(
 }
 .result-grid {
   display: grid;
-  grid-template-columns: repeat(9, 1fr);
+  /* minmax(0,…) 防 nowrap 长名撑破 9 列轨道（同 EmptyState .app-grid） */
+  grid-template-columns: repeat(9, minmax(0, 1fr));
   gap: var(--sp-2) var(--sp-1);
 }
 .result-cell {

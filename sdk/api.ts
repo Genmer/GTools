@@ -144,10 +144,20 @@ export interface TranslateRequest {
   providerId?: string
 }
 
+/** 容灾切换信息：实际产出引擎非用户首选时附带（首选失败已自动切换） */
+export interface TranslateFallbackInfo {
+  /** 用户配置的首选引擎 id；'' = 内置默认 MyMemory */
+  requestedProviderId: string
+  /** 格式 `${kind}: ${简述}`，kind 同 SERVICE_ERROR 前缀分类 */
+  reason: string
+}
+
 export interface TranslateResult {
   resultText: string
   detectedFrom?: string
   providerId: string
+  /** 缺省 = 首选引擎直接成功，未发生容灾切换（可选字段，旧消费方零影响） */
+  fallback?: TranslateFallbackInfo
 }
 
 /** status 附带的 provider 概要（插件引擎 tab 数据源）；密钥等凭证永不出现 */
@@ -325,7 +335,7 @@ export type ApiCallError =
   | 'BAD_REQUEST'
   /** API 中心：无可用 provider（当前 provider 被禁用等） */
   | 'SERVICE_UNCONFIGURED'
-  /** API 中心：provider 执行失败（message 前缀分类 timeout/network/http/quota/parse/config） */
+  /** API 中心：provider 执行失败（message 前缀分类 timeout/network/http/quota/auth/parse/config，auth=凭证无效或未授权） */
   | 'SERVICE_ERROR'
 
 /** host-client / backend ctx 抛出的调用错误：code 保留 IPC 错误码（插件可据此区分 SERVICE_*） */

@@ -48,7 +48,7 @@ export async function executeMyMemory(
     throw new TranslateExecutorError('config', '没有可翻译的内容')
   }
   const qs = new URLSearchParams({ q: input.text, langpair: `${input.from}|${input.to}` })
-  const res = await fetchChecked(`${MYMEMORY_ENDPOINT}?${qs.toString()}`, rt)
+  const res = await fetchChecked(`${MYMEMORY_ENDPOINT}?${qs.toString()}`, rt, undefined, { statusKinds: { 403: 'quota' } })
   return { resultText: parseMyMemoryBody(res.status, res.body), providerId: DEFAULT_MYMEMORY_PROVIDER_ID }
 }
 

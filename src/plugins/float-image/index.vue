@@ -291,7 +291,9 @@ async function pinFile(path: string): Promise<void> {
 }
 
 async function pinDataUrl(rawUrl: string, natural: NaturalSize, label: string): Promise<void> {
-  let dataUrl = sanitizeDataUrl(rawUrl)
+  // 首道只验格式不设长度上限：大图（如微信粘贴的照片）dataUrl 会超 sanitize 默认 1.9M 上限，
+  // 长度该由下方预算降采样处理，否则超限图永远走不到压缩就被误报「图片数据不合法」
+  let dataUrl = sanitizeDataUrl(rawUrl, Number.MAX_SAFE_INTEGER)
   if (!dataUrl) {
     fail('图片数据不合法（须为 png/jpeg/gif/webp/bmp/svg 的 base64 数据）')
     return

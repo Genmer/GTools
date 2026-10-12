@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import type { PluginManifest } from '@sdk/manifest'
-import type { AppSettings, CommandHotkey, ThemeName, TransparencySettings } from '@sdk/settings'
+import type { AppSettings, CommandHotkey, OutlineColor, ThemeName, TransparencySettings } from '@sdk/settings'
+import { OUTLINE_CUSTOM_COLOR_DEFAULT } from '@sdk/settings'
 import { validateAccelerator } from '@sdk/shortcut-rules'
 import type { HostInitResult } from '../env'
 import AboutSection from './AboutSection.vue'
@@ -66,10 +67,44 @@ async function setLaunchAtLogin(enabled: boolean): Promise<void> {
   if (!r.ok) opError.value = r.error ?? '保存失败'
 }
 
-async function setBehavior(field: 'clipboardSuggest' | 'hideOnBlur', enabled: boolean): Promise<void> {
+async function setBehavior(field: 'clipboardSuggest' | 'hideOnBlur' | 'outlineEnabled', enabled: boolean): Promise<void> {
   const r = await window.gtools.host('settings:set', { [field]: enabled })
   if (!r.ok) opError.value = r.error ?? '保存失败'
 }
+
+// 轮廓线子设置在总开关关闭时置灰（仍可先存值，重开即生效）
+const outlineOn = computed(() => props.settings?.outlineEnabled ?? true)
+const rimColors: { id: OutlineColor; label: string }[] = [
+  { id: 'auto', label: '跟随主题' },
+  { id: 'white', label: '白色' },
+  { id: 'black', label: '黑色' },
+  { id: 'rainbow', label: '七彩' },
+  { id: 'rainbow-gradient', label: '七彩渐变' },
+  { id: 'custom', label: '自定义' }
+]
+
+async function setOutline(patch: {
+  outlineWidth?: number
+  outlineColor?: OutlineColor
+  outlineCustomColor?: string
+  outlineFlowSpeed?: number
+}): Promise<void> {
+  const r = await window.gtools.host('settings:set', patch)
+  if (!r.ok) opError.value = r.error ?? '保存失败'
+}
+
+// 取色器一次成漠：@change 才下发（同既有滑杆纪律），拖动中高频 settings:set 会反复重设原生材质
+function onCustomColor(e: Event): void {
+  void setOutline({
+    outlineColor: 'custom',
+    outlineCustomColor: (e.target as HTMLInputElement).value
+  })
+}
+
+// 流动速度只对会动的两档颜色有意义，其余颜色整行不渲染
+const rimFlowActive = computed(
+  () => props.settings?.outlineColor === 'rainbow' || props.settings?.outlineColor === 'rainbow-gradient'
+)
 
 // 外部插件（userData/plugins/）宿主只做清单校验与检测提示，不提供启用/安装入口；仅设置态挂载时取一次
 const loadIssues = ref<{ pluginId: string; message: string }[]>([])
@@ -327,6 +362,86 @@ async function importBackup(): Promise<void> {
             >
               {{ t.label }}
             </button>
+          </div>
+          <div class="stack">
+            <div class="row">
+              <div class="row-main">
+                <span class="name">轮廓线</span>
+                <span class="desc">窗口边缘轮廓线：浅色主题黑线、深色白线、透明模式七彩环；宽度 0 为不显示</span>
+              </div>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="settings?.outlineEnabled ?? true"
+                  @change="setBehavior('outlineEnabled', ($event.target as HTMLInputElement).checked)"
+                />
+                <span>{{ settings?.outlineEnabled ? '已开启' : '已关闭' }}</span>
+              </label>
+            </div>
+            <div class="row">
+              <div class="row-main">
+                <span class="name">轮廓线宽度</span>
+              </div>
+              <input
+                class="slider"
+                type="range"
+                min="0"
+                max="5"
+                step="1"
+                :value="settings?.outlineWidth ?? 3"
+                :disabled="!outlineOn"
+                @change="setOutline({ outlineWidth: Number(($event.target as HTMLInputElement).value) })"
+              />
+              <span class="accel">{{ settings?.outlineWidth ?? 3 }}px</span>
+            </div>
+            <div class="row">
+              <div class="row-main">
+                <span class="name">轮廓线颜色</span>
+              </div>
+              <div class="seg">
+                <button
+                  v-for="c in rimColors"
+                  :key="c.id"
+                  class="seg-item"
+                  :class="{ active: (settings?.outlineColor ?? 'auto') === c.id }"
+                  :disabled="!outlineOn"
+                  @click="setOutline({ outlineColor: c.id })"
+                >
+                  <span
+                    v-if="c.id !== 'auto'"
+                    class="dot"
+                    :class="`dot-${c.id}`"
+                    :style="c.id === 'custom' ? { background: settings?.outlineCustomColor ?? OUTLINE_CUSTOM_COLOR_DEFAULT } : undefined"
+                  ></span>
+                  {{ c.label }}
+                </button>
+              </div>
+              <input
+                class="rim-color-input"
+                type="color"
+                :value="settings?.outlineCustomColor ?? OUTLINE_CUSTOM_COLOR_DEFAULT"
+                :disabled="!outlineOn"
+                title="自定义环色"
+                @change="onCustomColor"
+              />
+            </div>
+            <div v-if="rimFlowActive" class="row">
+              <div class="row-main">
+                <span class="name">流动速度</span>
+                <span class="desc">七彩与七彩渐变的环带巡游速度：1 最慢，10 最快</span>
+              </div>
+              <input
+                class="slider"
+                type="range"
+                min="1"
+                max="10"
+                step="1"
+                :value="settings?.outlineFlowSpeed ?? 3"
+                :disabled="!outlineOn"
+                @change="setOutline({ outlineFlowSpeed: Number(($event.target as HTMLInputElement).value) })"
+              />
+              <span class="accel">{{ settings?.outlineFlowSpeed ?? 3 }} 档</span>
+            </div>
           </div>
         </div>
         <div class="group">
@@ -633,9 +748,60 @@ async function importBackup(): Promise<void> {
   background: var(--accent);
   color: var(--on-accent);
 }
-.seg-item:not(.active):hover {
+/* disabled 元素 hover 不反白（:hover 对禁用项仍命中） */
+.seg-item:not(.active):not(:disabled):hover {
   background: var(--hover);
   color: var(--fg);
+}
+.seg-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* 环色色点：取 themes.css 轮廓环源色变量，不另立色值 */
+.dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  vertical-align: -1px;
+}
+.dot-white {
+  background: var(--rim-white);
+}
+.dot-black {
+  background: var(--rim-black);
+}
+.dot-rainbow {
+  background: linear-gradient(
+    135deg,
+    var(--rim-rainbow-c1),
+    var(--rim-rainbow-c2) 33%,
+    var(--rim-rainbow-c3) 66%,
+    var(--rim-rainbow-c4)
+  );
+}
+.dot-rainbow-gradient {
+  /* 与七彩点同源色但用平滑过渡，示意渐变环 */
+  background: linear-gradient(135deg, var(--rim-rainbow-c1), var(--rim-rainbow-c2) 50%, var(--rim-rainbow-c3) 75%, var(--rim-rainbow-c4));
+}
+.dot-custom {
+  background: var(--rim-custom, var(--rim-rainbow-c3));
+}
+/* 原生取色器：仅调外形，色值由控件自身与 --rim-custom 变量承载 */
+.rim-color-input {
+  flex: none;
+  width: 32px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: none;
+  cursor: pointer;
+}
+.rim-color-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .seg-item + .seg-item {
   border-left: 1px solid var(--border);
@@ -702,15 +868,9 @@ async function importBackup(): Promise<void> {
 .notice p {
   margin: 2px 0;
 }
+/* 视觉走 base.css 全局 iOS 拨动开关；此处只管行内布局 */
 .switch {
   margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-sub);
-  color: var(--fg-dim);
-  cursor: pointer;
-  white-space: nowrap;
 }
 .error {
   color: var(--danger);

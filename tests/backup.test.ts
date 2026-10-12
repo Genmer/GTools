@@ -7,6 +7,7 @@ import {
   parseBackup,
   restorePathTokens,
   serializeBackup,
+  stringifyBackupChunked,
   tokenizePathValues
 } from '../src/main/services/backup'
 import { DEFAULT_SETTINGS } from '@sdk/settings'
@@ -51,12 +52,12 @@ describe('backup 序列化与文件名', () => {
         services: {
           translate: {
             activeProviderId: 'u-abcd1234',
-            providers: [{ id: 'u-abcd1234', type: 'http-template', name: 'DeepL', enabled: true, endpoint: 'https://x/?key={key}', apiKey: 'sk-1', method: 'GET' }]
+            providers: [{ id: 'u-abcd1234', type: 'http-template', name: 'DeepL', enabled: true, endpoint: 'https://x/?key={key}', secrets: { apiKey: 'sk-1' }, method: 'GET' }]
           }
         }
       }
     })
-    expect(b.apiServices?.services.translate.providers[0].apiKey).toBe('sk-1')
+    expect(b.apiServices?.services.translate.providers[0].secrets?.apiKey).toBe('sk-1')
   })
 
   it('默认文件名含日期时间与 .gtools 后缀', () => {
@@ -219,5 +220,91 @@ describe('parseBackup 导入校验', () => {
       expect(bad.backup.apiServices).toBeUndefined()
       expect(bad.warnings.join()).toContain('API 服务')
     }
+  })
+})
+
+describe('stringifyBackupChunked 分块序列化（黄金值 = 整体 JSON.stringify）', () => {
+  const makeBackup = (withApi: boolean) =>
+    serializeBackup({
+      settings: DEFAULT_SETTINGS,
+      pluginStorage: {
+        clipboard: { state: { items: [{ text: 'a"b\\c\n中文🚀', at: 1 }], big: 'x'.repeat(500) } },
+        'weird"id': { 'k:ey': { nested: { deep: [1, { s: null, t: true }] } } },
+        empty: {},
+        notes: { drafts: [], meta: { tags: ['t1', 't2'] } },
+        ...Object.fromEntries(
+          Array.from({ length: 20 }, (_, i) => [`pad-${i}`, { seq: i, blob: { text: 'y'.repeat(200) } }])
+        )
+      },
+      platform: 'darwin',
+      appVersion: '0.2.0',
+      apiServices: withApi
+        ? {
+            services: {
+              translate: {
+                activeProviderId: 'u-1',
+                providers: [
+                  { id: 'u-1', type: 'http-template', name: 'DeepL', enabled: true, endpoint: 'https://x/?key={key}', secrets: { apiKey: 'sk-1' }, method: 'GET' }
+                ]
+              }
+            }
+          }
+        : undefined
+    })
+
+  it('含 apiServices：分块输出与整体 stringify 逐字节一致', async () => {
+    const b = makeBackup(true)
+    expect(await stringifyBackupChunked(b)).toBe(JSON.stringify(b, null, 2))
+  })
+
+  it('apiServices 缺省（键省略）：同样逐字节一致', async () => {
+    const b = makeBackup(false)
+    expect(await stringifyBackupChunked(b)).toBe(JSON.stringify(b, null, 2))
+  })
+
+  it('yieldEvery=1（每插件让步一次）输出仍一致；空 pluginStorage 输出 {}', async () => {
+    const b = makeBackup(true)
+    expect(await stringifyBackupChunked(b, { yieldEvery: 1 })).toBe(JSON.stringify(b, null, 2))
+    const empty = serializeBackup({ settings: DEFAULT_SETTINGS, pluginStorage: {}, platform: 'win32', appVersion: '0' })
+    expect(await stringifyBackupChunked(empty)).toBe(JSON.stringify(empty, null, 2))
+  })
+
+  it('yieldEvery 大于插件数（全程不让步）与 yieldEvery=0（取模永不命中）输出仍一致', async () => {
+    const b = makeBackup(true)
+    expect(await stringifyBackupChunked(b, { yieldEvery: 999 })).toBe(JSON.stringify(b, null, 2))
+    expect(await stringifyBackupChunked(b, { yieldEvery: 0 })).toBe(JSON.stringify(b, null, 2))
+  })
+
+  it('plugin id 含换行/制表/控制字符、键为空串：输出与整体 stringify 逐字节一致', async () => {
+    const b = serializeBackup({
+      settings: DEFAULT_SETTINGS,
+      pluginStorage: {
+        'weird\nid\ttab\x00ctl': { 'key\nwith\nnewlines': [1, 2] },
+        '': { k: 'v' }
+      },
+      platform: 'darwin',
+      appVersion: '0.2.0'
+    })
+    expect(await stringifyBackupChunked(b)).toBe(JSON.stringify(b, null, 2))
+  })
+
+  it('pluginStorage 值为极端类型（NaN/Infinity→null、1e21、-0、undefined 丢弃、深嵌套）：逐字节一致', async () => {
+    const b = serializeBackup({
+      settings: DEFAULT_SETTINGS,
+      pluginStorage: {
+        ext: {
+          nan: Number.NaN,
+          inf: Number.POSITIVE_INFINITY,
+          big: 1e21,
+          negZero: -0,
+          dropped: undefined,
+          empty: '',
+          deep: [[[{ a: [null, true] }]]]
+        }
+      },
+      platform: 'win32',
+      appVersion: '0.2.0'
+    })
+    expect(await stringifyBackupChunked(b)).toBe(JSON.stringify(b, null, 2))
   })
 })

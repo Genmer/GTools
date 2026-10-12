@@ -9,7 +9,9 @@ html[data-theme='light'] {
   --accent-dim: rgba(9, 105, 218, 0.12);
   --border: #d8dee4;
   --danger: #cf222e;
+  --danger-dim: rgba(207, 34, 46, 0.1);
   --ok: #1a7f37;
+  --ok-dim: rgba(26, 127, 55, 0.1);
   --warn: #9a6700;
 
   /* 四期 design tokens（docs/design/ui-style-guide.md §1.2）：字号/圆角/间距主题无关，只放 :root */
@@ -34,21 +36,25 @@ html[data-theme='light'] {
   --sp-5: 24px;
   /* 投影分两级：--shadow-window 只挂窗口根（透明窗落 OS 边距），--shadow-glass 给独立玻璃件（胶囊） */
   --shadow-window: 0 12px 40px rgba(0, 0, 0, 0.18);
-  /* 窗口外圈投影的可见形态：亚克力满窗时 CSS 外投影被窗口边界裁掉，用内缘晕圈勾轮廓 */
-  --window-ring: inset 0 1px 2px rgba(15, 23, 42, 0.14), inset 0 0 0 1px rgba(15, 23, 42, 0.05),
-    inset 0 0 26px rgba(15, 23, 42, 0.1);
-  /* conic 受光环四站点（.app::before 1.2px 环），未定义处 transparent 不可见 */
-  --rim-c1: transparent;
-  --rim-c2: transparent;
-  --rim-c3: transparent;
-  --rim-c4: transparent;
+  /* 不透明窗只剩 26px 内晕：3px 轮廓线由 .app::before 伪元素环承载（贴面板边缘，见下） */
+  --window-ring: inset 0 0 26px rgba(15, 23, 42, 0.05);
+  /* 轮廓环：白主题黑线，四站同色 = 四带渐变退化为纯色线 */
+  --rim-width: 3px;
+  --rim-c1: var(--rim-black);
+  --rim-c2: var(--rim-black);
+  --rim-c3: var(--rim-black);
+  --rim-c4: var(--rim-black);
+  /* iOS 风拨动开关（base.css .switch 消费） */
+  --switch-on: #34c759;
+  --switch-track: rgba(120, 120, 128, 0.32);
   --hover: rgba(0, 0, 0, 0.05);
   --active-row: var(--accent-dim);
   --scrollbar-thumb: rgba(0, 0, 0, 0.2);
   --scrollbar-thumb-hover: rgba(0, 0, 0, 0.32);
-  /* 两层层级：导航玻璃浮于内容之上（内容永不与玻璃平级） */
+  /* 两层层级：导航玻璃浮于内容之上（内容永不与玻璃平级）；轮廓环最高（窗口装饰，pointer-events:none） */
   --z-content: 0;
   --z-nav: 100;
+  --z-ring: 200;
   --bg-shell: var(--bg-raised);
   --bg-content: var(--bg-raised);
 
@@ -58,7 +64,6 @@ html[data-theme='light'] {
   --glass-filter: none;
   --fill-well: var(--bg-raised);
   --strip-tint: transparent;
-  --strip-filter: none;
   /* 玻璃曲线 token 惰性默认（glass 块按磨砂度覆写真值）：depth=0 时壁厚伪元素 mask xor 无环带不可见，
      disp 为色散环两端色（玻璃主题外 transparent） */
   --glass-blur: 14px;
@@ -94,12 +99,20 @@ html[data-theme='dark'] {
   --accent-dim: rgba(68, 147, 248, 0.16);
   --border: #3c3c40;
   --danger: #f85149;
+  --danger-dim: rgba(248, 81, 73, 0.14);
   --ok: #3fb950;
+  --ok-dim: rgba(63, 185, 80, 0.14);
   --warn: #d29922;
   /* 深色投影减弱扩散、hover 用白色叠层（黑色不可见） */
   --shadow-window: 0 12px 32px rgba(0, 0, 0, 0.45);
-  --window-ring: inset 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.06),
-    inset 0 0 26px rgba(0, 0, 0, 0.3);
+  /* 不透明窗只剩 26px 内晕；3px 白线走伪元素环（同 light 组说明） */
+  --window-ring: inset 0 0 26px rgba(0, 0, 0, 0.15);
+  --rim-width: 3px;
+  --rim-c1: var(--rim-white);
+  --rim-c2: var(--rim-white);
+  --rim-c3: var(--rim-white);
+  --rim-c4: var(--rim-white);
+  --switch-track: rgba(120, 120, 128, 0.44);
   --hover: rgba(255, 255, 255, 0.08);
   --scrollbar-thumb: rgba(255, 255, 255, 0.26);
   --scrollbar-thumb-hover: rgba(255, 255, 255, 0.4);
@@ -129,22 +142,21 @@ html[data-transparency='on'][data-theme='dark'] {
   --shadow-window: 0 1px 2px rgba(0, 0, 0, calc(0.16 + var(--tx, 0.55) * 0.08)),
     0 10px 24px rgba(0, 0, 0, calc(0.28 + var(--tx, 0.55) * 0.12)),
     0 18px 28px rgba(0, 0, 0, calc(0.16 + var(--tx, 0.55) * 0.08));
-  --window-ring: inset 0 1px 2px rgba(0, 0, 0, 0.38), inset 0 0 0 1px rgba(255, 255, 255, 0.07),
-    inset 0 0 30px rgba(0, 0, 0, calc(0.22 + var(--tx, 0.55) * 0.28));
+  --window-ring: inset 0 0 30px rgba(0, 0, 0, calc(0.22 + var(--tx, 0.55) * 0.28));
   --bg-shell: var(--bg);
   --bg-content: rgba(28, 28, 30, calc(0.06 + (1 - var(--tx, 0.55)) * 0.88));
   /* Regular：导航胶囊/底栏 tint + 受控模糊提饱和（tint 下调让 DWM 亚克力透进感可见）；Clear：溶解条 */
   --glass-bg: rgba(40, 40, 42, calc(0.05 + (1 - var(--tx, 0.55)) * 0.78));
   --glass-filter: blur(16px) saturate(1.4) brightness(1.03);
   --strip-tint: rgba(255, 255, 255, 0.08);
-  --strip-filter: blur(12px) saturate(1.2);
   /* 凹陷输入域厚填充；黑不做面板底，禁 alpha>0.7 的 overlay（系数 0.6 保证 tx=0 时恰好触界） */
   --fill-well: rgba(0, 0, 0, calc(0.1 + (1 - var(--tx, 0.55)) * 0.6));
-  /* 暗色系 rim 白 alpha 减半 */
-  --rim-c1: rgba(255, 255, 255, 0.47);
-  --rim-c2: rgba(255, 255, 255, 0.06);
-  --rim-c3: rgba(255, 255, 255, 0.025);
-  --rim-c4: rgba(255, 255, 255, 0.15);
+  /* 透明模式轮廓 = 七彩环（红→黄→蓝→品红四站，四边渐变带拼出整圈彩虹），环宽见 --rim-width */
+  --rim-width: 3px;
+  --rim-c1: var(--rim-rainbow-c1);
+  --rim-c2: var(--rim-rainbow-c2);
+  --rim-c3: var(--rim-rainbow-c3);
+  --rim-c4: var(--rim-rainbow-c4);
 }
 
 html[data-transparency='on'][data-theme='light'] {
@@ -154,19 +166,19 @@ html[data-transparency='on'][data-theme='light'] {
   --shadow-window: 0 1px 2px rgba(15, 23, 42, calc(0.1 + var(--tx, 0.55) * 0.08)),
     0 10px 24px rgba(15, 23, 42, calc(0.14 + var(--tx, 0.55) * 0.12)),
     0 18px 28px rgba(15, 23, 42, calc(0.08 + var(--tx, 0.55) * 0.08));
-  --window-ring: inset 0 1px 2px rgba(15, 23, 42, 0.12), inset 0 0 0 1px rgba(15, 23, 42, 0.05),
-    inset 0 0 30px rgba(15, 23, 42, calc(0.08 + var(--tx, 0.55) * 0.12));
+  --window-ring: inset 0 0 30px rgba(15, 23, 42, calc(0.08 + var(--tx, 0.55) * 0.12));
   --bg-shell: var(--bg);
   --bg-content: rgba(255, 255, 255, calc(0.06 + (1 - var(--tx, 0.55)) * 0.88));
   --glass-bg: rgba(255, 255, 255, calc(0.05 + (1 - var(--tx, 0.55)) * 0.78));
   --glass-filter: blur(16px) saturate(1.4) brightness(1.03);
   --strip-tint: rgba(255, 255, 255, 0.15);
-  --strip-filter: blur(12px) saturate(1.2);
   --fill-well: rgba(255, 255, 255, calc(0.1 + (1 - var(--tx, 0.55)) * 0.75));
-  --rim-c1: rgba(255, 255, 255, 0.95);
-  --rim-c2: rgba(255, 255, 255, 0.12);
-  --rim-c3: rgba(255, 255, 255, 0.05);
-  --rim-c4: rgba(255, 255, 255, 0.3);
+  /* 透明模式轮廓 = 七彩环（同 dark+透明组） */
+  --rim-width: 3px;
+  --rim-c1: var(--rim-rainbow-c1);
+  --rim-c2: var(--rim-rainbow-c2);
+  --rim-c3: var(--rim-rainbow-c3);
+  --rim-c4: var(--rim-rainbow-c4);
 }
 
 /* 清透档（模糊关）三主题通用：霜面退为纯着色，桌面直透；玻璃感厚度由 glass 曲线 token 自带 */
@@ -208,11 +220,13 @@ html[data-theme='glass'] {
   /* 独立玻璃件（胶囊）下的真实软投影，alpha 乘 --glass-shadow-k 与窗口影同步 */
   --shadow-glass: 0 1px 2px rgba(15, 23, 42, calc(0.12 * var(--glass-shadow-k))),
     0 8px 24px rgba(15, 23, 42, calc(0.16 * var(--glass-shadow-k)));
-  /* conic 受光环：左上强受光绕一圈明暗变化（窗缘「弯折桌面」CSS 做不到，此环是光学近似） */
-  --rim-c1: rgba(255, 255, 255, 0.95);
-  --rim-c2: rgba(255, 255, 255, 0.12);
-  --rim-c3: rgba(255, 255, 255, 0.05);
-  --rim-c4: rgba(255, 255, 255, 0.3);
+  /* 轮廓环：玻璃=彩色折射环，与透明模式同款七彩四站（红→黄→蓝→品红，用户定调
+     「玻璃是彩色」）；宽度须整数 px（1.5px 时 Chromium 不画 bottom/right 带） */
+  --rim-width: 3px;
+  --rim-c1: var(--rim-rainbow-c1);
+  --rim-c2: var(--rim-rainbow-c2);
+  --rim-c3: var(--rim-rainbow-c3);
+  --rim-c4: var(--rim-rainbow-c4);
   --hover: rgba(255, 255, 255, 0.35);
   --active-row: rgba(10, 107, 212, 0.16);
   --scrollbar-thumb: rgba(30, 42, 60, 0.25);
@@ -234,7 +248,6 @@ html[data-theme='glass'] {
   --disp-c2: rgba(232, 64, 180, 0.45);
   --fill-well: rgba(255, 255, 255, calc(0.1 + (1 - var(--tx, 0.55)) * 0.7));
   --strip-tint: rgba(255, 255, 255, 0.1);
-  --strip-filter: blur(10px) saturate(1.3);
   --tile-blue-bg: rgba(9, 105, 218, 0.16);
   --tile-blue-fg: #0969da;
   --tile-green-bg: rgba(26, 127, 55, 0.16);
@@ -256,27 +269,155 @@ html[data-wintx='0'][data-theme='glass'] {
   --fill-well: rgba(255, 255, 255, calc(0.3 + 0.4 * var(--txp, 0.0911)));
 }
 
-/* 窗口根 conic 受光环（1.2px）：token 未定义处 transparent 不可见；mask 挖环是装饰叶子节点，
-   不在玻璃面的祖先链上（层叠纪律只约束 .searchbox 的祖先） */
-.app::before {
+/* 轮廓环源色：全部环色值的唯一定义处，主题组与 data-rim-color 预设块均经 var 引用 */
+:root {
+  --rim-black: rgba(0, 0, 0, 0.85);
+  --rim-white: rgba(255, 255, 255, 0.85);
+  --rim-rainbow-c1: rgba(255, 82, 82, 0.8);
+  --rim-rainbow-c2: rgba(255, 214, 10, 0.8);
+  --rim-rainbow-c3: rgba(66, 165, 245, 0.8);
+  --rim-rainbow-c4: rgba(192, 108, 252, 0.8);
+  /* 七彩流动周期：这里 12s 只是兜底，实际由 App.vue/DetachedHost 按流动速度档位注入
+     （36/s 秒，sdk rimFlowPeriodSeconds 单点公式）；段内联 delay 以 calc 乘系数联动 */
+  --rim-flow-period: 12s;
+}
+
+/* 面板边缘轮廓环（不透明=黑/白 3px 线，透明=七彩环，glass=均匀白线）：贴 .app/.detached
+   内容面板边缘描边，色分四边映射四站（同色主题天然退化为纯色圈）。用 border 而非四边
+   linear 渐变带——矩形渐变带被面板圆角弧裁剪后，45° 弧区无带覆盖露出白缺口
+   （「边角泛白」根因，0.0.45 实拍）；border 沿圆角弧连续渲染无缝。mask composite 挖环
+   在 Electron 44 GPU 合成下整层渲染为空，不可用；环宽须整数 px（非整数带不渲染） */
+.app::before,
+.detached::before {
   content: '';
   position: absolute;
   inset: 0;
+  z-index: var(--z-ring);
   border-radius: inherit;
-  padding: 1.2px;
-  background: conic-gradient(
-    from -45deg,
-    var(--rim-c1),
-    var(--rim-c2) 25%,
-    var(--rim-c3) 50%,
-    var(--rim-c4) 75%,
-    var(--rim-c1)
-  );
-  -webkit-mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
-  -webkit-mask-composite: xor;
-  mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
-  mask-composite: exclude;
+  border: var(--rim-width, 3px) solid transparent;
+  border-color: var(--rim-c1) var(--rim-c2) var(--rim-c3) var(--rim-c4);
   pointer-events: none;
+}
+
+/* 轮廓环总开关（设置-外观）：带高归零，三主题三材质全失效；
+   :root[data-theme] 抬特异性到 (0,3,1) 稳压透明组 (0,2,1)，否则透明模式下关环失效 */
+html:root[data-theme][data-ring='off'] {
+  --rim-width: 0px;
+}
+
+/* 用户覆写环色（设置-外观，auto 时无 data-rim-color 属性走主题组默认）：
+   :root[data-theme] 特异性 (0,3,1) 稳压透明组 (0,2,1) */
+html:root[data-theme][data-rim-color='white'] {
+  --rim-c1: var(--rim-white);
+  --rim-c2: var(--rim-white);
+  --rim-c3: var(--rim-white);
+  --rim-c4: var(--rim-white);
+}
+html:root[data-theme][data-rim-color='black'] {
+  --rim-c1: var(--rim-black);
+  --rim-c2: var(--rim-black);
+  --rim-c3: var(--rim-black);
+  --rim-c4: var(--rim-black);
+}
+/* 七彩/七彩渐变：border 四站让位 transparent，描边由 .rim-ring SVG 段列独占（两层同绘=双环）；
+   auto 态不流动仍走 border 四站硬色环 */
+html:root[data-theme][data-rim-color='rainbow'] {
+  --rim-c1: transparent;
+  --rim-c2: transparent;
+  --rim-c3: transparent;
+  --rim-c4: transparent;
+}
+html:root[data-theme][data-rim-color='custom'] {
+  --rim-c1: var(--rim-custom, var(--rim-rainbow-c3));
+  --rim-c2: var(--rim-custom, var(--rim-rainbow-c3));
+  --rim-c3: var(--rim-custom, var(--rim-rainbow-c3));
+  --rim-c4: var(--rim-custom, var(--rim-rainbow-c3));
+}
+html:root[data-theme][data-rim-color='rainbow-gradient'] {
+  --rim-c1: transparent;
+  --rim-c2: transparent;
+  --rim-c3: transparent;
+  --rim-c4: transparent;
+}
+
+/* 七彩环 SVG 段列层（rainbow/rainbow-gradient 两模式共用，纯色/auto 仍走 border 伪元素）：
+   常驻 DOM、CSS 单点显隐——svg 根与内部 g 双层门控，防其余模式与 border 伪元素出双环 */
+.rim-ring {
+  position: absolute;
+  inset: 0;
+  /* 独立 svg 是 replaced 元素，inset:0 不拉伸，须显式满幅 */
+  width: 100%;
+  height: 100%;
+  z-index: var(--z-ring);
+  pointer-events: none;
+  display: none;
+}
+html:root[data-theme][data-rim-color='rainbow']:not([data-ring='off']) .rim-ring {
+  display: block;
+}
+html:root[data-theme][data-rim-color='rainbow-gradient']:not([data-ring='off']) .rim-ring {
+  display: block;
+}
+/* rect 几何走 SVG2 CSS 属性：描边带 [0, w] 与 border 带重合；环宽须整数 px（同 border 环约束）；
+   段色/相位由共享模块内联注入，此处不写 stroke */
+.rim-ring rect {
+  x: calc(var(--rim-width) / 2);
+  y: calc(var(--rim-width) / 2);
+  width: calc(100% - var(--rim-width));
+  height: calc(100% - var(--rim-width));
+  rx: 0;
+  fill: none;
+  stroke-width: var(--rim-width);
+}
+/* rx 分治同 .app 圆角：透明窗（data-wintx=1）描边中线半径 = 外缘 R - 线宽/2，带 [R-w, R] 与
+   border 外缘对齐；--r-window 恒定不随 wintx 变，须选择器分治。浮窗 .detached 无圆角保持 rx:0 */
+html[data-wintx='1'] .app .rim-ring rect {
+  rx: calc(var(--r-window) - var(--rim-width) / 2);
+}
+/* 段组默认藏，按环色单点放行（两组同显=双环） */
+.rim-ring g {
+  display: none;
+}
+html:root[data-theme][data-rim-color='rainbow']:not([data-ring='off']) .rim-ring .g-rainbow {
+  display: inline;
+}
+html:root[data-theme][data-rim-color='rainbow-gradient']:not([data-ring='off']) .rim-ring .g-gradient {
+  display: inline;
+}
+/* 段列：pathLength=100 归一化坐标，dash on 段长 = 100/N（与 rim-ring-segments.ts 的 RIM_GRADIENT_LEN 对账） */
+.g-rainbow rect {
+  stroke-dasharray: 25 75;
+}
+.g-gradient rect {
+  stroke-dasharray: 2.7778 97.2222;
+}
+
+/* 流动门控（两模式各一条全前缀规则，禁选择器组/省略 rim-color 条件）：dashoffset 沿路径
+   单向推进=色段沿环带空间位移（颜料巡游），禁改回原地变色/全环同步变色 */
+html[data-rim-flow='on'][data-rim-color='rainbow'] .rim-ring .g-rainbow rect {
+  animation: rim-lap var(--rim-flow-period) linear infinite;
+}
+html[data-rim-flow='on'][data-rim-color='rainbow-gradient'] .rim-ring .g-gradient rect {
+  animation: rim-lap var(--rim-flow-period) linear infinite;
+}
+/* 终点 ≡ 起点（pathLength=100 归一化周期）无缝循环；linear 恒速无顿跳 */
+@keyframes rim-lap {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+/* 减动效：全前缀同款选择器置 none（特异性对等 + 置于动画规则后才能赢级联），回落静态段列环 */
+@media (prefers-reduced-motion: reduce) {
+  html[data-rim-flow='on'][data-rim-color='rainbow'] .rim-ring .g-rainbow rect {
+    animation: none;
+  }
+  html[data-rim-flow='on'][data-rim-color='rainbow-gradient'] .rim-ring .g-gradient rect {
+    animation: none;
+  }
 }
 
 /* 玻璃胶囊（ref2 浮岛）：厚度光受光 + 下方软投影，与内容拉开层次 */

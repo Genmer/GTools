@@ -65,6 +65,121 @@ describe('settings-store', () => {
     expect(store.settings.hotkey.darwin).toBe(DEFAULT_SETTINGS.hotkey.darwin)
   })
 
+  it('outlineEnabled 轮廓环开关：默认开，boolean 原样收录，坏类型丢弃回退现值', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.outlineEnabled).toBe(true)
+    await store.update({ outlineEnabled: false })
+    expect(store.settings.outlineEnabled).toBe(false)
+    await store.update({ outlineEnabled: 'yes' as unknown as boolean })
+    expect(store.settings.outlineEnabled).toBe(false)
+  })
+
+  it('outlineWidth 环宽：默认 3，越界夹 0-5，小数四舍五入，坏值剔除保现值', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.outlineWidth).toBe(3)
+    await store.update({ outlineWidth: 9 })
+    expect(store.settings.outlineWidth).toBe(5)
+    await store.update({ outlineWidth: -3 })
+    expect(store.settings.outlineWidth).toBe(0)
+    await store.update({ outlineWidth: 2.6 })
+    expect(store.settings.outlineWidth).toBe(3)
+    for (const bad of ['x', Number.NaN, Number.POSITIVE_INFINITY, null]) {
+      await store.update({ outlineWidth: bad as unknown as number })
+      expect(store.settings.outlineWidth).toBe(3) // 坏值剔除，保留现值
+    }
+  })
+
+  it('outlineColor 环色：默认 auto，六枚举生效，非枚举剔除保现值', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.outlineColor).toBe('auto')
+    await store.update({ outlineColor: 'rainbow' })
+    expect(store.settings.outlineColor).toBe('rainbow')
+    await store.update({ outlineColor: 'rainbow-gradient' })
+    expect(store.settings.outlineColor).toBe('rainbow-gradient')
+    await store.update({ outlineColor: 'custom' })
+    expect(store.settings.outlineColor).toBe('custom')
+    await store.update({ outlineColor: 'red' as unknown as 'auto' })
+    expect(store.settings.outlineColor).toBe('custom')
+  })
+
+  it('outlineCustomColor 自定义环色：默认 #42a5f5，3 位扩位小写化，坏 hex 剔除保现值', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.outlineCustomColor).toBe('#42a5f5')
+    await store.update({ outlineCustomColor: '#aabbcc' })
+    expect(store.settings.outlineCustomColor).toBe('#aabbcc')
+    await store.update({ outlineCustomColor: '#ABC' })
+    expect(store.settings.outlineCustomColor).toBe('#aabbcc')
+    for (const bad of ['red', '#aabb', '#aabbccd', 42, null]) {
+      await store.update({ outlineCustomColor: bad as unknown as string })
+      expect(store.settings.outlineCustomColor).toBe('#aabbcc') // 坏值剔除，保留现值
+    }
+  })
+
+  it('旧文件缺 outlineWidth/outlineColor 字段：load 后深合并为默认 3/auto', async () => {
+    const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'dark' }) })
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.outlineWidth).toBe(3)
+    expect(store.settings.outlineColor).toBe('auto')
+    expect(store.settings.outlineCustomColor).toBe('#42a5f5')
+    expect(store.settings.theme).toBe('dark')
+  })
+
+  it('outlineWidth 边界值 0/5 本身合法收录（夹取不伤端点，0=隐形）', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    await store.update({ outlineWidth: 0 })
+    expect(store.settings.outlineWidth).toBe(0)
+    await store.update({ outlineWidth: 5 })
+    expect(store.settings.outlineWidth).toBe(5)
+  })
+
+  it('轮廓环宽/色随文件持久化往返：update→flush 落盘，新 store load 回显', async () => {
+    const fs = fakeFs()
+    const a = new SettingsStore(dir, fs)
+    await a.load()
+    await a.update({ outlineEnabled: false, outlineWidth: 0, outlineColor: 'custom', outlineCustomColor: '#123456' })
+    await a.flush()
+    const onDisk = JSON.parse(fs.files.get(`${dir}/settings.json`)!)
+    expect(onDisk.outlineWidth).toBe(0)
+    expect(onDisk.outlineColor).toBe('custom')
+    expect(onDisk.outlineCustomColor).toBe('#123456')
+    const b = new SettingsStore(dir, fs)
+    await b.load()
+    expect(b.settings.outlineEnabled).toBe(false)
+    expect(b.settings.outlineWidth).toBe(0)
+    expect(b.settings.outlineColor).toBe('custom')
+    expect(b.settings.outlineCustomColor).toBe('#123456')
+  })
+
+  it('手改文件 outline 三字段坏值：load 后各自回退默认 3/auto/true，合法字段不受牵连', async () => {
+    const fs = fakeFs({
+      [`${dir}/settings.json`]: JSON.stringify({
+        theme: 'dark',
+        outlineEnabled: 'yes',
+        outlineWidth: 'fat',
+        outlineColor: 'red',
+        outlineCustomColor: 'nope'
+      })
+    })
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.outlineEnabled).toBe(true)
+    expect(store.settings.outlineWidth).toBe(3)
+    expect(store.settings.outlineColor).toBe('auto')
+    expect(store.settings.outlineCustomColor).toBe('#42a5f5')
+    expect(store.settings.theme).toBe('dark')
+  })
+
   it('glass 主题：load 原样保留（合法三态之一），transparency 取默认', async () => {
     const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'glass' }) })
     const store = new SettingsStore(dir, fs)
@@ -243,6 +358,19 @@ describe('settings-store', () => {
     expect(store.settings).toEqual(platformDefaults())
   })
 
+  it('损坏文件先 rename 留证（.corrupt-<时间戳>），残余内容不丢', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fs = fakeFs({ [`${dir}/settings.json`]: '{broken' })
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings).toEqual(platformDefaults())
+    expect(fs.renames).toHaveLength(1)
+    expect(fs.renames[0].from).toBe(`${dir}/settings.json`)
+    expect(fs.renames[0].to).toMatch(/[/\\]settings\.json\.corrupt-\d{8}-\d{6}$/)
+    expect(fs.files.get(fs.renames[0].to)).toBe('{broken') // 原残余保留在留证文件
+    errSpy.mockRestore()
+  })
+
   it('合法 JSON 但字段类型非法：坏值回退默认，不再向快捷键层传非字符串', async () => {
     const fs = fakeFs({
       [`${dir}/settings.json`]: JSON.stringify({
@@ -409,5 +537,45 @@ describe('settings-store', () => {
     await store.update({ commandHotkeys: bound })
     await store.update({ commandHotkeys: 'nope' } as unknown as Parameters<SettingsStore['update']>[0])
     expect(store.settings.commandHotkeys).toEqual(bound)
+  })
+
+  it('windowPos：合法坐标取整入库，null 清除记忆，坏值丢弃回退现值', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    await store.update({ windowPos: { x: 100.6, y: 50.4 } })
+    expect(store.settings.windowPos).toEqual({ x: 101, y: 50 })
+    await store.update({ windowPos: null })
+    expect(store.settings.windowPos).toBeNull()
+    await store.update({ windowPos: { x: 1, y: 2 } })
+    await store.update({ windowPos: { x: Number.NaN, y: 2 } as { x: number; y: number } })
+    expect(store.settings.windowPos).toEqual({ x: 1, y: 2 })
+  })
+
+  it('windowPos 随文件持久化与重载恢复', async () => {
+    const fs = fakeFs()
+    const a = new SettingsStore(dir, fs)
+    await a.load()
+    await a.update({ windowPos: { x: 300, y: 200 } })
+    await a.flush()
+    const b = new SettingsStore(dir, fs)
+    await b.load()
+    expect(b.settings.windowPos).toEqual({ x: 300, y: 200 })
+  })
+
+  it('文件里存了坏 windowPos（字符串/缺 y/非有限数/非对象）：load 回退默认 null，其余字段不受牵连', async () => {
+    const loadWith = async (windowPos: unknown): Promise<SettingsStore> => {
+      const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'dark', windowPos }) })
+      const store = new SettingsStore(dir, fs)
+      await store.load()
+      return store
+    }
+    for (const bad of ['left-top', { x: 100 }, { x: 1, y: Number.POSITIVE_INFINITY }, 42]) {
+      const store = await loadWith(bad)
+      expect(store.settings.windowPos).toBeNull()
+      expect(store.settings.theme).toBe('dark') // 坏 windowPos 不拖垮整个文件合并
+    }
+    const good = await loadWith({ x: 50.7, y: -30.2 })
+    expect(good.settings.windowPos).toEqual({ x: 51, y: -30 })
   })
 })

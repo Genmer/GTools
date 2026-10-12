@@ -69,13 +69,26 @@ describe('fetchChecked 请求出口（分类移植）', () => {
     expect(await rejectKind(fetchChecked('https://a', rt(throwErr('string boom'))))).toBe('network')
   })
 
-  it('HTTP 非 2xx：403/429/482 归配额，其余归 http', async () => {
-    for (const status of [403, 429, 482]) {
+  it('HTTP 非 2xx：401 归 auth、429/456/482 归配额、403/400 归 config、5xx 归 http', async () => {
+    const kinds: [number, string][] = [
+      [401, 'auth'],
+      [429, 'quota'],
+      [456, 'quota'],
+      [482, 'quota'],
+      [403, 'config'],
+      [400, 'config'],
+      [500, 'http'],
+      [502, 'http']
+    ]
+    for (const [status, kind] of kinds) {
       const { fn } = recordingFetch(() => httpErr(status))
-      expect(await rejectKind(fetchChecked('https://a', rt(fn)))).toBe('quota')
+      expect(await rejectKind(fetchChecked('https://a', rt(fn)))).toBe(kind)
     }
-    const { fn } = recordingFetch(() => httpErr(502))
-    expect(await rejectKind(fetchChecked('https://a', rt(fn)))).toBe('http')
+  })
+
+  it('statusKinds 特判优先于默认规则（mymemory 403→quota 的迁移点）', async () => {
+    const { fn } = recordingFetch(() => httpErr(403))
+    expect(await rejectKind(fetchChecked('https://a', rt(fn), undefined, { statusKinds: { 403: 'quota' } }))).toBe('quota')
   })
 })
 
@@ -146,7 +159,7 @@ describe('executeHttpTemplate（自定义 HTTP 接口执行器）', () => {
 
   it('密钥含 URL 保留字符时编码；from/to 原样替换', async () => {
     const { fn, calls } = recordingFetch(() => okBody('r'))
-    await executeHttpTemplate(en, rt(fn), { ...baseCfg, apiKey: 'a&b=c d' })
+    await executeHttpTemplate(en, rt(fn), { ...baseCfg, secrets: { apiKey: 'a&b=c d' } })
     expect(calls[0]?.url).toBe('https://api.example.com/t?text=hello&from=en&to=zh-CN&key=a%26b%3Dc%20d')
   })
 
@@ -154,7 +167,7 @@ describe('executeHttpTemplate（自定义 HTTP 接口执行器）', () => {
     const { fn } = recordingFetch(() => okBody('{}'))
     expect(await rejectKind(executeHttpTemplate(en, rt(fn), { ...baseCfg, endpoint: '' }))).toBe('config')
     expect(await rejectKind(executeHttpTemplate(en, rt(fn), { ...baseCfg, endpoint: 'ftp://x/{text}' }))).toBe('config')
-    expect(await rejectKind(executeHttpTemplate(en, rt(fn), { ...baseCfg, apiKey: '' }))).toBe('config')
+    expect(await rejectKind(executeHttpTemplate(en, rt(fn), { ...baseCfg, secrets: {} }))).toBe('config')
   })
 
   it('POST 请求体对引号/反斜杠/换行做 JSON 转义；Content-Type 为 application/json', async () => {
@@ -162,7 +175,7 @@ describe('executeHttpTemplate（自定义 HTTP 接口执行器）', () => {
     await executeHttpTemplate(
       { text: 'he said "hi"\\path\nnext', from: 'en', to: 'zh-CN' },
       rt(fn),
-      { ...baseCfg, endpoint: 'https://api.example.com/v2?key={key}', method: 'POST', bodyTemplate: '{"q":"{text}"}', apiKey: 'sk' }
+      { ...baseCfg, endpoint: 'https://api.example.com/v2?key={key}', method: 'POST', bodyTemplate: '{"q":"{text}"}', secrets: { apiKey: 'sk' } }
     )
     expect(calls[0]?.init?.method).toBe('POST')
     expect(calls[0]?.init?.headers).toEqual({ 'Content-Type': 'application/json' })
@@ -171,16 +184,16 @@ describe('executeHttpTemplate（自定义 HTTP 接口执行器）', () => {
 
   it('结果路径支持数组下标；非 JSON 纯文本响应 trim 后直用；数字转字符串', async () => {
     const { fn } = recordingFetch(() => okBody('{"translations":[{"text":"你好"}]}'))
-    const out = await executeHttpTemplate(en, rt(fn), { ...baseCfg, resultPath: 'translations.0.text', apiKey: 'k' })
+    const out = await executeHttpTemplate(en, rt(fn), { ...baseCfg, resultPath: 'translations.0.text', secrets: { apiKey: 'k' } })
     expect(out.resultText).toBe('你好')
     expect(out.providerId).toBe('u-1')
 
     const plain = recordingFetch(() => okBody('  plain  '))
-    const out2 = await executeHttpTemplate(en, rt(plain.fn), { ...baseCfg, endpoint: 'https://a.example.com/x', apiKey: 'k' })
+    const out2 = await executeHttpTemplate(en, rt(plain.fn), { ...baseCfg, endpoint: 'https://a.example.com/x', secrets: { apiKey: 'k' } })
     expect(out2.resultText).toBe('plain')
 
     const num = recordingFetch(() => okBody('{"code":42}'))
-    const out3 = await executeHttpTemplate(en, rt(num.fn), { ...baseCfg, endpoint: 'https://a.example.com/x', resultPath: 'code', apiKey: 'k' })
+    const out3 = await executeHttpTemplate(en, rt(num.fn), { ...baseCfg, endpoint: 'https://a.example.com/x', resultPath: 'code', secrets: { apiKey: 'k' } })
     expect(out3.resultText).toBe('42')
   })
 
@@ -204,7 +217,7 @@ const httpProviderForm = {
   name: 'DeepL',
   endpoint: 'https://x.example.com/?q={text}&key={key}',
   method: 'GET' as const,
-  newApiKey: 'mk-9'
+  newSecrets: { apiKey: 'mk-9' }
 }
 
 describe('ApiCenterService 路由与状态', () => {
@@ -231,20 +244,25 @@ describe('ApiCenterService 路由与状态', () => {
     expect(calls[0].url).toBe('https://x.example.com/?q=%E4%BD%A0%E5%A5%BD&key=mk-9')
   })
 
-  it('禁用当前 provider：status 仍指向它，translate 抛 SERVICE_UNCONFIGURED（运行态不静默回退）', async () => {
-    const { fn } = recordingFetch(() => okBody('r'))
+  it('禁用当前 provider：status 仍指向它，translate 容灾回退内置 MyMemory（B.7 新语义）', async () => {
+    const { fn, calls } = recordingFetch((url) =>
+      url.startsWith('https://api.mymemory')
+        ? okBody('{"responseData":{"translatedText":"你好"},"responseStatus":200}')
+        : okBody('r')
+    )
     const svc = makeService(fn)
     await svc.load()
     const view = await svc.upsertProvider(httpProviderForm)
     const id = view.services.translate.providers[0].id
     await svc.setActive(id)
-    await svc.upsertProvider({ ...httpProviderForm, id, enabled: false, newApiKey: undefined })
+    await svc.upsertProvider({ ...httpProviderForm, id, enabled: false, newSecrets: undefined })
     const active = svc.config.services.translate.providers.find((p) => p.id === id)
     expect(active?.enabled).toBe(false)
     expect(svc.status('translate').configured).toBe(true)
-    await expect(svc.translate({ text: 'hi', from: 'en', to: 'zh-CN' })).rejects.toMatchObject({
-      code: 'SERVICE_UNCONFIGURED'
-    })
+    // active 已禁用不进候选：防御回退内置 MyMemory 首位（非显式路径不再抛 SERVICE_UNCONFIGURED）
+    const out = await svc.translate({ text: 'hi', from: 'en', to: 'zh-CN' })
+    expect(out.providerId).toBe('builtin:mymemory')
+    expect(calls[0].url).toContain('api.mymemory.translated.net')
   })
 
   it('executor 失败包装为 SERVICE_ERROR，message 前缀分类（network/quota）', async () => {
@@ -263,16 +281,16 @@ describe('ApiCenterService 路由与状态', () => {
     expect(err2.message.startsWith('quota:')).toBe(true)
   })
 
-  it('sanitized 视图不含明文密钥（hasKey 布尔），upsert 留空 newApiKey 不覆盖已存密钥', async () => {
+  it('sanitized 视图不含明文密钥（hasSecrets 布尔映射），upsert 留空 newSecrets 不覆盖已存密钥', async () => {
     const svc = makeService(recordingFetch(() => okBody('r')).fn)
     await svc.load()
     const view = await svc.upsertProvider(httpProviderForm)
     expect(JSON.stringify(view)).not.toContain('mk-9')
-    expect(view.services.translate.providers[0].hasKey).toBe(true)
+    expect(view.services.translate.providers[0].hasSecrets).toEqual({ apiKey: true })
 
     const id = view.services.translate.providers[0].id
-    await svc.upsertProvider({ ...httpProviderForm, id, newApiKey: undefined })
-    expect(svc.config.services.translate.providers[0].apiKey).toBe('mk-9')
+    await svc.upsertProvider({ ...httpProviderForm, id, newSecrets: undefined })
+    expect(svc.config.services.translate.providers[0].secrets?.apiKey).toBe('mk-9')
   })
 
   it('setActive("") 回默认；remove 当前 provider 连同 active 重置；mymemory 类型固定 id 且不落密钥字段要求', async () => {
@@ -306,7 +324,7 @@ describe('ApiCenterService 路由与状态', () => {
     expect(notified).toBe(2)
   })
 
-  it('testProvider：draft 不落库、用 newApiKey；已存 provider 用已存密钥；默认路径测试 MyMemory', async () => {
+  it('testProvider：draft 不落库、用 newSecrets；已存 provider 用已存密钥；默认路径测试 MyMemory', async () => {
     const { fn, calls } = recordingFetch((url) =>
       url.startsWith('https://a.example.com')
         ? okBody('你好')

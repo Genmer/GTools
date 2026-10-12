@@ -24,18 +24,48 @@ export interface LoaderDeps {
   createBackendContext(pluginId: string): BackendContext
 }
 
+/** 超时兜底结果：ok=false 时 p 仍在挂起，调用方按自身语义收尾 */
+type Timed<T> = { ok: true; value: T } | { ok: false; timedOut: true }
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<Timed<T>> {
+  return new Promise<Timed<T>>((resolve, reject) => {
+    const timer = setTimeout(() => resolve({ ok: false, timedOut: true }), ms)
+    p.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve({ ok: true, value })
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+
 /**
  * 插件装配：扫描（内置清单 + 外部目录）→ 校验（不通过跳过并收集原因，不抛崩）→ 注册
  * → backend 懒加载（resident 装配即起；trigger 首次进入时起）。
+ * backend 的 init/start/stop 若挂起，按注入的超时兜底返回，宿主不陪挂。
  */
 export class PluginLoader {
   readonly registry = new PluginRegistry()
   readonly issues: LoadIssue[] = []
   readonly externalDetected: ExternalDetected[] = []
+  /** 进行中的 backend 启动：并发调用共享同一次 init/start */
+  private readonly startingBackends = new Map<string, Promise<void>>()
+  private readonly startTimeoutMs: number
+  private readonly stopTimeoutMs: number
 
-  constructor(private readonly deps: LoaderDeps) {}
+  constructor(
+    private readonly deps: LoaderDeps,
+    timeouts: { startMs?: number; stopMs?: number } = {}
+  ) {
+    this.startTimeoutMs = timeouts.startMs ?? 15_000
+    this.stopTimeoutMs = timeouts.stopMs ?? 5_000
+  }
 
-  async load(disabledIds: string[]): Promise<void> {
+  async load(disabledIds: string[], opts: { startResidentBackends?: boolean } = {}): Promise<void> {
     const disabled = new Set(disabledIds)
 
     for (const manifest of this.deps.builtinManifests) {
@@ -71,9 +101,19 @@ export class PluginLoader {
       }
     }
 
-    // resident 插件：装配完成即 init + start（常驻任务，如剪贴板历史轮询）
+    // resident 插件默认装配即起；宿主把窗口链提前时可传 false，另调 startResidentBackends 后台起
+    if (opts.startResidentBackends !== false) await this.startResidentBackends()
+  }
+
+  /** resident 插件批量启动：init/start 错误进 issues，意外异常记日志，均不阻断其余 */
+  async startResidentBackends(): Promise<void> {
     for (const entry of this.registry.enabledPlugins()) {
-      if (entry.manifest.activation === 'resident') await this.ensureBackendStarted(entry.manifest.id)
+      if (entry.manifest.activation !== 'resident') continue
+      try {
+        await this.ensureBackendStarted(entry.manifest.id)
+      } catch (err) {
+        console.error(`GTools 常驻 backend 启动失败（${entry.manifest.id}）：`, err)
+      }
     }
   }
 
@@ -108,8 +148,29 @@ export class PluginLoader {
     return results
   }
 
-  /** trigger 型带 backend（如 app-launcher）首次进入插件时由宿主调用；resident 在 load 时已起 */
+  /** trigger 型带 backend（如 app-launcher）首次进入插件时由宿主调用；resident 在 load/startResidentBackends 时已起。
+   *  in-flight 复用：指令热键与 plugin:enter 并发时共享同一次加载+init+start，防双 interval；
+   *  init/start 挂起按超时放弃等待（记 issues 并置已启动，防后续重复 start 把挂死 backend 搞得更乱） */
   async ensureBackendStarted(id: string): Promise<void> {
+    const entry = this.registry.get(id)
+    if (!entry || !entry.enabled || entry.backendStarted) return
+    const inFlight = this.startingBackends.get(id)
+    if (inFlight) return inFlight
+    const p = (async () => {
+      const r = await withTimeout(this.startBackend(id), this.startTimeoutMs)
+      if (!r.ok) {
+        const e = this.registry.get(id)
+        if (e && e.enabled && !e.backendStarted) {
+          e.backendStarted = true
+          this.issues.push({ pluginId: id, field: 'backend', message: 'backend 启动超时，已放弃等待' })
+        }
+      }
+    })().finally(() => this.startingBackends.delete(id))
+    this.startingBackends.set(id, p)
+    return p
+  }
+
+  private async startBackend(id: string): Promise<void> {
     const entry = this.registry.get(id)
     if (!entry || !entry.enabled || entry.backendStarted) return
     if (entry.backend === null) {
@@ -161,7 +222,9 @@ export class PluginLoader {
     }
     this.registry.setEnabled(id, enabled)
     if (!enabled && entry.backendStarted && entry.backend) {
-      await entry.backend.stop() // 常驻任务立即停
+      // stop 挂起不陪挂：超时后照常视作已停（backend 自行完成后无碍）
+      const r = await withTimeout(Promise.resolve(entry.backend.stop()), this.stopTimeoutMs)
+      if (!r.ok) console.error(`GTools backend 停止超时（${id}），继续按已停处理`)
       entry.backendStarted = false
     } else if (enabled && entry.manifest.activation === 'resident') {
       await this.ensureBackendStarted(id)
@@ -177,7 +240,8 @@ export class PluginLoader {
     for (const entry of this.registry.all()) {
       if (entry.backend && entry.backendStarted) {
         try {
-          await entry.backend.stop()
+          const r = await withTimeout(Promise.resolve(entry.backend.stop()), this.stopTimeoutMs)
+          if (!r.ok) console.error(`GTools backend 停止超时（${entry.manifest.id}），退出继续`)
         } catch {
           // 退出阶段尽力而为
         }
@@ -185,7 +249,8 @@ export class PluginLoader {
       }
       if (entry.backend?.dispose) {
         try {
-          await entry.backend.dispose()
+          const r = await withTimeout(Promise.resolve(entry.backend.dispose()), this.stopTimeoutMs)
+          if (!r.ok) console.error(`GTools backend dispose 超时（${entry.manifest.id}），退出继续`)
         } catch {
           // 同上
         }

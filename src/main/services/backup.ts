@@ -107,16 +107,58 @@ export interface SerializeBackupInput {
 }
 
 export function serializeBackup(input: SerializeBackupInput): BackupFile {
+  // 无深拷贝：导出链路唯一消费方 tokenizePathValues 是无副作用的深重建，再 clone 一份是纯浪费
   return {
     format: BACKUP_FORMAT,
     version: BACKUP_VERSION,
     createdAt: (input.now ?? new Date()).toISOString(),
     sourcePlatform: input.platform,
     appVersion: input.appVersion,
-    settings: structuredClone(input.settings),
-    pluginStorage: structuredClone(input.pluginStorage),
-    apiServices: structuredClone(input.apiServices)
+    settings: input.settings,
+    pluginStorage: input.pluginStorage,
+    apiServices: input.apiServices
   }
+}
+
+/** 分块序列化备份：pluginStorage 逐插件 stringify，每 yieldEvery 个让出事件循环一次，
+ *  避免大备份的同步 stringify 独占主进程数百 ms（期间 IPC/热键全停摆）。结果与
+ *  JSON.stringify(backup, null, 2) 逐字节一致（黄金值单测锁定） */
+export async function stringifyBackupChunked(backup: BackupFile, opts: { yieldEvery?: number } = {}): Promise<string> {
+  const yieldEvery = opts.yieldEvery ?? 8
+  const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+  // 嵌套产物首行接在 "key": 之后，其余行整体右移 spaces 才与整体 stringify 的缩进一致
+  const reindent = (json: string, spaces: number): string =>
+    json
+      .split('\n')
+      .map((line, i) => (i === 0 ? line : ' '.repeat(spaces) + line))
+      .join('\n')
+
+  const parts: string[] = [
+    `  "format": ${JSON.stringify(backup.format)}`,
+    `  "version": ${backup.version}`,
+    `  "createdAt": ${JSON.stringify(backup.createdAt)}`,
+    `  "sourcePlatform": ${JSON.stringify(backup.sourcePlatform)}`,
+    `  "appVersion": ${JSON.stringify(backup.appVersion)}`,
+    `  "settings": ${reindent(JSON.stringify(backup.settings, null, 2), 2)}`
+  ]
+  const pids = Object.keys(backup.pluginStorage)
+  if (pids.length === 0) {
+    parts.push('  "pluginStorage": {}')
+  } else {
+    const storageLines: string[] = ['  "pluginStorage": {']
+    for (let i = 0; i < pids.length; i++) {
+      const pid = pids[i]
+      const kvJson = JSON.stringify(backup.pluginStorage[pid], null, 2)
+      storageLines.push(`    ${JSON.stringify(pid)}: ${reindent(kvJson, 4)}${i < pids.length - 1 ? ',' : ''}`)
+      if ((i + 1) % yieldEvery === 0) await yieldToEventLoop()
+    }
+    storageLines.push('  }')
+    parts.push(storageLines.join('\n'))
+  }
+  if (backup.apiServices !== undefined) {
+    parts.push(`  "apiServices": ${reindent(JSON.stringify(backup.apiServices, null, 2), 2)}`)
+  }
+  return '{\n' + parts.join(',\n') + '\n}'
 }
 
 export type ParsedBackup =

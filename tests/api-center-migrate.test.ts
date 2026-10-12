@@ -27,7 +27,7 @@ describe('legacyTranslateToProvider（旧插件 storage `settings` 键 → provi
       name: '自定义 HTTP 接口（旧配置迁移）',
       enabled: true,
       endpoint: 'https://x.example.com/?q={text}&key={key}', // 首尾空白被 trim
-      apiKey: 'sk-old',
+      secrets: { apiKey: 'sk-old' },
       method: 'POST',
       bodyTemplate: '{"q":"{text}"}',
       resultPath: 'data.0.t'
@@ -68,7 +68,7 @@ describe('adoptMigratedProvider（启动接线行为）', () => {
     expect(provider).not.toBeNull()
     await svc.adoptMigratedProvider(provider as NonNullable<typeof provider>)
     expect(svc.status('translate')).toMatchObject({ configured: true, activeProviderId: 'u-deadbeef' })
-    expect(svc.config.services.translate.providers[0].apiKey).toBe('sk-old')
+    expect(svc.config.services.translate.providers[0].secrets?.apiKey).toBe('sk-old')
   })
 })
 
