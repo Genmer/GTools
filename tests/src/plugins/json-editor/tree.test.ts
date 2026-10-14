@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseJson } from '../../../../src/plugins/json-editor/logic/json'
+import { parseJson, windowRange } from '../../../../src/plugins/json-editor/logic/json'
 import {
   TREE_ROW_HEIGHT,
   collectExpandAll,
@@ -9,7 +9,6 @@ import {
   nodeId,
   previewOf,
   valueAt,
-  windowRange
 } from '../../../../src/plugins/json-editor/logic/tree'
 import { SAMPLE_JSON } from '../../../../src/plugins/json-editor/logic/sample'
 
@@ -131,18 +130,5 @@ describe('collectExpandAll', () => {
     expect(overCap).toBe(true)
     expect(total).toBe(60001)
     expect(ids.size).toBe(0)
-  })
-})
-
-describe('windowRange', () => {
-  it('常规窗口含 overscan 缓冲', () => {
-    expect(windowRange(1000, 0, 480, TREE_ROW_HEIGHT)).toEqual({ start: 0, end: 28 })
-    expect(windowRange(1000, 24 * 100, 480, TREE_ROW_HEIGHT)).toEqual({ start: 92, end: 128 })
-  })
-
-  it('边界：滚过头/零视口/空列表钳制', () => {
-    expect(windowRange(10, 99999, 480, TREE_ROW_HEIGHT)).toEqual({ start: 10, end: 10 })
-    expect(windowRange(0, 100, 480, TREE_ROW_HEIGHT)).toEqual({ start: 0, end: 0 })
-    expect(windowRange(100, -5, 0, TREE_ROW_HEIGHT)).toEqual({ start: 0, end: 8 })
   })
 })

@@ -273,3 +273,18 @@ export function reformat(text: string, indent: number): ReformatResult {
   const r = parseJson(text)
   return r.ok ? { ok: true, text: JSON.stringify(r.value, null, indent) } : r
 }
+
+/** 虚拟滚动可视窗口：start/end 为行下标区间 [start, end)，含 overscan 缓冲（行号槽用） */
+export function windowRange(
+  totalRows: number,
+  scrollTop: number,
+  viewportHeight: number,
+  rowHeight: number,
+  overscan = 8
+): { start: number; end: number } {
+  const first = Math.floor(Math.max(0, scrollTop) / rowHeight)
+  const visible = Math.ceil(Math.max(0, viewportHeight) / rowHeight)
+  const start = Math.min(totalRows, Math.max(0, first - overscan))
+  const end = Math.min(totalRows, first + visible + overscan)
+  return { start, end: Math.max(start, end) }
+}

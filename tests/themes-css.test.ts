@@ -181,9 +181,13 @@ describe('themes.css：七彩环 SVG 段列层', () => {
     expect(rect).toContain('stroke-width: var(--rim-width)')
     expect(rect).toContain('fill: none')
     expect(rect).not.toMatch(/stroke\s*:/)
-    const rxOverride = blockOf("html[data-wintx='1'] .app .rim-ring rect")
+    const rxOverride = blockOf("html[data-wintx='1'] .detached .rim-ring rect")
     expect(rxOverride).not.toBe('')
     expect(rxOverride).toContain('rx: calc(var(--r-window) - var(--rim-width) / 2)')
+    // 同一规则并列覆盖主窗 .app 与独立窗 .detached（独立窗漏列=啃角回归）
+    expect(bare).toContain(
+      "html[data-wintx='1'] .app .rim-ring rect,\nhtml[data-wintx='1'] .detached .rim-ring rect"
+    )
   })
 
   it('段列 dash 字面量：rainbow 25 75、gradient 2.7778 97.2222（2.7778 与 rim-ring-segments.ts 的 100/36 对账）', () => {

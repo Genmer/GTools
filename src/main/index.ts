@@ -26,7 +26,34 @@ import {
 import { DetachedWindowManager } from './detached-window-manager'
 import { registerHotkey, unregisterAllHotkeys } from './shortcut'
 import { createTray } from './tray'
+import { applyAppLogoSkin } from './logo-skin'
 import { syncLoginItem } from './login-item'
+import { AppLog } from './services/app-log'
+
+// 日志缓冲建在模块顶层并即刻接管 console：bootstrap 早期输出也要能进设置-日志查看器；
+// 原始终端输出保留（先调原方法再入缓冲），进程级兜底异常也入缓冲
+const appLog = new AppLog()
+appLog.push('info', 'main', `GTools v${app.getVersion()} 启动（${process.platform}）`)
+
+const wrapConsole = (method: 'log' | 'info' | 'warn' | 'error', level: 'info' | 'warn' | 'error'): void => {
+  const original = console[method].bind(console)
+  console[method] = (...args: unknown[]) => {
+    original(...args)
+    appLog.push(level, 'main', args.map((a) => (a instanceof Error ? `${a.name}: ${a.message}` : String(a))).join(' '))
+  }
+}
+wrapConsole('log', 'info')
+wrapConsole('info', 'info')
+wrapConsole('warn', 'warn')
+wrapConsole('error', 'error')
+
+process.on('uncaughtException', (err) => {
+  appLog.push('error', 'main', `uncaughtException ${err.name}: ${err.message}\n${err.stack ?? ''}`)
+})
+process.on('unhandledRejection', (reason) => {
+  const text = reason instanceof Error ? `${reason.name}: ${reason.message}\n${reason.stack ?? ''}` : String(reason)
+  appLog.push('error', 'main', `unhandledRejection ${text}`)
+})
 
 // 构建期展开为实际存在的插件目录：移除 src/plugins/<id>/ 即从产物消失，宿主零改动
 const manifestModules = import.meta.glob<{ default: PluginManifest }>('../plugins/*/manifest.ts', { eager: true })
@@ -81,7 +108,7 @@ async function bootstrap(): Promise<void> {
   })
   servicesRef = services
 
-  // 宿主空态应用栏：首次调用 apps:list 才扫描（懒加载，不占启动链）；win32 返回空列表
+  // 宿主空态应用栏：首次调用 apps:list 才扫描（懒加载，不占启动链）；win32 扫开始菜单 .lnk
   const nativeApps = new NativeAppsService({
     platform: process.platform,
     homeDir: homedir(),
@@ -108,6 +135,7 @@ async function bootstrap(): Promise<void> {
   })
   // 先镜像主题/透明再建窗（透明标志/材质依赖当前设置），建窗后自身完成材质应用
   applyThemeToWindow(settingsStore.settings.theme, settingsStore.settings.transparency)
+  applyAppLogoSkin(settingsStore.settings.appLogoSkin)
   createSearchWindow()
 
   // 插件独立窗口管理器（每插件单实例，禁用插件/退出时统一回收）
@@ -118,10 +146,13 @@ async function bootstrap(): Promise<void> {
   })
   detachedRef = detached
 
-  createTray(() => {
-    showSearchWindow()
-    getSearchWindow()?.webContents.send('host:open-settings')
-  })
+  createTray(
+    () => {
+      showSearchWindow()
+      getSearchWindow()?.webContents.send('host:open-settings')
+    },
+    settingsStore.settings.appLogoSkin
+  )
 
   const hotkey = settingsStore.settings.hotkey[process.platform === 'darwin' ? 'darwin' : 'win32']
   const r = registerHotkey(hotkey, toggleSearchWindow)
@@ -129,7 +160,7 @@ async function bootstrap(): Promise<void> {
     new Notification({ title: 'GTools', body: r.error ?? '快捷键注册失败' }).show()
   }
 
-  setupIpc({ loader, settings: settingsStore, services, apiCenter, nativeApps, detached, onHotkeyToggle: toggleSearchWindow })
+  setupIpc({ loader, settings: settingsStore, services, apiCenter, nativeApps, detached, appLog, onHotkeyToggle: toggleSearchWindow })
 
   // 登录项失败不阻断主功能（区别于快捷键失败弹通知），只留日志
   try {

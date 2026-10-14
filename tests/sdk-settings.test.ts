@@ -11,6 +11,8 @@ import {
   rimFlowPeriodSeconds,
   sanitizeOutlineCustomColor,
   sanitizeOutlineFlowSpeed,
+  sanitizeAppLogSkin,
+  sanitizeAppLogoSkin,
   sanitizeOutlineWidth
 } from '../sdk/settings'
 
@@ -139,5 +141,33 @@ describe('sdk/settings：流动速度 sanitizeOutlineFlowSpeed 与时长 rimFlow
     expect(rimFlowPeriodSeconds(0)).toBe(36)
     expect(rimFlowPeriodSeconds(-5)).toBe(36)
     expect(rimFlowPeriodSeconds(1e9)).toBe(3.6)
+  })
+})
+
+describe('sdk/settings：应用日志底色 sanitizeAppLogSkin', () => {
+  it('默认 appLogSkin=black', () => {
+    expect(DEFAULT_SETTINGS.appLogSkin).toBe('black')
+  })
+
+  it('只放行 black/white，其余返回 null', () => {
+    expect(sanitizeAppLogSkin('black')).toBe('black')
+    expect(sanitizeAppLogSkin('white')).toBe('white')
+    for (const bad of ['', 'dark', 'Black', 1, null, undefined, {}, []]) {
+      expect(sanitizeAppLogSkin(bad)).toBeNull()
+    }
+  })
+})
+
+describe('sdk/settings：应用 logo 底色 sanitizeAppLogoSkin', () => {
+  it('默认 appLogoSkin=black', () => {
+    expect(DEFAULT_SETTINGS.appLogoSkin).toBe('black')
+  })
+
+  it('只放行 black/white，其余返回 null', () => {
+    expect(sanitizeAppLogoSkin('black')).toBe('black')
+    expect(sanitizeAppLogoSkin('white')).toBe('white')
+    for (const bad of ['', 'dark', 'White', 1, null, undefined, {}, []]) {
+      expect(sanitizeAppLogoSkin(bad)).toBeNull()
+    }
   })
 })

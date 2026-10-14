@@ -12,6 +12,8 @@ asar: true
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/
 mac:
+  # 本机无开发者证书，ad-hoc 签名；完全未签名的 app 会被 SMAppService 拒绝，登录项静默失效
+  identity: null
   category: public.app-category.productivity
   icon: build/icon.icns
   target:

@@ -5,9 +5,10 @@ import { dirname, join, sep as pathSep } from 'node:path'
 import type { PluginManifest } from '@sdk/manifest'
 import type { ApiCallResult } from '@sdk/api'
 import type { PluginLoader } from '../plugin-loader'
-import type { SettingsStore, AppSettings, ThemeName, CommandHotkey, OutlineColor } from '../settings-store'
+import type { SettingsStore, AppSettings, ThemeName, CommandHotkey, OutlineColor, AppLogSkin, AppLogoSkin } from '../settings-store'
 import type { ServiceBag } from './dispatch'
 import { dispatchApi } from './dispatch'
+import { isAppLogLevel, type AppLog } from './app-log'
 import { PROVIDER_PRESETS, getPreset } from './api-center'
 import type { ApiCenterService, ProviderForm, ProviderType } from './api-center'
 import type { NativeAppsService } from './native-apps'
@@ -19,12 +20,15 @@ import {
   getSearchWindow,
   hideSearchWindow,
   restoreSearchWindowSize,
+  resizeSearchWindowBy,
   setSearchWindowHeight,
   setSearchWindowResizable,
   showSearchWindow,
   suspendBlurHide
 } from '../window'
 import { rebindHotkey, suspendHotkeys, resumeHotkeys, armHotkeyProbe, disarmHotkeyProbe, syncCommandHotkeys, type CommandHotkeySyncResult } from '../shortcut'
+import { applyAppLogoSkin } from '../logo-skin'
+import { applyTraySkin } from '../tray'
 import { createHotkeyCapture, type HotkeyCaptureHandler } from '../hotkey-capture'
 import { syncLoginItem } from '../login-item'
 import {
@@ -145,6 +149,7 @@ export function setupIpc(deps: {
   apiCenter: ApiCenterService
   nativeApps: NativeAppsService
   detached: DetachedWindowManager
+  appLog: AppLog
   onHotkeyToggle: () => void
 }): void {
   const { loader, settings, services, apiCenter } = deps
@@ -345,6 +350,8 @@ export function setupIpc(deps: {
       outlineColor: backup.settings.outlineColor,
       outlineCustomColor: backup.settings.outlineCustomColor,
       outlineFlowSpeed: backup.settings.outlineFlowSpeed,
+      appLogSkin: backup.settings.appLogSkin,
+      appLogoSkin: backup.settings.appLogoSkin,
       hotkey: backup.settings.hotkey,
       disabledPlugins: nextDisabled
     })
@@ -422,6 +429,8 @@ export function setupIpc(deps: {
             outlineColor?: OutlineColor
             outlineCustomColor?: string
             outlineFlowSpeed?: number
+            appLogSkin?: AppLogSkin
+            appLogoSkin?: AppLogoSkin
             launchAtLogin?: boolean
             clipboardSuggest?: boolean
             hideOnBlur?: boolean
@@ -469,6 +478,10 @@ export function setupIpc(deps: {
               customColor: next.outlineCustomColor,
               flowSpeed: next.outlineFlowSpeed
             })
+          }
+          if (p.appLogoSkin) {
+            applyAppLogoSkin(next.appLogoSkin)
+            applyTraySkin(next.appLogoSkin)
           }
           if (typeof p.hideOnBlur === 'boolean') {
             applyHideOnBlur(next.hideOnBlur)
@@ -530,6 +543,36 @@ export function setupIpc(deps: {
           const mh = typeof p.minHeight === 'number' ? p.minHeight : undefined
           setSearchWindowResizable(p.resizable, mw, mh)
           if (!p.resizable) restoreSearchWindowSize()
+          return { ok: true, data: null }
+        }
+        case 'window:resize-by': {
+          // 插件态自绘手柄的增量拉伸；单次增量夹 ±100 防坏值跳窗
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const p = (req.payload ?? {}) as { dw?: unknown; dh?: unknown }
+          const dw = Number(p.dw)
+          const dh = Number(p.dh)
+          if (!Number.isFinite(dw) || !Number.isFinite(dh)) return { ok: false, error: 'dw/dh 必须是数字' }
+          resizeSearchWindowBy(Math.max(-100, Math.min(100, dw)), Math.max(-100, Math.min(100, dh)))
+          return { ok: true, data: null }
+        }
+        case 'app-log:list': {
+          // 日志查看器拉取：seq 增量语义见 AppLog.entries；主窗外的独立插件窗只读不许清/推
+          const sinceRaw = (req.payload as { since?: unknown } | null)?.since
+          const since = typeof sinceRaw === 'number' && Number.isFinite(sinceRaw) && sinceRaw >= 0 ? Math.floor(sinceRaw) : 0
+          return { ok: true, data: deps.appLog.entries(since) }
+        }
+        case 'app-log:clear': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          deps.appLog.clear()
+          return { ok: true, data: null }
+        }
+        case 'app-log:push': {
+          // 渲染层 error/unhandledrejection 尽力上报（渲染进程自身不保证存活，主进程兜底可丢）
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const p = (req.payload ?? {}) as { level?: unknown; text?: unknown }
+          const level = isAppLogLevel(p.level) ? p.level : 'info'
+          const text = typeof p.text === 'string' ? p.text : ''
+          if (text !== '') deps.appLog.push(level, 'renderer', text)
           return { ok: true, data: null }
         }
         case 'window:detach-plugin': {

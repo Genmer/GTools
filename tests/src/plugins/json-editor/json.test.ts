@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { countLines, parseJson, posToLineCol, reformat } from '../../../../src/plugins/json-editor/logic/json'
+import { countLines, parseJson, posToLineCol, reformat, windowRange } from '../../../../src/plugins/json-editor/logic/json'
 import { SAMPLE_JSON } from '../../../../src/plugins/json-editor/logic/sample'
 
 function errOf(text: string): { message: string; line: number; column: number; offset: number } {
@@ -148,5 +148,18 @@ describe('reformat', () => {
     const r = reformat('{"a":,}', 2)
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.error).toEqual(errOf('{"a":,}'))
+  })
+})
+
+describe('windowRange', () => {
+  it('常规窗口含 overscan 缓冲', () => {
+    expect(windowRange(1000, 0, 480, 24)).toEqual({ start: 0, end: 28 })
+    expect(windowRange(1000, 24 * 100, 480, 24)).toEqual({ start: 92, end: 128 })
+  })
+
+  it('边界：滚过头/零视口/空列表钳制', () => {
+    expect(windowRange(10, 99999, 480, 24)).toEqual({ start: 10, end: 10 })
+    expect(windowRange(0, 100, 480, 24)).toEqual({ start: 0, end: 0 })
+    expect(windowRange(100, -5, 0, 24)).toEqual({ start: 0, end: 8 })
   })
 })

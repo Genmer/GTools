@@ -1,11 +1,15 @@
-export type { ThemeName, AppSettings, CommandHotkey, TransparencySettings, OutlineColor } from '@sdk/settings'
+export type { ThemeName, AppSettings, CommandHotkey, TransparencySettings, OutlineColor, AppLogSkin, AppLogoSkin } from '@sdk/settings'
 import {
   DEFAULT_SETTINGS,
   isOutlineColor,
+  sanitizeAppLogSkin,
+  sanitizeAppLogoSkin,
   sanitizeOutlineCustomColor,
   sanitizeOutlineFlowSpeed,
   sanitizeOutlineWidth,
   type AppSettings,
+  type AppLogSkin as AppLogSkinType,
+  type AppLogoSkin as AppLogoSkinType,
   type CommandHotkey,
   type OutlineColor,
   type ThemeName,
@@ -31,6 +35,8 @@ type SettingsPatch = {
   outlineColor?: OutlineColor
   outlineCustomColor?: string
   outlineFlowSpeed?: number
+  appLogSkin?: AppLogSkinType
+  appLogoSkin?: AppLogoSkinType
   disabledPlugins?: string[]
   launchAtLogin?: boolean
   clipboardSuggest?: boolean
@@ -59,6 +65,8 @@ function merge(base: AppSettings, patch: SettingsPatch): AppSettings {
     outlineColor: patch.outlineColor ?? base.outlineColor,
     outlineCustomColor: patch.outlineCustomColor ?? base.outlineCustomColor,
     outlineFlowSpeed: patch.outlineFlowSpeed ?? base.outlineFlowSpeed,
+    appLogSkin: patch.appLogSkin ?? base.appLogSkin,
+    appLogoSkin: patch.appLogoSkin ?? base.appLogoSkin,
     disabledPlugins: patch.disabledPlugins ?? base.disabledPlugins,
     launchAtLogin: patch.launchAtLogin ?? base.launchAtLogin,
     clipboardSuggest: patch.clipboardSuggest ?? base.clipboardSuggest,
@@ -121,6 +129,10 @@ function sanitizePatch(raw: unknown): SettingsPatch {
   if (outlineCustomColor !== null) patch.outlineCustomColor = outlineCustomColor
   const outlineFlowSpeed = sanitizeOutlineFlowSpeed(p.outlineFlowSpeed)
   if (outlineFlowSpeed !== null) patch.outlineFlowSpeed = outlineFlowSpeed
+  const appLogSkin = sanitizeAppLogSkin(p.appLogSkin)
+  if (appLogSkin !== null) patch.appLogSkin = appLogSkin
+  const appLogoSkin = sanitizeAppLogoSkin(p.appLogoSkin)
+  if (appLogoSkin !== null) patch.appLogoSkin = appLogoSkin
   if (typeof p.clipboardSuggest === 'boolean') patch.clipboardSuggest = p.clipboardSuggest
   if (typeof p.hideOnBlur === 'boolean') patch.hideOnBlur = p.hideOnBlur
   // 数组即收（含空数组 = 清空全部指令绑定）；非数组整体丢弃由 merge 回退现值

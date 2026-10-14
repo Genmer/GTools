@@ -42,6 +42,10 @@ export interface AppSettings {
   outlineCustomColor: string
   /** 七彩/七彩渐变的流动速度 1-10 档（环带巡游一圈时长 = 36/s 秒，3 档 = 12s）；仅 rainbow 两档消费；视觉偏好，随备份迁移 */
   outlineFlowSpeed: number
+  /** 应用日志查看器底色（设置-日志）；视觉偏好，随备份迁移 */
+  appLogSkin: AppLogSkin
+  /** 应用 logo 底色（设置-外观）：运行时切换 win32 窗口/任务栏图标与 darwin Dock 图标，安装包图标为构建期固定；视觉偏好，随备份迁移 */
+  appLogoSkin: AppLogoSkin
   disabledPlugins: string[]
   /** 机器相关设置：随备份迁移无意义，导入恢复不覆盖（见 ipc.ts 备份恢复的显式字段枚举） */
   launchAtLogin: boolean
@@ -64,6 +68,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   outlineColor: 'auto',
   outlineCustomColor: OUTLINE_CUSTOM_COLOR_DEFAULT,
   outlineFlowSpeed: OUTLINE_FLOW_SPEED_DEFAULT,
+  appLogSkin: 'black',
+  appLogoSkin: 'black',
   disabledPlugins: [],
   launchAtLogin: false,
   clipboardSuggest: true,
@@ -90,6 +96,20 @@ export function sanitizeOutlineCustomColor(v: unknown): string | null {
     ? m[1][0] + m[1][0] + m[1][1] + m[1][1] + m[1][2] + m[1][2]
     : m[1]
   return `#${hex.toLowerCase()}`
+}
+
+/** 应用日志查看器底色：仅 black/white，其余返回 null 由调用方剔除保现值 */
+export type AppLogSkin = 'black' | 'white'
+
+export function sanitizeAppLogSkin(v: unknown): AppLogSkin | null {
+  return v === 'black' || v === 'white' ? v : null
+}
+
+/** 应用 logo 底色：仅 black/white，其余返回 null 由调用方剔除保现值 */
+export type AppLogoSkin = 'black' | 'white'
+
+export function sanitizeAppLogoSkin(v: unknown): AppLogoSkin | null {
+  return v === 'black' || v === 'white' ? v : null
 }
 
 /** 非有限数返回 null（调用方剔除回退现值），否则 round 后夹 MIN..MAX */

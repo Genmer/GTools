@@ -3,7 +3,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { ThemeName, TransparencySettings } from './settings-store'
 import { DEFAULT_TRANSPARENCY } from '@sdk/settings'
 import type { DetachedWindowLike, DetachedWindowOptions } from './detached-window-manager'
-import { decideShowPosition } from './window-position'
+import { decideShowPosition, applyResizeDelta } from './window-position'
+import { logoIconPath } from './logo-skin'
 
 // 内容口径 800×560 为四期 uTools 视觉规范（docs/design/ui-style-guide.md §1.1）。
 // 透明窗的 OS 窗口比内容大一圈透明边距，外圈投影落进边距才可见（Electron 透明+无边框窗
@@ -98,6 +99,7 @@ export function createSearchWindow(): BrowserWindow {
   const { workArea } = screen.getPrimaryDisplay()
   const transparent = wantsTransparentFlag(currentTransparency, currentTheme)
   // 透明窗加投影边距；不透明窗维持内容尺寸（uiFixes：外圈投影为透明窗专属，不透明窗零改动）
+  const win32Icon = process.platform === 'win32' ? logoIconPath() : null
   const width = transparent ? WINDOW_W : CONTENT_W
   const height = transparent ? WINDOW_H : CONTENT_H
   win = new BrowserWindow({
@@ -114,6 +116,8 @@ export function createSearchWindow(): BrowserWindow {
     // 透明窗只留 CSS 阴影：macOS 原生影按含阴影 alpha 的整窗矩形生成，与 CSS 影叠加成又硬又大的方框
     hasShadow: !transparent,
     backgroundColor: '#00000000',
+    // win32 任务栏/窗口图标随应用 logo 底色（设置-外观）；darwin 图标由 applyAppLogoSkin 写 Dock
+    ...(win32Icon ? { icon: win32Icon } : {}),
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -206,6 +210,11 @@ export function showSearchWindow(): void {
     lastProgrammaticPos = target
     win.setPosition(target.x, target.y, false)
   }
+  // macOS 全屏覆盖：普通 show 会切走前台 app 的全屏空间（回桌面）；先挂「全工作区可见
+  // （含全屏空间）」再显（uTools 同款手法），隐藏时复位防窗口常驻各空间
+  if (process.platform === 'darwin') {
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  }
   win.show()
   win.focus()
   lastShownAt = Date.now()
@@ -221,6 +230,9 @@ export function hideSearchWindow(): void {
     persistWindowPos?.(rememberedPos)
   }
   win?.hide()
+  if (process.platform === 'darwin' && win && !win.isDestroyed()) {
+    win.setVisibleOnAllWorkspaces(false)
+  }
 }
 
 /** 外壳按态请求窗口高度（空态应用网格加高，ui-style-guide §1.5）：锚定左上角只改高，超出工作区由系统夹紧。
@@ -243,6 +255,22 @@ export function setSearchWindowResizable(resizable: boolean, minWidth?: number, 
   if (resizable && typeof minWidth === 'number' && typeof minHeight === 'number') {
     win.setMinimumSize(minWidth, minHeight)
   }
+}
+
+/** 插件态自绘手柄拉伸（透明窗 OS 拖缘在隐形外缘上抓不到）：锚定左上角增量改窗，夹最小尺寸与工作区 */
+export function resizeSearchWindowBy(dw: number, dh: number): void {
+  if (!win) return
+  const [minW, minH] = win.getMinimumSize()
+  const area = screen.getDisplayMatching(win.getBounds()).workArea
+  const size = applyResizeDelta(
+    { width: win.getBounds().width, height: win.getBounds().height },
+    { width: minW > 0 ? minW : 520, height: minH > 0 ? minH : 360 },
+    { width: area.width, height: area.height },
+    dw,
+    dh
+  )
+  const [x, y] = win.getPosition()
+  win.setBounds({ x, y, ...size })
 }
 
 /** 退出插件态复原固定尺寸并锚定左上角（高度回内容 560 的窗口口径，空态/结果态由渲染层再报高） */
@@ -328,6 +356,7 @@ function recreateSearchWindow(): void {
 /** 独立插件窗口：titleBarStyle hidden 保留 macOS 交通灯（渲染层顶栏做 70px 避让），安全配置与主窗一致；透明+无模糊模式创建即带透明标志 */
 export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindowLike {
   const transparent = wantsTransparentFlag(currentTransparency, currentTheme)
+  const win32Icon = process.platform === 'win32' ? logoIconPath() : null
   const w = new BrowserWindow({
     width: opts.width,
     height: opts.height,
@@ -341,6 +370,7 @@ export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindo
     // 与主窗同因：透明窗关原生影，防原生整窗矩形影与 CSS 影叠加出方框
     hasShadow: !transparent,
     backgroundColor: '#00000000',
+    ...(win32Icon ? { icon: win32Icon } : {}),
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -351,6 +381,10 @@ export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindo
   })
   if (wantsTransparentFlag(currentTransparency, currentTheme)) transparentWindows.add(w)
   if (opts.alwaysOnTop) w.setAlwaysOnTop(true, 'floating')
+  // macOS 全屏覆盖：与主窗同法，分离窗常驻全工作区可见（含全屏空间），不切走前台 app 全屏
+  if (process.platform === 'darwin') {
+    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  }
   applyThemeToBrowserWindow(w, currentTheme)
   bindTransparentFlagSync(w)
   return {

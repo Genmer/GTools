@@ -42,7 +42,7 @@ export ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-b
 
 | 插件 | 关键字 | 说明 |
 |---|---|---|
-| **JSON 编辑器** | `json` / `格式化` | JSON 校验格式化、五彩简约高亮、折叠树视图、节点复制 |
+| **JSON 编辑器** | `json` / `格式化` | JSON 校验格式化、五彩简约高亮、全页树视图、内容查找、错误定位 |
 | **计算稿纸** | `calc` / `jsq` / `计算` | 多行连续计算、变量赋值、行内注释、实时汇总 |
 | **聚合翻译** | `fy` / `translate` / `翻译` | 划词翻译、多引擎对比、中英互译 |
 | **剪贴板历史** | `clip` / `剪贴板` | 文本与图片历史、收藏置顶、快捷搜索与粘贴 |

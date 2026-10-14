@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PluginManifest } from '@sdk/manifest'
 import type { AppSettings, CommandHotkey, OutlineColor, ThemeName, TransparencySettings } from '@sdk/settings'
 import { OUTLINE_CUSTOM_COLOR_DEFAULT } from '@sdk/settings'
@@ -15,7 +15,7 @@ const props = defineProps<{ settings: AppSettings | null; plugins: { manifest: P
 const opError = ref<string | null>(null)
 
 // ---- 分区导航（外壳 UI 状态走 localStorage，照 App.vue RECENT_KEY 模式，零 IPC）----
-type SectionId = 'general' | 'appearance' | 'hotkeys' | 'plugins' | 'data' | 'about'
+type SectionId = 'general' | 'appearance' | 'hotkeys' | 'plugins' | 'data' | 'logs' | 'about'
 const SECTION_KEY = 'gtools:settings-section'
 const sections: { id: SectionId; title: string; icon: string }[] = [
   { id: 'general', title: '通用', icon: '⚙️' },
@@ -23,6 +23,7 @@ const sections: { id: SectionId; title: string; icon: string }[] = [
   { id: 'hotkeys', title: '快捷键', icon: '⌨️' },
   { id: 'plugins', title: '插件', icon: '🧩' },
   { id: 'data', title: '数据与服务', icon: '🗂️' },
+  { id: 'logs', title: '日志', icon: '📋' },
   { id: 'about', title: '关于', icon: 'ℹ️' }
 ]
 
@@ -278,6 +279,78 @@ async function importBackup(): Promise<void> {
     backupBusy.value = false
   }
 }
+// ---- 应用日志 ----
+// 条目结构与主进程 AppLog.entries 返回一致；底色皮肤走 appLogSkin 设置（themes.css 按_data-skin 定义配色）
+interface LogEntry {
+  t: number
+  level: 'info' | 'warn' | 'error'
+  source: 'main' | 'renderer'
+  text: string
+}
+const logItems = ref<LogEntry[]>([])
+const logSeq = ref(0)
+const logAutoScroll = ref(true)
+const logConsoleEl = ref<HTMLElement | null>(null)
+const logSkin = computed(() => props.settings?.appLogSkin ?? 'black')
+
+async function loadLogs(): Promise<void> {
+  const r = await window.gtools.host('app-log:list', { since: logSeq.value })
+  if (!r.ok) return
+  const d = r.data as { seq: number; items: LogEntry[] }
+  if (d.items.length > 0) logItems.value = logItems.value.concat(d.items).slice(-500)
+  logSeq.value = d.seq
+  if (logAutoScroll.value) void nextTick(() => logConsoleEl.value?.scrollTo({ top: logConsoleEl.value.scrollHeight }))
+}
+
+async function clearLogs(): Promise<void> {
+  const r = await window.gtools.host('app-log:clear')
+  if (!r.ok) {
+    opError.value = r.error ?? '清空失败'
+    return
+  }
+  logItems.value = []
+}
+
+async function setLogSkin(skin: 'black' | 'white'): Promise<void> {
+  const r = await window.gtools.host('settings:set', { appLogSkin: skin })
+  if (!r.ok) opError.value = r.error ?? '保存失败'
+}
+
+const logoSkin = computed(() => props.settings?.appLogoSkin ?? 'black')
+
+async function setLogoSkin(skin: 'black' | 'white'): Promise<void> {
+  const r = await window.gtools.host('settings:set', { appLogoSkin: skin })
+  if (!r.ok) opError.value = r.error ?? '保存失败'
+}
+
+function fmtLogTime(t: number): string {
+  return new Date(t).toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+async function copyLogs(): Promise<void> {
+  if (logItems.value.length === 0) return
+  const text = logItems.value.map((l) => `[${fmtLogTime(l.t)}] [${l.level}] [${l.source}] ${l.text}`).join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    opError.value = '复制失败（剪贴板不可用）'
+  }
+}
+
+// 日志分区激活时拉取 + 3s 轮询增量，离开即停
+let logTimer: number | null = null
+watch(sectionId, (v) => {
+  if (v === 'logs') {
+    void loadLogs()
+    logTimer = window.setInterval(() => void loadLogs(), 3000)
+  } else if (logTimer !== null) {
+    clearInterval(logTimer)
+    logTimer = null
+  }
+})
+onBeforeUnmount(() => {
+  if (logTimer !== null) clearInterval(logTimer)
+})
 </script>
 
 <template>
@@ -445,6 +518,25 @@ async function importBackup(): Promise<void> {
           </div>
         </div>
         <div class="group">
+          <div class="group-title">应用图标</div>
+          <div class="stack">
+            <div class="row">
+              <div class="row-main">
+                <span class="name">Logo 底色</span>
+                <span class="desc">切换菜单栏托盘、访达与启动台（macOS）、窗口与任务栏（Windows）图标（黑底=经典彩色 G，白底=白底方块）</span>
+              </div>
+              <div class="seg">
+                <button class="seg-item" :class="{ active: logoSkin === 'black' }" @click="setLogoSkin('black')">
+                  <span class="logo-swatch" data-skin="black"><span class="g">G</span></span>黑底
+                </button>
+                <button class="seg-item" :class="{ active: logoSkin === 'white' }" @click="setLogoSkin('white')">
+                  <span class="logo-swatch" data-skin="white"><span class="g">G</span></span>白底
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="group">
           <div class="group-title">透明效果</div>
           <div class="stack">
             <div class="row">
@@ -581,6 +673,46 @@ async function importBackup(): Promise<void> {
             <button class="btn small" @click="relaunchApp">重启应用</button>
           </p>
           <p class="desc">备份包含应用设置、API 服务配置、插件启用状态与全部插件数据，可用于 Windows / macOS 之间迁移。</p>
+        </div>
+      </template>
+
+      <template v-else-if="sectionId === 'logs'">
+        <h2 class="page-title">日志</h2>
+        <div class="group">
+          <div class="group-title">应用日志</div>
+          <div class="row">
+            <div class="row-main">
+              <span class="name">查看器底色</span>
+              <span class="desc">日志查看区域的背景，黑底仿终端 / 白底仿纸面；macOS 与 Windows 效果一致</span>
+            </div>
+            <div class="seg">
+              <button class="seg-item" :class="{ active: logSkin === 'black' }" @click="setLogSkin('black')">黑底</button>
+              <button class="seg-item" :class="{ active: logSkin === 'white' }" @click="setLogSkin('white')">白底</button>
+            </div>
+          </div>
+          <div class="row">
+            <div class="row-main">
+              <span class="name">运行日志</span>
+              <span class="desc">主进程与渲染层输出（内存态最多 500 条，重启清空；打开本页自动刷新）</span>
+            </div>
+            <span class="row-right">
+              <label class="switch">
+                <input v-model="logAutoScroll" type="checkbox" />
+                <span>自动滚动</span>
+              </label>
+              <button class="btn small" @click="loadLogs">刷新</button>
+              <button class="btn small" @click="copyLogs">复制全部</button>
+              <button class="btn small" @click="clearLogs">清空</button>
+            </span>
+          </div>
+          <div ref="logConsoleEl" class="log-console" :data-skin="logSkin">
+            <p v-if="logItems.length === 0" class="log-empty">暂无日志</p>
+            <p v-for="(l, i) in logItems" :key="i" class="log-line" :class="`lv-${l.level}`">
+              <span class="log-t">{{ fmtLogTime(l.t) }}</span>
+              <span class="log-src">{{ l.source === 'main' ? '主' : '染' }}</span>
+              <span class="log-text">{{ l.text }}</span>
+            </p>
+          </div>
         </div>
       </template>
 
@@ -902,5 +1034,49 @@ async function importBackup(): Promise<void> {
   margin: 4px 0 8px;
   font-size: var(--fs-sub);
   color: var(--warn);
+}
+/* 日志查看器：配色（底色/等级色）按 data-skin 在 themes.css 全局定义，此处只管布局 */
+.log-console {
+  height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--log-border);
+  border-radius: var(--r-md);
+  background: var(--log-bg);
+  color: var(--log-fg);
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.log-empty {
+  color: var(--log-dim);
+  margin: 0;
+}
+.log-line {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  align-items: baseline;
+}
+.log-t {
+  flex: none;
+  color: var(--log-dim);
+}
+.log-src {
+  flex: none;
+  width: 1.5em;
+  text-align: center;
+  color: var(--log-dim);
+}
+.log-text {
+  min-width: 0;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+.log-line.lv-warn .log-text {
+  color: var(--log-warn);
+}
+.log-line.lv-error .log-text {
+  color: var(--log-error);
 }
 </style>

@@ -787,6 +787,36 @@ watch(
   }
 )
 
+// 自绘拉伸手柄：pointer 增量上报主进程改窗（同浮窗 drag-move 套路），不依赖 OS 隐形外缘拖拽
+function onRzDown(e: PointerEvent, axis: 'x' | 'y' | 'xy'): void {
+  if (e.button !== 0) return
+  e.preventDefault()
+  const el = e.currentTarget as HTMLElement
+  let lx = e.screenX
+  let ly = e.screenY
+  const move = (ev: PointerEvent): void => {
+    const dw = axis === 'y' ? 0 : Math.round(ev.screenX - lx)
+    const dh = axis === 'x' ? 0 : Math.round(ev.screenY - ly)
+    if (dw === 0 && dh === 0) return
+    lx = ev.screenX
+    ly = ev.screenY
+    void window.gtools.host('window:resize-by', { dw, dh })
+  }
+  const up = (): void => {
+    el.removeEventListener('pointermove', move)
+    el.removeEventListener('pointerup', up)
+    el.removeEventListener('pointercancel', up)
+  }
+  el.addEventListener('pointermove', move)
+  el.addEventListener('pointerup', up)
+  el.addEventListener('pointercancel', up)
+  try {
+    el.setPointerCapture(e.pointerId)
+  } catch {
+    // 捕获失败仍靠元素自身事件工作，只是指针移出条带会断
+  }
+}
+
 function applyVisualSettings(s: AppSettings): void {
   document.documentElement.dataset.theme = s.theme
   // 玻璃主题自身即玻璃面板，透明属性强制开启（透明度滑杆仍调节玻璃密度）
@@ -815,6 +845,17 @@ function applyVisualSettings(s: AppSettings): void {
 
 
 onMounted(async () => {
+  // 渲染层兜底错误上报主进程日志缓冲（尽力而为：独立窗被主进程拒绝/窗口濒死均忽略不抛）
+  window.addEventListener('error', (ev) => {
+    const d = ev.error ?? ev.message
+    const text = d instanceof Error ? `渲染层 error ${d.name}: ${d.message}` : `渲染层 error ${String(d)}`
+    void window.gtools.host('app-log:push', { level: 'error', text }).catch(() => {})
+  })
+  window.addEventListener('unhandledrejection', (ev) => {
+    const r = ev.reason
+    const text = r instanceof Error ? `渲染层 unhandledRejection ${r.name}: ${r.message}` : `渲染层 unhandledRejection ${String(r)}`
+    void window.gtools.host('app-log:push', { level: 'error', text }).catch(() => {})
+  })
   loadRecent()
   loadHistory()
   document.addEventListener('paste', onDocPaste)
@@ -1003,6 +1044,12 @@ onBeforeUnmount(() => {
           </svg>
         </button>
       </footer>
+      <!-- 插件态自绘拉伸手柄：透明窗 OS 拖缘在隐形外缘上抓不到，手柄贴可见面板右/下缘（pointer 增量→主进程改窗） -->
+      <template v-if="router.mode === 'plugin'">
+        <div class="rz rz-e" title="拖动调整宽度" @pointerdown="(e) => onRzDown(e, 'x')" />
+        <div class="rz rz-s" title="拖动调整高度" @pointerdown="(e) => onRzDown(e, 'y')" />
+        <div class="rz rz-se" title="拖动调整大小" @pointerdown="(e) => onRzDown(e, 'xy')" />
+      </template>
   </div>
 </template>
 
@@ -1051,6 +1098,35 @@ onBeforeUnmount(() => {
   mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0) border-box;
   mask-composite: exclude;
   pointer-events: none;
+}
+/* 插件态自绘拉伸手柄：贴可见面板右/下/右下缘（OS 拖缘在透明窗隐形外缘上抓不到）；
+   z 取环层之上，其余模式不渲染 */
+.rz {
+  position: absolute;
+  z-index: 210;
+  pointer-events: auto;
+  user-select: none;
+}
+.rz-e {
+  top: 14px;
+  bottom: 20px;
+  right: 0;
+  width: 7px;
+  cursor: ew-resize;
+}
+.rz-s {
+  left: 14px;
+  right: 20px;
+  bottom: 0;
+  height: 7px;
+  cursor: ns-resize;
+}
+.rz-se {
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
 }
 /* 圆角按窗口透明性分治（真实标志由 window.ts 经 html[data-wintx] 同步）：
    不透明窗（亚克力/实色）内容满幅、圆角交 OS 裁剪（Win11 DWM/macOS 系统弧）——

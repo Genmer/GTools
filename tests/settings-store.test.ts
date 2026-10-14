@@ -123,6 +123,28 @@ describe('settings-store', () => {
     }
   })
 
+  it('appLogSkin 日志底色：默认 black，white 生效，非法值剔除保现值', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.appLogSkin).toBe('black')
+    await store.update({ appLogSkin: 'white' })
+    expect(store.settings.appLogSkin).toBe('white')
+    await store.update({ appLogSkin: 'dark' as unknown as 'white' })
+    expect(store.settings.appLogSkin).toBe('white')
+  })
+
+  it('appLogoSkin logo 底色：默认 black，white 生效，非法值剔除保现值', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.appLogoSkin).toBe('black')
+    await store.update({ appLogoSkin: 'white' })
+    expect(store.settings.appLogoSkin).toBe('white')
+    await store.update({ appLogoSkin: 'blue' as unknown as 'white' })
+    expect(store.settings.appLogoSkin).toBe('white')
+  })
+
   it('旧文件缺 outlineWidth/outlineColor 字段：load 后深合并为默认 3/auto', async () => {
     const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'dark' }) })
     const store = new SettingsStore(dir, fs)

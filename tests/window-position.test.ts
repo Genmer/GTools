@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decideShowPosition, type DisplayArea } from '../src/main/window-position'
+import { applyResizeDelta, decideShowPosition, type DisplayArea } from '../src/main/window-position'
 
 const display = (x: number, y: number, w = 1920, h = 1080): DisplayArea => ({
   bounds: { x, y, width: w, height: h },
@@ -83,5 +83,20 @@ describe('decideShowPosition 唤起位置决策', () => {
     }
     const r = decideShowPosition(null, { x: 960, y: 500 }, [d], WIN)
     expect(r).toEqual({ x: Math.round(200 + (1720 - 864) / 2), y: Math.round(40 + 1000 * 0.28) })
+  })
+})
+
+describe('applyResizeDelta', () => {
+  const min = { width: 520, height: 360 }
+  const max = { width: 1720, height: 1000 }
+  it('增量正向扩到工作区上限为止', () => {
+    expect(applyResizeDelta({ width: 800, height: 560 }, min, max, 100, 50)).toEqual({ width: 900, height: 610 })
+    expect(applyResizeDelta({ width: 1700, height: 980 }, min, max, 100, 100)).toEqual({ width: 1720, height: 1000 })
+  })
+  it('缩到最小尺寸为止且负向不越过', () => {
+    expect(applyResizeDelta({ width: 600, height: 400 }, min, max, -200, -200)).toEqual({ width: 520, height: 360 })
+  })
+  it('增量取整', () => {
+    expect(applyResizeDelta({ width: 800, height: 560 }, min, max, 10.6, -0.4)).toEqual({ width: 811, height: 560 })
   })
 })

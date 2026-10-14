@@ -34,3 +34,16 @@ export function decideShowPosition(
     y: Math.round(target.workArea.y + target.workArea.height * 0.28)
   }
 }
+
+/** 主窗插件态自绘拉伸手柄的目标尺寸：锚定左上角，夹到最小尺寸与工作区内最大（纯逻辑可单测） */
+export function applyResizeDelta(
+  current: { width: number; height: number },
+  minSize: { width: number; height: number },
+  max: { width: number; height: number },
+  dw: number,
+  dh: number
+): { width: number; height: number } {
+  const width = Math.round(Math.min(max.width, Math.max(minSize.width, current.width + dw)))
+  const height = Math.round(Math.min(max.height, Math.max(minSize.height, current.height + dh)))
+  return { width, height }
+}

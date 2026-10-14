@@ -32,9 +32,12 @@ vi.mock('../src/main/window', () => ({
   showSearchWindow: vi.fn(),
   suspendBlurHide: vi.fn((fn: () => unknown) => fn())
 }))
+vi.mock('../src/main/logo-skin', () => ({ applyAppLogoSkin: vi.fn(), logoIconPath: vi.fn(() => null) }))
+vi.mock('../src/main/tray', () => ({ createTray: vi.fn(), applyTraySkin: vi.fn(), destroyTray: vi.fn() }))
 
 import { app, ipcMain } from 'electron'
 import { setupIpc } from '../src/main/services/ipc'
+import { AppLog } from '../src/main/services/app-log'
 import { getSearchWindow } from '../src/main/window'
 import { SettingsStore, type FsLike } from '../src/main/settings-store'
 import { unregisterAllHotkeys } from '../src/main/shortcut'
@@ -101,6 +104,7 @@ async function boot(readText: () => Promise<string> = async () => ''): Promise<{
   setupIpc({
     loader,
     settings: store,
+    appLog: new AppLog(),
     services: {
       window: { float: { closeAllForPlugin: vi.fn(), closeAll: floatCloseAll } },
       storage: { dumpAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) },
@@ -275,6 +279,7 @@ async function bootWithFetch(
   setupIpc({
     loader,
     settings: store,
+    appLog: new AppLog(),
     services: {
       window: { float: { closeAllForPlugin: vi.fn() } },
       storage: { dumpAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) },

@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, isOutlineColor, sanitizeOutlineCustomColor, sanitizeOutlineFlowSpeed, sanitizeOutlineWidth, type AppSettings } from '@sdk/settings'
+import { DEFAULT_SETTINGS, isOutlineColor, sanitizeAppLogSkin, sanitizeAppLogoSkin, sanitizeOutlineCustomColor, sanitizeOutlineFlowSpeed, sanitizeOutlineWidth, type AppSettings } from '@sdk/settings'
 import { validateAccelerator } from '@sdk/shortcut-rules'
 
 // 与宿主备份（src/main/services/backup.ts）同格式的独立实现：插件层不允许 import 宿主代码，
@@ -149,6 +149,10 @@ export function normalizeSettings(raw: unknown): AppSettings {
   if (occ !== null) out.outlineCustomColor = occ
   const ofs = sanitizeOutlineFlowSpeed(r.outlineFlowSpeed)
   if (ofs !== null) out.outlineFlowSpeed = ofs
+  const als = sanitizeAppLogSkin(r.appLogSkin)
+  if (als !== null) out.appLogSkin = als
+  const alos = sanitizeAppLogoSkin(r.appLogoSkin)
+  if (alos !== null) out.appLogoSkin = alos
   if (Array.isArray(r.disabledPlugins) && r.disabledPlugins.every((x) => typeof x === 'string')) {
     out.disabledPlugins = r.disabledPlugins as string[]
   }

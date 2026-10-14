@@ -129,6 +129,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 同 .app 圆角分治：透明窗系统裁圆角，CSS 画同半径弧防方角环被啃角；不透明窗交 OS 裁 */
+  border-radius: 0;
   /* 与 .app 同构：1px 边框 glass 下上色深勾边（--panel-edge） */
   border: 1px solid var(--panel-edge, transparent);
   /* 全工程唯一投影只挂窗口根；与主窗 .app 同款 padding-box 背景（sheen 高光层 + tint 层）：
@@ -140,6 +142,9 @@ onBeforeUnmount(() => {
     linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
   /* 磨霜与主窗 .app 同源同变量：macOS 上独立窗透明直透桌面，无此层则失去霜面 */
   backdrop-filter: var(--glass-filter);
+}
+html[data-wintx='1'] .detached {
+  border-radius: var(--r-window);
 }
 /* 厚玻璃壁：与主窗 .app::after 同构；--glass-depth 惰性 0px 时 mask xor 无环带不可见 */
 .detached::after {

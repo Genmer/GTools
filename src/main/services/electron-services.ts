@@ -204,6 +204,10 @@ export function createElectronServices(opts: {
         }
       })
       if (o.alwaysOnTop) win.setAlwaysOnTop(true, 'floating')
+      // macOS 全屏覆盖：浮窗常驻全工作区可见（含全屏空间），不切走前台 app 全屏
+      if (process.platform === 'darwin') {
+        win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+      }
       if (o.show) {
         if (o.focus) win.show()
         else win.showInactive()
@@ -282,6 +286,10 @@ export function createElectronServices(opts: {
       })
       // screen-saver 级压住任务栏；注入冻结帧完成后再 show，避免闪黑
       win.setAlwaysOnTop(true, 'screen-saver')
+      // macOS 全屏覆盖：截图取景 overlay 挂全屏空间可见，全屏应用上取景不切空间
+      if (process.platform === 'darwin') {
+        win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+      }
       void win.loadURL(url)
       const handle: OverlayHandle = {
         webContentsId: win.webContents.id,

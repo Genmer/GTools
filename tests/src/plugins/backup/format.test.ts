@@ -253,7 +253,9 @@ describe('normalizeSettings', () => {
       outlineEnabled: false,
       outlineWidth: 5,
       outlineColor: 'rainbow-gradient',
-      outlineCustomColor: '#abcdef'
+      outlineCustomColor: '#abcdef',
+      appLogSkin: 'white',
+      appLogoSkin: 'white'
     })
     expect(s).toEqual({
       theme: 'glass',
@@ -268,6 +270,8 @@ describe('normalizeSettings', () => {
       outlineColor: 'rainbow-gradient',
       outlineCustomColor: '#abcdef',
       outlineFlowSpeed: 3,
+      appLogSkin: 'white',
+      appLogoSkin: 'white',
       commandHotkeys: [],
       windowPos: null
     })
@@ -285,5 +289,17 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings({ outlineFlowSpeed: 9 }).outlineFlowSpeed).toBe(9)
     expect(normalizeSettings({ outlineFlowSpeed: 99 }).outlineFlowSpeed).toBe(10)
     expect(normalizeSettings({ outlineFlowSpeed: 'fast' }).outlineFlowSpeed).toBe(3)
+  })
+  it('appLogSkin 日志底色：white 往返保留，非法值回退默认 black', () => {
+    expect(normalizeSettings({ appLogSkin: 'white' }).appLogSkin).toBe('white')
+    expect(normalizeSettings({ appLogSkin: 'black' }).appLogSkin).toBe('black')
+    expect(normalizeSettings({ appLogSkin: 'dark' }).appLogSkin).toBe('black')
+    expect(normalizeSettings({ appLogSkin: 1 }).appLogSkin).toBe('black')
+  })
+  it('appLogoSkin logo 底色：white 往返保留，非法值回退默认 black', () => {
+    expect(normalizeSettings({ appLogoSkin: 'white' }).appLogoSkin).toBe('white')
+    expect(normalizeSettings({ appLogoSkin: 'black' }).appLogoSkin).toBe('black')
+    expect(normalizeSettings({ appLogoSkin: 'blue' }).appLogoSkin).toBe('black')
+    expect(normalizeSettings({ appLogoSkin: 1 }).appLogoSkin).toBe('black')
   })
 })

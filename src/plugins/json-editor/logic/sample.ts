@@ -16,12 +16,12 @@ export const SAMPLE_JSON = `{
     {
       "date": "2026-09-01",
       "type": "feature",
-      "items": ["JSON 编辑器：树视图 + 错误定位", "大 JSON 懒渲染"]
+      "items": ["JSON 编辑器：校验 + 错误定位", "大 JSON 懒渲染"]
     },
     {
       "date": "2026-08-15",
       "type": "fix",
-      "items": ["深色主题下树视图徽标对比度"]
+      "items": ["深色主题下高亮配色对比度"]
     }
   ],
   "author": {

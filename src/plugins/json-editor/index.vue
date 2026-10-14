@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { MatchFile, PluginContext } from '@sdk/api'
-import { countLines, parseJson, reformat, type JsonError } from './logic/json'
+import { countLines, parseJson, posToLineCol, reformat, windowRange, type JsonError } from './logic/json'
 import { highlightJson } from './logic/highlight'
 import {
   TREE_ROW_HEIGHT,
@@ -9,7 +9,6 @@ import {
   defaultExpanded,
   flattenTree,
   valueAt,
-  windowRange,
   type TreeRow
 } from './logic/tree'
 import { SAMPLE_JSON } from './logic/sample'
@@ -17,6 +16,7 @@ import { SAMPLE_JSON } from './logic/sample'
 const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string; initialPayload?: MatchFile[] }>()
 
 const DRAFT_KEY = 'draft'
+const TREE_ON_KEY = 'treeOn'
 const PARSE_DEBOUNCE_MS = 250
 const SAVE_DEBOUNCE_MS = 500
 /** 草稿超过 256KB 不再走 IPC 持久化，避免每击键防抖序列化大字符串卡主进程 */
@@ -36,6 +36,8 @@ type Status = { state: 'idle' } | { state: 'ok' } | { state: 'error'; error: Jso
 const status = ref<Status>({ state: 'idle' })
 const expanded = ref<ReadonlySet<string>>(new Set<string>())
 const tip = ref('')
+// 树视图改全页切换（不做左右分栏挤编辑器），开关态随草稿一起持久化
+const treeOn = ref(false)
 
 const editorEl = ref<HTMLTextAreaElement | null>(null)
 const hlEl = ref<HTMLElement | null>(null)
@@ -43,7 +45,7 @@ const treeEl = ref<HTMLElement | null>(null)
 
 const highlightedText = computed(() => highlightJson(text.value))
 
-// 滚动位置与视口高度驱动两侧虚拟窗口（行号槽 + 树）
+// 滚动位置与视口高度驱动虚拟窗口（行号槽 + 树）
 const editScroll = ref(0)
 const editViewportH = ref(0)
 const treeScroll = ref(0)
@@ -106,6 +108,105 @@ function loadSample(): void {
   expanded.value = defaultExpanded(parsed.value)
 }
 
+function toggleTree(): void {
+  treeOn.value = !treeOn.value
+  if (demoMode) return
+  void props.ctx.host.storage.set(TREE_ON_KEY, treeOn.value)
+}
+
+function toggleNode(row: TreeRow): void {
+  const next = new Set(expanded.value)
+  if (next.has(row.id)) next.delete(row.id)
+  else next.add(row.id)
+  expanded.value = next
+}
+
+function onExpandAll(): void {
+  const { ids, total, overCap } = collectExpandAll(parsed.value, TREE_EXPAND_CAP)
+  if (overCap) {
+    flash(`节点共 ${total} 个，超过 ${TREE_EXPAND_CAP} 上限，未全部展开`)
+    return
+  }
+  expanded.value = ids
+}
+
+function onCollapseAll(): void {
+  expanded.value = new Set<string>()
+}
+
+async function copyNode(row: TreeRow): Promise<void> {
+  const s = JSON.stringify(valueAt(parsed.value, row.path)) ?? 'null'
+  try {
+    await props.ctx.host.clipboard.writeText(s)
+    flash(`已复制节点 ${row.keyLabel}`)
+  } catch {
+    flash('复制失败')
+  }
+}
+
+// ---- 内容查找：大小写不敏感，当前条目以选区呈现并滚动到视口中央 ----
+const findOn = ref(false)
+const findText = ref('')
+const findIndex = ref(0)
+const findEl = ref<HTMLInputElement | null>(null)
+
+const findMatches = computed<number[]>(() => {
+  const needle = findText.value.toLowerCase()
+  if (needle === '') return []
+  const hay = text.value.toLowerCase()
+  const starts: number[] = []
+  let i = hay.indexOf(needle)
+  while (i !== -1) {
+    starts.push(i)
+    i = hay.indexOf(needle, i + needle.length)
+  }
+  return starts
+})
+const findCount = computed(() => findMatches.value.length)
+
+function toggleFind(): void {
+  if (findOn.value) closeFind()
+  else openFind()
+}
+
+function openFind(): void {
+  findOn.value = true
+  void nextTick(() => {
+    findEl.value?.focus()
+    findEl.value?.select()
+  })
+}
+
+function closeFind(): void {
+  findOn.value = false
+  void nextTick(() => editorEl.value?.focus())
+}
+
+// 查找文本变化时回到第一条并立即定位（无匹配不动）
+watch(findText, () => {
+  findIndex.value = 0
+  if (findCount.value > 0) showFindCurrent()
+})
+
+function onFindStep(dir: 1 | -1): void {
+  if (findCount.value === 0) return
+  findIndex.value = (findIndex.value + dir + findCount.value) % findCount.value
+  showFindCurrent()
+}
+
+function showFindCurrent(): void {
+  const ta = editorEl.value
+  if (ta === null) return
+  const start = findMatches.value[findIndex.value]
+  if (start === undefined) return
+  const len = findText.value.length
+  ta.focus()
+  ta.setSelectionRange(start, start + len)
+  const { line } = posToLineCol(text.value, start)
+  ta.scrollTop = Math.max(0, (line - 1) * LINE_HEIGHT - Math.max(0, ta.clientHeight / 2 - LINE_HEIGHT))
+  onEditorScroll()
+}
+
 // 拖 .json 入主窗经 files 匹配推荐进入：插件自行授权后读入内容预填（单文件失败不阻塞其余）
 const payloadFiles = props.initialPayload ?? []
 
@@ -156,6 +257,12 @@ onMounted(async () => {
   } catch {
     base = ''
   }
+  try {
+    const t = await props.ctx.host.storage.get<unknown>(TREE_ON_KEY)
+    treeOn.value = t === true
+  } catch {
+    treeOn.value = false
+  }
   const q = props.query.trim()
   const fileText = await loadPayloadFiles()
   text.value = [base, q, fileText].filter((s) => s !== '').join('\n')
@@ -185,16 +292,19 @@ watch(text, () => {
   }, SAVE_DEBOUNCE_MS)
 })
 
+// 回调读活 ref：树面板 v-if 挂载晚于 observer 创建，闭包捕获会在切换后量不到树视口
 function observeSizes(): void {
   const ta = editorEl.value
-  const tree = treeEl.value
   if (ta !== null) editViewportH.value = ta.clientHeight
+  const tree = treeEl.value
   if (tree !== null) treeViewportH.value = tree.clientHeight
-  if (typeof ResizeObserver === 'undefined' || (ta === null && tree === null)) return
-  resizeObserver = new ResizeObserver(() => {
-    if (ta !== null) editViewportH.value = ta.clientHeight
-    if (tree !== null) treeViewportH.value = tree.clientHeight
-  })
+  if (typeof ResizeObserver === 'undefined') return
+  if (resizeObserver === undefined) {
+    resizeObserver = new ResizeObserver(() => {
+      if (editorEl.value !== null) editViewportH.value = editorEl.value.clientHeight
+      if (treeEl.value !== null) treeViewportH.value = treeEl.value.clientHeight
+    })
+  }
   if (ta !== null) resizeObserver.observe(ta)
   if (tree !== null) resizeObserver.observe(tree)
 }
@@ -216,6 +326,16 @@ function onTreeScroll(): void {
   treeScroll.value = el.scrollTop
   treeViewportH.value = el.clientHeight
 }
+
+// 树面板 v-if 晚挂载：切换打开时补挂 observer 并量一次视口
+watch(treeOn, async (on) => {
+  if (!on) return
+  await nextTick()
+  const tree = treeEl.value
+  if (tree === null) return
+  treeViewportH.value = tree.clientHeight
+  resizeObserver?.observe(tree)
+})
 
 function jumpToError(): void {
   if (status.value.state !== 'error') return
@@ -281,36 +401,6 @@ async function onCopy(): Promise<void> {
   }
 }
 
-function toggleNode(row: TreeRow): void {
-  const next = new Set(expanded.value)
-  if (next.has(row.id)) next.delete(row.id)
-  else next.add(row.id)
-  expanded.value = next
-}
-
-function onExpandAll(): void {
-  const { ids, total, overCap } = collectExpandAll(parsed.value, TREE_EXPAND_CAP)
-  if (overCap) {
-    flash(`节点共 ${total} 个，超过 ${TREE_EXPAND_CAP} 上限，未全部展开`)
-    return
-  }
-  expanded.value = ids
-}
-
-function onCollapseAll(): void {
-  expanded.value = new Set<string>()
-}
-
-async function copyNode(row: TreeRow): Promise<void> {
-  const s = JSON.stringify(valueAt(parsed.value, row.path)) ?? 'null'
-  try {
-    await props.ctx.host.clipboard.writeText(s)
-    flash(`已复制节点 ${row.keyLabel}`)
-  } catch {
-    flash('复制失败')
-  }
-}
-
 // 等宽编辑器里 Tab 缩进两格（与格式化缩进一致），不把焦点切走
 function onTab(e: KeyboardEvent): void {
   const ta = e.target as HTMLTextAreaElement
@@ -332,14 +422,34 @@ function onTab(e: KeyboardEvent): void {
       <button class="btn" title="去掉所有多余空白" @click="onMinify">压缩</button>
       <button class="btn" title="立即校验并定位错误" @click="onValidate">校验</button>
       <button class="btn" @click="onClear">清空</button>
+      <button class="btn" :class="{ on: treeOn }" :title="treeOn ? '切回编辑视图' : '全页查看结构树'" @click="toggleTree">
+        {{ treeOn ? '编辑' : '树视图' }}
+      </button>
       <span class="spacer"></span>
       <span class="tip" :title="tip">{{ tip }}</span>
+      <button class="btn" :class="{ on: findOn }" title="查找 (Ctrl+F)" @click="toggleFind">查找</button>
       <button class="btn" :disabled="text === ''" @click="onCopy">复制</button>
       <button class="btn" @click="loadSample">载入示例</button>
     </div>
 
+    <div v-if="findOn" class="findbar">
+      <input
+        ref="findEl"
+        v-model="findText"
+        class="find-input"
+        placeholder="查找内容…"
+        spellcheck="false"
+        @keydown.enter.prevent="onFindStep($event.shiftKey ? -1 : 1)"
+        @keydown.esc.prevent="closeFind"
+      />
+      <span class="find-count">{{ findCount === 0 ? '无匹配' : `${findIndex + 1}/${findCount}` }}</span>
+      <button class="btn mini-btn" title="上一个 (Shift+Enter)" :disabled="findCount === 0" @click="onFindStep(-1)">↑</button>
+      <button class="btn mini-btn" title="下一个 (Enter)" :disabled="findCount === 0" @click="onFindStep(1)">↓</button>
+      <button class="btn mini-btn" title="关闭 (Esc)" @click="closeFind">×</button>
+    </div>
+
     <div class="main">
-      <section class="editor-pane">
+      <section v-if="!treeOn" class="editor-pane">
         <div class="gutter" aria-hidden="true">
           <div class="gutter-move" :style="{ transform: `translateY(${-editScroll}px)`, height: `${lineCount * LINE_HEIGHT}px` }">
             <div
@@ -361,14 +471,16 @@ function onTab(e: KeyboardEvent): void {
             class="editor-input"
             wrap="off"
             spellcheck="false"
-            placeholder='输入或粘贴 JSON，右侧实时生成树视图&#10;支持格式化 / 压缩 / 校验 / 复制'
+            placeholder='输入或粘贴 JSON&#10;支持格式化 / 压缩 / 校验 / 复制'
             @scroll="onEditorScroll"
             @keydown.tab="onTab"
+            @keydown.ctrl.f.prevent="openFind"
+            @keydown.meta.f.prevent="openFind"
           ></textarea>
         </div>
       </section>
 
-      <section class="tree-pane">
+      <section v-else class="tree-pane">
         <div class="tree-bar">
           <span class="tree-title">树视图</span>
           <span class="tree-meta">{{ treeRows.length }} 行</span>
@@ -415,7 +527,7 @@ function onTab(e: KeyboardEvent): void {
         ✗ 第 {{ status.error.line }} 行 第 {{ status.error.column }} 列：{{ status.error.message }}
       </button>
       <span v-else-if="status.state === 'ok'" class="ok-msg">✓ JSON 有效</span>
-      <span v-else class="idle-msg">输入 JSON，实时校验并与树视图同步</span>
+      <span v-else class="idle-msg">输入 JSON，实时校验</span>
       <span class="spacer"></span>
       <span class="meta">{{ lineCount }} 行 · {{ text.length }} 字符</span>
     </footer>
@@ -496,7 +608,7 @@ function onTab(e: KeyboardEvent): void {
   gap: var(--sp-2);
 }
 .editor-pane {
-  flex: 11;
+  flex: 1;
   min-width: 0;
   display: flex;
   border: 1px solid var(--border);
@@ -581,7 +693,7 @@ function onTab(e: KeyboardEvent): void {
   color: var(--fg-dim);
 }
 .editor-input::selection {
-  background: var(--active-row);
+  background: var(--find-hit);
   color: transparent;
 }
 .editor-hl :deep(.hl-key),
@@ -612,8 +724,44 @@ function onTab(e: KeyboardEvent): void {
   color: var(--fg-dim);
   opacity: 0.8;
 }
+.btn.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+.mini-btn {
+  height: 26px;
+  padding: 0 9px;
+}
+.findbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.find-input {
+  flex: 0 1 260px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: var(--fs-sub);
+  outline: none;
+}
+.find-input:focus {
+  border-color: var(--accent);
+}
+.find-count {
+  flex: none;
+  min-width: 52px;
+  color: var(--fg-dim);
+  font-size: var(--fs-foot);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 .tree-pane {
-  flex: 9;
+  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
