@@ -38,4 +38,9 @@ describe('calc manifest', () => {
     expect(manifest.permissions).toEqual(['storage', 'clipboard:write'])
     for (const p of manifest.permissions) expect((ALL_PERMISSIONS as readonly string[]).includes(p)).toBe(true)
   })
+
+  it('版本号与描述同步数字列表求和能力', () => {
+    expect(manifest.version).toBe('0.4.0')
+    expect(manifest.description).toContain('数字列表求和')
+  })
 })

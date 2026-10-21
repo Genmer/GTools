@@ -40,7 +40,7 @@ const BUILTIN_NAMES = new Set<string>([...Object.keys(BUILTIN_CONSTANTS), 'ans']
 const hint = computed(() => {
   const vars = [...evaluated.value.vars.keys()].filter((k) => !BUILTIN_NAMES.has(k))
   return vars.length === 0
-    ? '支持变量赋值 a=12 · ans 上一行结果 · pi/e 常量 · % 百分比 · ^ 幂 · sqrt/sin/round 等函数'
+    ? '支持变量赋值 a=12 · ans 上一行结果 · pi/e 常量 · % 百分比 · ^ 幂 · sqrt/sin/round 等函数 · 空格/逗号分隔多个数自动求和'
     : `已用变量：${vars.join('、')}`
 })
 
@@ -214,6 +214,16 @@ async function copyAll(): Promise<void> {
   }
 }
 
+async function copySum(): Promise<void> {
+  if (okCount.value === 0) return
+  try {
+    await props.ctx.host.clipboard.writeText(formatNumber(sum.value))
+    flashTip('已复制合计')
+  } catch {
+    flashTip('复制失败')
+  }
+}
+
 async function archive(): Promise<void> {
   if (isPaperEmpty.value) {
     flashTip('稿纸是空的，没有可归档内容')
@@ -269,6 +279,16 @@ function resultText(i: number): string {
   const l = lines.value[i]
   if (l !== undefined && (l.kind === 'ok' || l.kind === 'error')) return l.display
   return i === rows.value.length - 1 ? '=' : ''
+}
+
+function resultTitle(i: number): string | undefined {
+  const l = lines.value[i]
+  if (l === undefined) return undefined
+  if (l.kind === 'error') return l.display
+  if (l.kind === 'ok') {
+    return l.listCount !== undefined && l.listCount > 1 ? `${l.listCount} 个数相加 · 点击复制` : '点击复制结果'
+  }
+  return undefined
 }
 
 function isPlaceholderEq(i: number): boolean {
@@ -361,7 +381,7 @@ function isPlaceholderEq(i: number): boolean {
           <span
             class="result"
             :class="[lines[i]?.kind, { 'dim-eq': isPlaceholderEq(i) }]"
-            :title="lines[i]?.kind === 'error' ? lines[i]?.display : lines[i]?.kind === 'ok' ? '点击复制结果' : undefined"
+            :title="resultTitle(i)"
             @mousedown.prevent
             @click="copyLine(i)"
           >{{ resultText(i) }}</span>
@@ -369,7 +389,12 @@ function isPlaceholderEq(i: number): boolean {
           <button v-if="rows.length > 1" class="del" title="删除此行" aria-label="删除此行" @click="deleteRow(i)">×</button>
         </div>
       </div>
-      <div class="sum" title="Σ = 全部结果行之和">
+      <div
+        class="sum"
+        :class="{ clickable: okCount > 0 }"
+        :title="okCount > 0 ? 'Σ = 全部结果行之和 · 点击复制' : 'Σ = 全部结果行之和'"
+        @click="copySum"
+      >
         <span class="sum-label">Σ</span>
         <span class="sum-value">{{ sumDisplay }}</span>
       </div>
@@ -600,6 +625,13 @@ function isPlaceholderEq(i: number): boolean {
   border-top: 1px solid var(--border);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-weight: 700;
+}
+.sum.clickable {
+  cursor: pointer;
+}
+.sum.clickable:hover {
+  background: var(--hover);
+  border-radius: var(--r-sm);
 }
 .sum-label {
   margin-left: 46px;
