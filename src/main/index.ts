@@ -29,6 +29,7 @@ import { createTray } from './tray'
 import { applyAppLogoSkin } from './logo-skin'
 import { syncLoginItem } from './login-item'
 import { AppLog } from './services/app-log'
+import { sweepUpdateCache } from './services/update-downloader'
 
 // 日志缓冲建在模块顶层并即刻接管 console：bootstrap 早期输出也要能进设置-日志查看器；
 // 原始终端输出保留（先调原方法再入缓冲），进程级兜底异常也入缓冲
@@ -173,6 +174,11 @@ async function bootstrap(): Promise<void> {
   // 插件进入路径会经 ensureBackendStarted 的 in-flight 复用搭上同一次启动
   void loader.startResidentBackends().catch((err) => {
     console.error('GTools 常驻 backend 启动失败：', err)
+  })
+
+  // 清扫上次更新中断残留的 *.part，失败不阻塞启动
+  void sweepUpdateCache(fs, join(userData, 'update-cache')).catch((err) => {
+    console.error('GTools 更新缓存清扫失败：', err)
   })
 
   if (loader.externalDetected.length > 0) {

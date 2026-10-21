@@ -1129,9 +1129,8 @@ onBeforeUnmount(() => {
   cursor: nwse-resize;
 }
 /* 圆角按窗口透明性分治（真实标志由 window.ts 经 html[data-wintx] 同步）：
-   不透明窗（亚克力/实色）内容满幅、圆角交 OS 裁剪（Win11 DWM/macOS 系统弧）——
-   CSS 再画弧会与 OS 弧夹出露底色的环带，即「圆角主体+直角边」穿帮根因；
-   透明窗靠 CSS 圆角透空四角。默认不画：同步未达时退化为 OS 弧，绝不露直角边 */
+   不透明窗内容满幅——darwin 圆角交系统弧裁剪；win32 建窗时已关 DWM 圆角（roundedCorners:false），轮廓环直角满边；
+   透明窗仍靠 CSS 圆角透空四角。默认不画：同步未达时退化为 OS 弧，绝不露直角边 */
 .app {
   border-radius: 0;
 }

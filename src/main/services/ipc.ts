@@ -1,5 +1,6 @@
 import { ipcMain, dialog as electronDialog, app } from 'electron'
 import { homedir } from 'node:os'
+import { spawn } from 'node:child_process'
 import * as nodeFs from 'node:fs/promises'
 import { dirname, join, sep as pathSep } from 'node:path'
 import type { PluginManifest } from '@sdk/manifest'
@@ -39,7 +40,8 @@ import {
   stringifyBackupChunked,
   tokenizePathValues
 } from './backup'
-import { createUpdater } from './updater'
+import { createUpdater, RELEASE_PREFIX } from './updater'
+import { createUpdateDownloader, type UpdateDownloaderFs } from './update-downloader'
 import { createPluginServer, scanUtoolsPlugins, type UtoolsPluginServer } from './utools-compat'
 
 export interface HostInitResult {
@@ -162,6 +164,41 @@ export function setupIpc(deps: {
     arch: services.app.arch
   })
 
+  // 应用内更新下载：进度经 update-download-progress 广播主窗；downloadUrl 只认 update:check 缓存值（含 null，失败不清）
+  const updateCacheDir = join(app.getPath('userData'), 'update-cache')
+  let lastCheckDownloadUrl: string | null = null
+  // update:install 单飞标记：spawn 等待+清理链窗口内二次调用直接拒绝，防双拉安装器
+  let installInFlight = false
+  const downloaderFs: UpdateDownloaderFs = {
+    // nodeFs.mkdir recursive 返回首个创建路径，接口约定 void，包一层丢弃
+    mkdir: async (dir, opts) => {
+      await nodeFs.mkdir(dir, opts)
+    },
+    readdir: (dir) => nodeFs.readdir(dir),
+    rm: (path, opts) => nodeFs.rm(path, opts),
+    rename: (from, to) => nodeFs.rename(from, to),
+    stat: (path) => nodeFs.stat(path).then((s) => ({ mtimeMs: s.mtimeMs })),
+    // nodeFs.open 的 sink：显式 position 追踪累计字节，写与关各自原子
+    createSink: async (path) => {
+      const fh = await nodeFs.open(path, 'w')
+      let position = 0
+      return {
+        write: async (chunk) => {
+          await fh.write(chunk, 0, chunk.byteLength, position)
+          position += chunk.byteLength
+        },
+        close: () => fh.close()
+      }
+    }
+  }
+  const downloader = createUpdateDownloader({
+    fetchStream: services.net.fetchStream,
+    fs: downloaderFs,
+    dir: updateCacheDir,
+    platform: services.app.platform,
+    onProgress: (snap) => broadcast('update-download-progress', snap)
+  })
+
   // 指令热键触发：弹主窗 → 通知渲染层进命令态 → 启 backend（对齐 plugin:enter 语义，backend 结果不阻塞触发）
   const fireCommandHotkey = (pluginId: string, commandId: string): void => {
     showSearchWindow()
@@ -248,6 +285,27 @@ export function setupIpc(deps: {
     await loader.setEnabled(id, false)
     services.window.float.closeAllForPlugin(id)
     deps.detached.closeForPlugin(id)
+  }
+
+  /** 退出前清理链（app:relaunch 与 update:install 共用）：浮窗/独立窗回收、backend 停止、防抖中的 settings 与 apiCenter 落盘，3s 超时兜底防挂死 */
+  async function runQuitCleanup(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 3000)
+      void (async () => {
+        try {
+          services.window.float.closeAll()
+          deps.detached.closeAll()
+          await loader.disposeAll()
+          await settings.flush()
+          await apiCenter.flush()
+        } catch (err) {
+          console.error('GTools 重启前清理失败：', err)
+        } finally {
+          clearTimeout(timer)
+          resolve()
+        }
+      })()
+    })
   }
 
   async function exportBackup(): Promise<HostResult<{ path: string | null }>> {
@@ -704,8 +762,59 @@ export function setupIpc(deps: {
           return { ok: true, data: await services.clipboard.readImageThumb() }
         }
         // 手动检查更新：不自动外联，只在用户点击时请求 GitHub releases/latest
-        case 'update:check':
-          return await updater.check()
+        case 'update:check': {
+          const r = await updater.check()
+          if (r.ok) lastCheckDownloadUrl = r.data.downloadUrl // 成功才缓存（含 null 值），失败不清旧值
+          return r
+        }
+        case 'update:download': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          // 渲染层只传意图不传 URL：下载地址只认本进程 update:check 缓存 + 仓库白名单
+          if (lastCheckDownloadUrl === null) return { ok: false, error: '请先检查更新' }
+          if (!lastCheckDownloadUrl.startsWith(RELEASE_PREFIX)) return { ok: false, error: '更新链接不在本仓库白名单内' }
+          return await downloader.start(lastCheckDownloadUrl)
+        }
+        case 'update:cancel': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          return { ok: true, data: downloader.cancel() }
+        }
+        case 'update:download-status':
+          // 只读快照（对齐 app-log:list 先例），无主窗守卫
+          return { ok: true, data: downloader.status() }
+        case 'update:install': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          // spawn 等待 + 清理链最长 3s 期间 downloaded 态持续成立，无单飞标记双击会拉起两个安装器
+          if (installInFlight) return { ok: false, error: '安装正在进行' }
+          const snap = downloader.status()
+          if (snap.state !== 'downloaded' || snap.installerPath === null) return { ok: false, error: '安装包尚未下载完成' }
+          if (services.app.platform === 'win32') {
+            installInFlight = true
+            try {
+              let child: ReturnType<typeof spawn>
+              try {
+                child = spawn(snap.installerPath, [], { detached: true, stdio: 'ignore', windowsHide: true })
+              } catch (err) {
+                // 同步拉起失败（如 ENOENT）不清理不退出，用户可重试
+                return { ok: false, error: `安装器拉起失败：${err instanceof Error ? err.message : String(err)}` }
+              }
+              child.unref()
+              // 异步拉起失败（杀软锁文件/EACCES）以 error 事件到达：等 spawn/error 二选一，失败不清理不退出（UI 停在 downloaded 可重试）；
+              // error 监听常驻也防迟到的 error 冒泡 uncaughtException
+              const spawned = await new Promise<boolean>((res) => {
+                child.once('spawn', () => res(true))
+                child.once('error', () => res(false))
+              })
+              if (!spawned) return { ok: false, error: '安装器拉起失败' }
+              await runQuitCleanup()
+              app.exit(0) // 不调 app.relaunch()：relaunch 会把旧版再拉起来
+              return { ok: true, data: null }
+            } finally {
+              installInFlight = false
+            }
+          }
+          await services.shell.openPath(snap.installerPath)
+          return { ok: true, data: null }
+        }
         case 'update:open': {
           // 渲染层只传意图不传 URL，目标地址由主进程闭包缓存 + 白名单后交 openExternal
           const target = (req.payload as { target?: unknown } | null)?.target
@@ -721,25 +830,8 @@ export function setupIpc(deps: {
         case 'app:relaunch': {
           if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
           app.relaunch()
-          // app.exit 不触发 will-quit：退出前手动执行同款清理（浮窗/独立窗回收、backend 停止、
-          // 防抖中的 settings 与 apiCenter 落盘），3s 超时兜底防清理挂死卡退出
-          await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, 3000)
-            void (async () => {
-              try {
-                services.window.float.closeAll()
-                deps.detached.closeAll()
-                await loader.disposeAll()
-                await settings.flush()
-                await apiCenter.flush()
-              } catch (err) {
-                console.error('GTools 重启前清理失败：', err)
-              } finally {
-                clearTimeout(timer)
-                resolve()
-              }
-            })()
-          })
+          // app.exit 不触发 will-quit：退出前手动执行同款清理（runQuitCleanup）
+          await runQuitCleanup()
           app.exit(0)
           return { ok: true, data: null }
         }

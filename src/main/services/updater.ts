@@ -1,7 +1,7 @@
 // 更新检测纯逻辑：fetch/version/platform/arch 构造注入，零 electron import（node 环境可单测）
 
 export const REPO_URL = 'https://github.com/Genmer/GTools'
-const RELEASE_PREFIX = 'https://github.com/Genmer/GTools/releases/'
+export const RELEASE_PREFIX = 'https://github.com/Genmer/GTools/releases/'
 const LATEST_RELEASE_API = 'https://api.github.com/repos/Genmer/GTools/releases/latest'
 const RELEASES_FEED = 'https://github.com/Genmer/GTools/releases.atom'
 

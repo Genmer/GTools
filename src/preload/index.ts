@@ -8,6 +8,7 @@ const allowedEventChannels = (channel: string): boolean =>
   channel === 'host:open-settings' ||
   channel === 'command-hotkey' ||
   channel === 'hotkey-captured' ||
+  channel === 'update-download-progress' ||
   channel.startsWith('plugin-event:') ||
   channel.startsWith('detached:')
 

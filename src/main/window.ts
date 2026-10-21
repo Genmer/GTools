@@ -108,6 +108,8 @@ export function createSearchWindow(): BrowserWindow {
     x: Math.round(workArea.x + (workArea.width - width) / 2),
     y: Math.round(workArea.y + workArea.height * 0.28),
     frame: false,
+    // Win11 DWM 默认对 frameless 窗做系统圆角裁剪会咬掉轮廓环四角，win32 一律关掉；darwin 不设，保持系统行为
+    ...(process.platform === 'win32' ? { roundedCorners: false } : {}),
     resizable: false,
     fullscreenable: false,
     show: false,
@@ -363,6 +365,8 @@ export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindo
     x: opts.x,
     y: opts.y,
     titleBarStyle: 'hidden',
+    // Win11 DWM 默认对 frameless 窗做系统圆角裁剪会咬掉轮廓环四角，win32 一律关掉；darwin 不设，保持系统行为
+    ...(process.platform === 'win32' ? { roundedCorners: false } : {}),
     show: false,
     minWidth: 360,
     minHeight: 240,

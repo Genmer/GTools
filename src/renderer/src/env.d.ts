@@ -10,6 +10,17 @@ export interface HostInitResult {
   externalDetected: { id: string; name: string }[]
 }
 
+/** 应用内更新下载会话快照（宿主 UI 专用类型，形状对齐主进程 update-downloader） */
+export interface UpdateDownloadSnapshot {
+  state: 'idle' | 'downloading' | 'downloaded' | 'failed'
+  receivedBytes: number
+  totalBytes: number | null
+  speedBps: number | null
+  fileName: string | null
+  installerPath: string | null
+  error: string | null
+}
+
 export interface GtoolsBridge {
   invoke(
     pluginId: string,

@@ -35,12 +35,54 @@ vi.mock('../src/main/window', () => ({
 vi.mock('../src/main/logo-skin', () => ({ applyAppLogoSkin: vi.fn(), logoIconPath: vi.fn(() => null) }))
 vi.mock('../src/main/tray', () => ({ createTray: vi.fn(), applyTraySkin: vi.fn(), destroyTray: vi.fn() }))
 
+// update-downloader 整模块桩化：ipc 层只验装配/守卫/透传，下载会话纯逻辑由 update-downloader.test.ts 覆盖
+const { downloaderFake, downloaderDeps } = vi.hoisted(() => ({
+  downloaderFake: { start: vi.fn(), cancel: vi.fn(), status: vi.fn() },
+  downloaderDeps: { current: null as { onProgress?: (snap: unknown) => void } | null }
+}))
+vi.mock('../src/main/services/update-downloader', () => ({
+  createUpdateDownloader: vi.fn((deps: unknown) => {
+    downloaderDeps.current = deps as { onProgress?: (snap: unknown) => void }
+    return downloaderFake
+  }),
+  sweepUpdateCache: vi.fn(async () => {})
+}))
+// update:install win32 分支的安装器拉起
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: vi.fn() }
+})
+
 import { app, ipcMain } from 'electron'
+import { spawn } from 'node:child_process'
 import { setupIpc } from '../src/main/services/ipc'
 import { AppLog } from '../src/main/services/app-log'
 import { getSearchWindow } from '../src/main/window'
 import { SettingsStore, type FsLike } from '../src/main/settings-store'
 import { unregisterAllHotkeys } from '../src/main/shortcut'
+import type { UpdateDownloadSnapshot } from '../src/main/services/update-downloader'
+
+const spawnMock = spawn as unknown as Mock
+
+const snapIdle = (): UpdateDownloadSnapshot => ({
+  state: 'idle',
+  receivedBytes: 0,
+  totalBytes: null,
+  speedBps: null,
+  fileName: null,
+  installerPath: null,
+  error: null
+})
+
+const snapDownloaded = (installerPath: string): UpdateDownloadSnapshot => ({
+  state: 'downloaded',
+  receivedBytes: 1048576,
+  totalBytes: 1048576,
+  speedBps: null,
+  fileName: installerPath.slice(installerPath.lastIndexOf('/') + 1),
+  installerPath,
+  error: null
+})
 
 type HostReply = { ok: boolean; data?: unknown; error?: string; warnings?: string[] }
 type Host = (e: { sender: { id: number } }, req: { api: string; payload?: unknown }) => Promise<HostReply>
@@ -67,10 +109,14 @@ const releaseBody = (): string =>
   })
 
 /** boot 时注入 fake net.fetch / shell.openExternal / app 三元组，返回其引用供断言；readText 可覆写（clipboard:peek 用例） */
-async function boot(readText: () => Promise<string> = async () => ''): Promise<{
+async function boot(
+  readText: () => Promise<string> = async () => '',
+  opts: { platform?: string } = {}
+): Promise<{
   host: Host
   fetch: Mock
   openExternal: Mock
+  openPath: Mock
   cleanupOrder: string[]
 }> {
   const store = new SettingsStore('C:\\tmp\\gtools-test', noopFs, 1)
@@ -87,6 +133,7 @@ async function boot(readText: () => Promise<string> = async () => ''): Promise<{
   }
   const fetch = vi.fn(async () => ({ ok: true, status: 200, body: releaseBody() }))
   const openExternal = vi.fn(async () => {})
+  const openPath = vi.fn(async () => {})
   // settings.flush 走实例 spy 记序（真实实现本就用 noopFs，替换无副作用）
   vi.spyOn(store, 'flush').mockImplementation(async () => {
     cleanupOrder.push('settings.flush')
@@ -108,10 +155,10 @@ async function boot(readText: () => Promise<string> = async () => ''): Promise<{
     services: {
       window: { float: { closeAllForPlugin: vi.fn(), closeAll: floatCloseAll } },
       storage: { dumpAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) },
-      app: { version: '0.0.1', platform: 'darwin', arch: 'arm64' },
+      app: { version: '0.0.1', platform: opts.platform ?? 'darwin', arch: 'arm64' },
       clipboard: { readText: vi.fn(readText) },
-      net: { fetch },
-      shell: { openExternal }
+      net: { fetch, fetchStream: vi.fn() },
+      shell: { openExternal, openPath }
     },
     apiCenter: { config: {}, sanitized: () => ({}), replaceAll: vi.fn(async () => {}), flush: apiFlush },
     nativeApps: {},
@@ -127,12 +174,16 @@ async function boot(readText: () => Promise<string> = async () => ''): Promise<{
   } as unknown as Parameters<typeof setupIpc>[0])
   const call = (ipcMain.handle as unknown as Mock).mock.calls.find(([ch]) => ch === 'gtools:host')
   if (!call) throw new Error('gtools:host 未注册')
-  return { host: call[1] as Host, fetch, openExternal, cleanupOrder }
+  return { host: call[1] as Host, fetch, openExternal, openPath, cleanupOrder }
 }
 
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(getSearchWindow).mockReturnValue(null)
+  downloaderFake.start.mockImplementation(async () => ({ ok: true, data: snapIdle() }))
+  downloaderFake.cancel.mockImplementation(() => snapIdle())
+  downloaderFake.status.mockImplementation(() => snapIdle())
+  downloaderDeps.current = null
 })
 
 function withFakeWindow(): void {
@@ -236,6 +287,256 @@ describe('gtools:host app:relaunch', () => {
     expect(cleanupOrder).toEqual(['float.closeAll', 'detached.closeAll', 'disposeAll', 'settings.flush', 'apiCenter.flush'])
     expect(app.exit).toHaveBeenCalledWith(0)
     expect(app.exit).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('gtools:host update:download/cancel/install', () => {
+  it('未检查更新直接 update:download → 请先检查更新', async () => {
+    const { host } = await boot()
+    withFakeWindow()
+    const r = await host(sender(), { api: 'update:download' })
+    expect(r).toEqual({ ok: false, error: '请先检查更新' })
+    expect(downloaderFake.start).not.toHaveBeenCalled()
+  })
+
+  it('check 失败（403）不写缓存：update:download 仍提示先检查更新', async () => {
+    const { host } = await bootWithFetch(async () => ({ ok: false, status: 403, body: '' }))
+    withFakeWindow()
+    const check = await host(sender(), { api: 'update:check' })
+    expect(check.ok).toBe(false)
+    const r = await host(sender(), { api: 'update:download' })
+    expect(r).toEqual({ ok: false, error: '请先检查更新' })
+    expect(downloaderFake.start).not.toHaveBeenCalled()
+  })
+
+  it('check 成功后 update:download 透传缓存 URL 给 downloader', async () => {
+    const { host } = await boot()
+    withFakeWindow()
+    const downloading = { state: 'downloading', receivedBytes: 0 } as UpdateDownloadSnapshot
+    downloaderFake.start.mockImplementation(async () => ({ ok: true, data: downloading }))
+    await host(sender(), { api: 'update:check' })
+    const r = await host(sender(), { api: 'update:download' })
+    expect(r).toEqual({ ok: true, data: downloading })
+    expect(downloaderFake.start).toHaveBeenCalledWith('https://github.com/Genmer/GTools/releases/download/v9.9.9/GTools-9.9.9.dmg')
+  })
+
+  it('缓存 URL 指向仓库外 → 白名单拦截，不进 downloader', async () => {
+    const { host } = await bootWithFetch(async () => ({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({
+        tag_name: 'v9.9.9',
+        html_url: 'https://github.com/Genmer/GTools/releases/tag/v9.9.9',
+        assets: [{ name: 'GTools-9.9.9.dmg', browser_download_url: 'https://evil.example.com/dmg' }]
+      })
+    }))
+    withFakeWindow()
+    await host(sender(), { api: 'update:check' })
+    const r = await host(sender(), { api: 'update:download' })
+    expect(r).toEqual({ ok: false, error: '更新链接不在本仓库白名单内' })
+    expect(downloaderFake.start).not.toHaveBeenCalled()
+  })
+
+  it('download/cancel/install 非主窗 sender 拒绝；download-status 只读无守卫', async () => {
+    const { host } = await boot()
+    // getSearchWindow 默认 null → isSearchWindowSender 恒 false
+    expect(await host(sender(), { api: 'update:download' })).toEqual({ ok: false, error: '仅主搜索窗口可调用' })
+    expect(await host(sender(), { api: 'update:cancel' })).toEqual({ ok: false, error: '仅主搜索窗口可调用' })
+    expect(await host(sender(), { api: 'update:install' })).toEqual({ ok: false, error: '仅主搜索窗口可调用' })
+    const status = await host(sender(), { api: 'update:download-status' })
+    expect(status.ok).toBe(true)
+    expect(status.data).toEqual(snapIdle())
+  })
+
+  it('check 成功后再 check 失败：缓存不清，update:download 仍用旧缓存 URL', async () => {
+    let call = 0
+    const { host } = await bootWithFetch(async () => {
+      call++
+      return call === 1 ? { ok: true, status: 200, body: releaseBody() } : { ok: false, status: 403, body: '' }
+    })
+    withFakeWindow()
+    const first = await host(sender(), { api: 'update:check' })
+    expect(first.ok).toBe(true)
+    const second = await host(sender(), { api: 'update:check' })
+    expect(second.ok).toBe(false)
+    const r = await host(sender(), { api: 'update:download' })
+    expect(r.ok).toBe(true)
+    expect(downloaderFake.start).toHaveBeenCalledWith('https://github.com/Genmer/GTools/releases/download/v9.9.9/GTools-9.9.9.dmg')
+  })
+
+  it('check 成功但 downloadUrl=null（feed 兜底无资产）→ update:download 拒绝且不进 downloader（UI 回退发布页）', async () => {
+    const feed = (tag: string): string =>
+      `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry>` +
+      `<id>tag:github.com,2008:Repository/1385365197/${tag}</id>` +
+      `<link rel="alternate" type="text/html" href="https://github.com/Genmer/GTools/releases/tag/${tag}"/>` +
+      `<title>${tag}</title></entry></feed>`
+    let call = 0
+    const { host } = await bootWithFetch(async () => {
+      call++
+      return call === 1 ? { ok: false, status: 403, body: '' } : { ok: true, status: 200, body: feed('v9.9.9') }
+    })
+    withFakeWindow()
+    const check = await host(sender(), { api: 'update:check' })
+    expect(check.ok && (check.data as { downloadUrl: string | null }).downloadUrl).toBeNull()
+    const r = await host(sender(), { api: 'update:download' })
+    expect(r).toEqual({ ok: false, error: '请先检查更新' })
+    expect(downloaderFake.start).not.toHaveBeenCalled()
+  })
+
+  it('update:download 启动后主窗立即收到首帧广播（downloading 快照）', async () => {
+    const { host } = await boot()
+    const send = vi.fn()
+    vi.mocked(getSearchWindow).mockReturnValue({
+      webContents: { id: 1, on: vi.fn(), send, removeListener: vi.fn(), isDestroyed: () => false }
+    } as unknown as ReturnType<typeof getSearchWindow>)
+    const first: UpdateDownloadSnapshot = {
+      state: 'downloading',
+      receivedBytes: 0,
+      totalBytes: null,
+      speedBps: null,
+      fileName: 'GTools-9.9.9.dmg',
+      installerPath: null,
+      error: null
+    }
+    downloaderFake.start.mockImplementation(async () => {
+      downloaderDeps.current?.onProgress?.(first)
+      return { ok: true, data: first }
+    })
+    await host(sender(), { api: 'update:check' })
+    const r = await host(sender(), { api: 'update:download' })
+    expect(r.ok).toBe(true)
+    expect(send).toHaveBeenCalledWith('update-download-progress', first)
+  })
+
+  it('update:cancel 返回 downloader.cancel() 快照', async () => {
+    const { host } = await boot()
+    withFakeWindow()
+    const cancelled = { state: 'idle', receivedBytes: 0 } as UpdateDownloadSnapshot
+    downloaderFake.cancel.mockImplementation(() => cancelled)
+    const r = await host(sender(), { api: 'update:cancel' })
+    expect(r).toEqual({ ok: true, data: cancelled })
+    expect(downloaderFake.cancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('install win32：detached+ignore+windowsHide 拉起、unref、once(spawn/error) 双等待、清序与 app:relaunch 相同、exit(0) 且不 relaunch', async () => {
+    const { host, cleanupOrder } = await boot(async () => '', { platform: 'win32' })
+    withFakeWindow()
+    const installerPath = 'C:\\tmp\\gtools-test\\update-cache\\GTools.Setup.9.9.9.exe'
+    downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
+    // spawn 事件到达 = 拉起成功（真实 ChildProcess spawn 成功后必发该事件）
+    const child = {
+      unref: vi.fn(),
+      once: vi.fn((ev: string, fn: () => void) => {
+        if (ev === 'spawn') fn()
+      })
+    }
+    spawnMock.mockImplementation(() => child)
+    const r = await host(sender(), { api: 'update:install' })
+    expect(r).toEqual({ ok: true, data: null })
+    expect(spawnMock).toHaveBeenCalledWith(installerPath, [], { detached: true, stdio: 'ignore', windowsHide: true })
+    expect(child.once).toHaveBeenCalledWith('spawn', expect.any(Function))
+    expect(child.once).toHaveBeenCalledWith('error', expect.any(Function)) // error 监听常驻：异步失败不冒泡 uncaughtException
+    expect(child.unref).toHaveBeenCalledTimes(1)
+    expect(cleanupOrder).toEqual(['float.closeAll', 'detached.closeAll', 'disposeAll', 'settings.flush', 'apiCenter.flush'])
+    expect(app.exit).toHaveBeenCalledWith(0)
+    expect(app.relaunch).not.toHaveBeenCalled()
+  })
+
+  it('install win32 单飞：spawn 等待窗口内二次调用拒绝，不双拉安装器', async () => {
+    const { host, cleanupOrder } = await boot(async () => '', { platform: 'win32' })
+    withFakeWindow()
+    downloaderFake.status.mockImplementation(() => snapDownloaded('C:\\tmp\\gtools-test\\update-cache\\GTools.Setup.9.9.9.exe'))
+    const handlers: Record<string, () => void> = {}
+    const child = {
+      unref: vi.fn(),
+      once: vi.fn((ev: string, fn: () => void) => {
+        handlers[ev] = fn
+      })
+    }
+    spawnMock.mockImplementation(() => child)
+    const first = host(sender(), { api: 'update:install' })
+    await new Promise((r) => setTimeout(r, 0)) // 宏任务一拍：首笔确定进入 spawn 等待窗口
+    const second = await host(sender(), { api: 'update:install' })
+    expect(second).toEqual({ ok: false, error: '安装正在进行' })
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    handlers.spawn?.()
+    expect(await first).toEqual({ ok: true, data: null })
+    expect(cleanupOrder).toEqual(['float.closeAll', 'detached.closeAll', 'disposeAll', 'settings.flush', 'apiCenter.flush'])
+    expect(app.exit).toHaveBeenCalledWith(0)
+  })
+
+  it('install win32 异步 error（杀软锁文件/EACCES）：ok:false 不清理不退出（UI 停在 downloaded 可重试）', async () => {
+    const { host, cleanupOrder } = await boot(async () => '', { platform: 'win32' })
+    withFakeWindow()
+    downloaderFake.status.mockImplementation(() => snapDownloaded('C:\\tmp\\gtools-test\\update-cache\\GTools.Setup.9.9.9.exe'))
+    const child = {
+      unref: vi.fn(),
+      once: vi.fn((ev: string, fn: () => void) => {
+        if (ev === 'error') fn()
+      })
+    }
+    spawnMock.mockImplementation(() => child)
+    const r = await host(sender(), { api: 'update:install' })
+    expect(r).toEqual({ ok: false, error: '安装器拉起失败' })
+    expect(child.unref).toHaveBeenCalledTimes(1)
+    expect(cleanupOrder).toEqual([])
+    expect(app.exit).not.toHaveBeenCalled()
+    expect(app.relaunch).not.toHaveBeenCalled()
+  })
+
+  it('install 非 downloaded 态拒绝：不拉安装器不退出', async () => {
+    const { host, cleanupOrder } = await boot(async () => '', { platform: 'win32' })
+    withFakeWindow()
+    const r = await host(sender(), { api: 'update:install' })
+    expect(r).toEqual({ ok: false, error: '安装包尚未下载完成' })
+    expect(spawnMock).not.toHaveBeenCalled()
+    expect(cleanupOrder).toEqual([])
+    expect(app.exit).not.toHaveBeenCalled()
+  })
+
+  it('install win32 spawn 抛错：ok:false 带原文，不清理不退出', async () => {
+    const { host, cleanupOrder } = await boot(async () => '', { platform: 'win32' })
+    withFakeWindow()
+    downloaderFake.status.mockImplementation(() => snapDownloaded('C:\\tmp\\gtools-test\\update-cache\\GTools.Setup.9.9.9.exe'))
+    spawnMock.mockImplementation(() => {
+      throw new Error('spawn ENOENT')
+    })
+    const r = await host(sender(), { api: 'update:install' })
+    expect(r).toEqual({ ok: false, error: '安装器拉起失败：spawn ENOENT' })
+    expect(cleanupOrder).toEqual([])
+    expect(app.exit).not.toHaveBeenCalled()
+  })
+
+  it('install darwin 非 downloaded 态拒绝：不 openPath 不退出', async () => {
+    const { host, openPath } = await boot()
+    withFakeWindow()
+    const r = await host(sender(), { api: 'update:install' })
+    expect(r).toEqual({ ok: false, error: '安装包尚未下载完成' })
+    expect(openPath).not.toHaveBeenCalled()
+    expect(app.exit).not.toHaveBeenCalled()
+  })
+
+  it('install darwin：openPath 打开安装包、不退出', async () => {
+    const { host, openPath } = await boot()
+    withFakeWindow()
+    const installerPath = '/Users/test/Library/Application Support/GTools/update-cache/GTools-9.9.9.dmg'
+    downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
+    const r = await host(sender(), { api: 'update:install' })
+    expect(r).toEqual({ ok: true, data: null })
+    expect(openPath).toHaveBeenCalledWith(installerPath)
+    expect(app.exit).not.toHaveBeenCalled()
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it('onProgress 快照经主窗广播 update-download-progress 通道', async () => {
+    await boot()
+    const send = vi.fn()
+    vi.mocked(getSearchWindow).mockReturnValue({
+      webContents: { id: 1, on: vi.fn(), send, removeListener: vi.fn(), isDestroyed: () => false }
+    } as unknown as ReturnType<typeof getSearchWindow>)
+    const snap = snapDownloaded('/cache/GTools-9.9.9.dmg')
+    downloaderDeps.current?.onProgress?.(snap)
+    expect(send).toHaveBeenCalledWith('update-download-progress', snap)
   })
 })
 

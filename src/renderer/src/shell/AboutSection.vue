@@ -1,15 +1,29 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import type { UpdateDownloadSnapshot } from '../env'
 
 const props = defineProps<{ appVersion: string }>()
 
 const platform = computed(() => (navigator.userAgent.includes('Mac') ? 'darwin' : 'win32'))
 
 // 更新状态机：不自动检测（进分区不发网络请求，无静默外联）；切分区由 KeepAlive 保住已检测态
-type UpdateState = 'idle' | 'checking' | 'latest' | 'available' | 'failed'
+type UpdateState = 'idle' | 'checking' | 'latest' | 'available' | 'downloading' | 'downloaded' | 'download-failed' | 'failed'
 const state = ref<UpdateState>('idle')
 const updateInfo = ref<{ current: string; latest: string } | null>(null)
 const updateError = ref('')
+const downloadUrl = ref<string | null>(null)
+const downloadSnap = ref<UpdateDownloadSnapshot | null>(null)
+
+// 下载会话快照 → UI 态（事件、恢复、下载/取消返回共用）
+function applySnapshot(snap: UpdateDownloadSnapshot): void {
+  downloadSnap.value = snap
+  if (snap.state === 'downloading') state.value = 'downloading'
+  else if (snap.state === 'downloaded') {
+    updateError.value = ''
+    state.value = 'downloaded'
+  } else if (snap.state === 'failed') state.value = 'download-failed'
+  else state.value = updateInfo.value !== null ? 'available' : 'idle'
+}
 
 async function checkUpdate(): Promise<void> {
   state.value = 'checking'
@@ -19,9 +33,39 @@ async function checkUpdate(): Promise<void> {
     state.value = 'failed'
     return
   }
-  const d = r.data as { current: string; latest: string; hasUpdate: boolean }
+  const d = r.data as { current: string; latest: string; hasUpdate: boolean; downloadUrl: string | null }
   updateInfo.value = { current: d.current, latest: d.latest }
+  downloadUrl.value = d.downloadUrl
   state.value = d.hasUpdate ? 'available' : 'latest'
+}
+
+async function startDownload(): Promise<void> {
+  const r = await window.gtools.host('update:download')
+  if (r.ok) {
+    applySnapshot(r.data as UpdateDownloadSnapshot)
+    return
+  }
+  updateError.value = r.error ?? '下载失败'
+  state.value = 'download-failed'
+}
+
+async function cancelDownload(): Promise<void> {
+  const r = await window.gtools.host('update:cancel')
+  if (r.ok) applySnapshot(r.data as UpdateDownloadSnapshot)
+}
+
+// 安装请求 pending 期间禁用按钮：主进程另有单飞标记，这里是双保险（防双击双拉安装器）
+const installPending = ref(false)
+
+async function installUpdate(): Promise<void> {
+  if (installPending.value) return
+  installPending.value = true
+  try {
+    const r = await window.gtools.host('update:install')
+    if (!r.ok) updateError.value = r.error ?? '安装失败'
+  } finally {
+    installPending.value = false
+  }
 }
 
 // 只传意图不传 URL，目标地址由主进程闭包缓存 + 白名单后交 openExternal
@@ -32,6 +76,37 @@ function openUpdate(target: 'repo' | 'release' | 'download'): void {
 function relaunchApp(): void {
   void window.gtools.host('app:relaunch')
 }
+
+let offProgress: (() => void) | null = null
+
+onMounted(async () => {
+  // 挂载即恢复进行中/已完成的下载会话，并订阅主进程进度广播
+  offProgress =
+    window.gtools.on('update-download-progress', (payload) => {
+      applySnapshot(payload as UpdateDownloadSnapshot)
+    }) ?? null
+  const r = await window.gtools.host('update:download-status')
+  if (r.ok) {
+    const snap = r.data as UpdateDownloadSnapshot
+    downloadSnap.value = snap
+    if (snap.state === 'downloading') state.value = 'downloading'
+    else if (snap.state === 'downloaded') state.value = 'downloaded'
+  }
+})
+
+onBeforeUnmount(() => {
+  offProgress?.()
+  offProgress = null
+})
+
+const percent = computed(() => {
+  const snap = downloadSnap.value
+  if (snap === null || snap.totalBytes === null || snap.totalBytes <= 0) return 0
+  return Math.min(100, Math.floor((snap.receivedBytes / snap.totalBytes) * 100))
+})
+
+const fmtMB = (bytes: number): string => `${(bytes / 1048576).toFixed(1)} MB`
+const fmtSpeed = (bps: number): string => `${(bps / 1048576).toFixed(1)} MB/s`
 </script>
 
 <template>
@@ -68,8 +143,38 @@ function relaunchApp(): void {
         <p class="update-line accent">发现新版本 v{{ updateInfo?.latest }}</p>
         <p class="dim">当前 v{{ updateInfo?.current }}</p>
         <div class="actions">
-          <button class="btn primary" @click="openUpdate('download')">前往下载</button>
+          <button v-if="downloadUrl" class="btn primary" @click="startDownload">下载</button>
+          <button v-else class="btn primary" @click="openUpdate('download')">前往下载</button>
           <button class="btn" @click="openUpdate('release')">查看发布页</button>
+          <button class="btn text" @click="checkUpdate">重新检测</button>
+        </div>
+      </template>
+      <template v-else-if="state === 'downloading'">
+        <p class="update-line accent">正在下载 v{{ updateInfo?.latest }}</p>
+        <template v-if="downloadSnap && downloadSnap.totalBytes !== null">
+          <div class="progress"><div class="progress-fill" :style="{ width: `${percent}%` }"></div></div>
+          <p class="dim">
+            {{ percent }}% · {{ fmtMB(downloadSnap.receivedBytes) }} / {{ fmtMB(downloadSnap.totalBytes)
+            }}<template v-if="downloadSnap.speedBps !== null"> · {{ fmtSpeed(downloadSnap.speedBps) }}</template>
+          </p>
+        </template>
+        <p v-else class="dim">已下载 {{ fmtMB(downloadSnap?.receivedBytes ?? 0) }}</p>
+        <div class="actions">
+          <button class="btn" @click="cancelDownload">取消</button>
+        </div>
+      </template>
+      <template v-else-if="state === 'downloaded'">
+        <p class="update-line ok">安装包已就绪</p>
+        <p v-if="updateError" class="update-line danger">{{ updateError }}</p>
+        <div class="actions">
+          <button class="btn primary" :disabled="installPending" @click="installUpdate">{{ platform === 'win32' ? '重启并安装' : '打开安装包' }}</button>
+        </div>
+      </template>
+      <template v-else-if="state === 'download-failed'">
+        <p class="update-line danger">下载失败：{{ downloadSnap?.error ?? updateError }}</p>
+        <div class="actions">
+          <button v-if="downloadUrl" class="btn primary" @click="startDownload">重试下载</button>
+          <button v-else class="btn primary" @click="openUpdate('download')">前往下载</button>
           <button class="btn text" @click="checkUpdate">重新检测</button>
         </div>
       </template>
@@ -171,6 +276,20 @@ function relaunchApp(): void {
 .update-line.danger {
   color: var(--danger);
   word-break: break-all;
+}
+/* 下载进度条：底 var(--bg) 填充 var(--accent)，6px 圆角细条 */
+.progress {
+  height: 6px;
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  overflow: hidden;
+  margin: var(--sp-2) 0 var(--sp-1);
+}
+.progress-fill {
+  height: 100%;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  transition: width 0.2s ease;
 }
 .dim {
   color: var(--fg-dim);

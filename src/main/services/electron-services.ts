@@ -3,6 +3,7 @@ import { BrowserWindow } from 'electron'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { randomBytes } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import { Readable } from 'node:stream'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as nodeFs from 'node:fs/promises'
@@ -18,6 +19,7 @@ import type {
 import { PluginStorageService } from './storage'
 import { assertHttpUrl, resolveFetchBody } from './net-guard'
 import { lanIPv4Addresses } from './lan'
+import type { StreamFetchResponse } from './update-downloader'
 import { FloatWindowManager, type FloatWindowHostOptions, type FloatWindowLike } from './float-window'
 import { FileAccessService, type FileAccessFs } from './file-access'
 import { createScreenshotService, type CapturedFrame, type OverlayHandle } from './screenshot'
@@ -42,6 +44,31 @@ export async function fetchViaNet(url: string, init?: HostFetchInit): Promise<Ho
     signal: AbortSignal.timeout(timeoutMs)
   })
   return { ok: res.ok, status: res.status, body: await res.text() }
+}
+
+/** 应用内更新下载的流式出口：不带整体超时（停滞检测在 downloader，大文件慢速合法），302 由 net.fetch 默认 follow 跟随 */
+export async function fetchStreamViaNet(url: string): Promise<StreamFetchResponse> {
+  assertHttpUrl(url)
+  const controller = new AbortController()
+  const res = await net.fetch(url, {
+    // identity 防 gzip 解压后字节数与 Content-Length 对不上
+    headers: { 'Accept-Encoding': 'identity' },
+    signal: controller.signal
+  })
+  const len = res.headers.get('content-length')
+  const totalBytes = len !== null && /^\d+$/.test(len) ? Number(len) : null
+  return {
+    ok: res.ok,
+    status: res.status,
+    totalBytes,
+    consume: async (onChunk) => {
+      if (res.body === null) throw new Error('响应无内容流')
+      // 主进程 res.body 是 WHATWG ReadableStream；Readable.fromWeb 转节点流再迭代
+      const nodeStream = Readable.fromWeb(res.body as unknown as import('node:stream/web').ReadableStream)
+      for await (const chunk of nodeStream) onChunk(chunk as Uint8Array)
+    },
+    cancel: () => controller.abort()
+  }
 }
 
 function toElectronFilters(filters?: DialogFileFilter[]) {
@@ -404,6 +431,7 @@ export function createElectronServices(opts: {
     storage,
     net: {
       fetch: fetchViaNet,
+      fetchStream: fetchStreamViaNet,
       lanAddresses: async () => lanIPv4Addresses(networkInterfaces() as never)
     },
     notification: {

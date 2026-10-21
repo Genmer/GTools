@@ -23,6 +23,7 @@ import type { PluginRegistry } from '../plugin-registry'
 import type { FloatWindowApi } from './float-window'
 import type { ScreenshotService } from './screenshot'
 import { ApiServiceError } from './api-center'
+import type { StreamFetchResponse } from './update-downloader'
 
 /** 各能力面的最小实现接口（services 单例），主进程装配时注入，测试可 fake */
 export interface ServiceBag {
@@ -43,6 +44,8 @@ export interface ServiceBag {
   }
   net: {
     fetch(url: string, init?: HostFetchInit): Promise<HostFetchResult>
+    /** 主进程专用（应用内更新下载），不进插件 net 能力面 */
+    fetchStream(url: string): Promise<StreamFetchResponse>
     lanAddresses(): Promise<LanAddress[]>
   }
   notification: { show(title: string, body: string): Promise<void> }

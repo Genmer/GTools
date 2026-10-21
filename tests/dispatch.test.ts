@@ -54,6 +54,9 @@ function makeServices(): ServiceBag & {
     },
     net: {
       fetch: async () => ({ ok: true, status: 200, body: '' }),
+      fetchStream: async () => {
+        throw new Error('fetchStream 主进程专用，测试不触')
+      },
       lanAddresses: async () => [{ name: 'en0', address: '192.168.1.5' }]
     },
     notification: { show: async () => {} },
