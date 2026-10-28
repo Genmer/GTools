@@ -47,6 +47,62 @@ describe('looksLikeJson', () => {
     expect(big.length).toBeGreaterThan(100_000)
     expect(looksLikeJson(big)).toBe(false)
   })
+
+  it('多段拼接为真：两段直拼、换行/多空白分隔，每段皆合法顶层 object/array', () => {
+    expect(looksLikeJson('{"a":1}{"b":2}')).toBe(true)
+    expect(looksLikeJson('{"a":1}\n{"b":2}')).toBe(true)
+    expect(looksLikeJson('  [1,2]\r\n\t{"a":{"c":3}}  ')).toBe(true)
+    // 引号内的括号不切段、转义引号不提前闭串
+    expect(looksLikeJson('{"k":"a]{b"}[2]')).toBe(true)
+    expect(looksLikeJson('{"k":"a\\"b"}[1]')).toBe(true)
+  })
+
+  it('多段拼接任一段非法即假：段间垃圾、未闭合、段内残缺', () => {
+    expect(looksLikeJson('{"a":1}notjson')).toBe(false)
+    expect(looksLikeJson('{"a":1}notjson{"b":2}')).toBe(false)
+    expect(looksLikeJson('{"a":1}{"b":2')).toBe(false)
+    expect(looksLikeJson('{"a":1}{bad}')).toBe(false)
+    // 段是合法 JSON 但顶层非 object/array（多段里混入顶层字符串）
+    expect(looksLikeJson('{"a":1}"str"')).toBe(false)
+  })
+
+  it('宽松档：MongoDB shell 导出（ObjectId/ISODate/结尾逗号）为真', () => {
+    const mongo = `{
+	"_id" : ObjectId("5db8f8ab6409b80264c5b684"),
+	"_class" : "com.cfne.cuckoo.dy.domain.entity.gis.GisAreaVO",
+	"areaId" : 2000028,
+	"createTime" : ISODate("2019-10-30T10:42:51.323+08:00"),
+},`
+    expect(looksLikeJson(mongo)).toBe(true)
+  })
+
+  it('宽松档：多文档逗号清单（mongo find 复制形态）为真', () => {
+    expect(looksLikeJson('{"a":1},\n{"b":2}')).toBe(true)
+    expect(looksLikeJson('[1,2,]')).toBe(true)
+  })
+
+  it('宽松兜底档：引号键 ≥3 的截断 dump 为真；键不足或普通文本为假', () => {
+    expect(looksLikeJson('{\n "a" : 1,\n "b" : undefined,\n "c" : NaN\n}')).toBe(true)
+    expect(looksLikeJson('{"a" : Timestamp(1,2)}')).toBe(false)
+    expect(looksLikeJson('{ not json }')).toBe(false)
+  })
+
+  it('宽松档误报面：代码片段/markdown/前缀或尾随垃圾文本为假', () => {
+    expect(looksLikeJson('{ foo: 1, "bar": 2, baz() {...} }')).toBe(false)
+    expect(looksLikeJson('[a](http://example.com)')).toBe(false)
+    expect(looksLikeJson('[1,2,3].map(x => x*2)')).toBe(false)
+    expect(looksLikeJson('x {"a":1}')).toBe(false)
+    // 合法 JSON 后跟垃圾文本：引号键不足 3，不被兜底档救活
+    expect(looksLikeJson('{"a":1,"b":2} garbage')).toBe(false)
+  })
+
+  it('宽松档：单引号键 Mongo 文档即可命中（归一化路径不依赖引号键计数）', () => {
+    expect(looksLikeJson('{ "_id" : ObjectId("5db8f8ab6409b80264c5b684") }')).toBe(true)
+  })
+
+  it('宽松档：Mongo 文档内字符串值含 ObjectId( 与 ,} 原文不干扰归一化', () => {
+    expect(looksLikeJson('{ "_id" : ObjectId("aa"), "note" : "keep ObjectId(\\"x\\") and ,} raw", }')).toBe(true)
+  })
 })
 
 describe('keywordSideHits', () => {

@@ -4,6 +4,7 @@ import {
   countLines,
   decodeUnicodeEscapes,
   escapeJsonString,
+  expandIfJson,
   parseJson,
   parseJsonInfo,
   pathAt,
@@ -212,6 +213,12 @@ describe('stripJsonc', () => {
     expect(r.ignored).toBe(0)
   })
 
+  it('非法 JSON 原样返回（含 { 开头但解析失败的文本；尾随逗号属宽松档已展开，此处用仍非法的文本）', () => {
+    const bad = '{ "a" 1 }'
+    expect(expandIfJson(bad)).toBe(bad)
+    expect(expandIfJson('not json')).toBe('not json')
+  })
+
   it('无宽松内容时原样返回', () => {
     const r = stripJsonc('{"a": [1, 2]}')
     expect(r).toEqual({ text: '{"a": [1, 2]}', ignored: 0 })
@@ -221,6 +228,56 @@ describe('stripJsonc', () => {
     const src = '{\n  // "unclosed\n  "a": 1\n}'
     const r = stripJsonc(src)
     expect(parseJson(r.text).ok).toBe(true)
+  })
+
+  it('宽松档：Mongo 导出 ObjectId/ISODate 归一化为字符串值后 2 空格展开', () => {
+    const mongo = `{ "_id" : ObjectId("5db8f8ab6409b80264c5b684"), "t" : ISODate("2019-10-30T10:42:51.323+08:00") },`
+    expect(expandIfJson(mongo)).toBe(
+      '{\n  "_id": "5db8f8ab6409b80264c5b684",\n  "t": "2019-10-30T10:42:51.323+08:00"\n}'
+    )
+  })
+
+  it('宽松档：多文档逗号清单展开为数组', () => {
+    const out = expandIfJson('{"a":1},\n{"b":2}')
+    expect(JSON.parse(out)).toEqual([{ a: 1 }, { b: 2 }])
+  })
+
+  it('宽松档：引号内的超长数字串无损展开（字符串往返不丢精度）', () => {
+    const out = expandIfJson('{ "id" : ObjectId("123456789012345678"), "b" : 1 }')
+    expect(out).toContain('"123456789012345678"')
+    expect(JSON.parse(out).id).toBe('123456789012345678')
+  })
+
+  it('宽松档：不可归一化的文本原样返回', () => {
+    const raw = '{ "a" : Timestamp(1,2), "b" : 2, "c" : 3 }'
+    expect(expandIfJson(raw)).toBe(raw)
+  })
+
+  it('宽松档：引号外超长裸数字的危险形状原样（含 NumberLong 未引号长整数参数）', () => {
+    const raw = '{ "_id" : ObjectId("aa"), "n" : 123456789012345678 }'
+    expect(expandIfJson(raw)).toBe(raw)
+    const raw2 = '{ "n": NumberLong(9223372036854775807), "x": 1 }'
+    expect(expandIfJson(raw2)).toBe(raw2)
+  })
+
+  it('宽松档：安全的 NumberLong 短数字参数展开为数字', () => {
+    expect(expandIfJson('{ "n": NumberLong(123) }')).toBe('{\n  "n": 123\n}')
+  })
+
+  it('宽松档：嵌套尾随逗号（数组内/对象内）展开', () => {
+    expect(expandIfJson('{"a":[1,2,],"b":{"c":3,}}')).toBe(
+      JSON.stringify({ a: [1, 2], b: { c: 3 } }, null, 2)
+    )
+  })
+
+  it('宽松档：Mongo 文档字符串值含 ,} 与 ObjectId( 原文，展开后字符串内容保持', () => {
+    const out = expandIfJson('{ "_id" : ObjectId("aa"), "note" : "keep ,} and ObjectId(\\"x\\")", }')
+    expect(JSON.parse(out)).toEqual({ _id: 'aa', note: 'keep ,} and ObjectId("x")' })
+  })
+
+  it('宽松档：多文档逗号清单混入危险数字形状文档整体原样（逗号清单是单一文本单元，不按段保守）', () => {
+    const raw = '{ "_id" : ObjectId("aa"), },\n{ "n" : 123456789012345678, }'
+    expect(expandIfJson(raw)).toBe(raw)
   })
 })
 

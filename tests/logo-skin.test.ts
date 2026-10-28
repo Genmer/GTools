@@ -1,3 +1,4 @@
+import { tmpdir } from 'node:os'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const dock = vi.hoisted(() => ({ setIcon: vi.fn() }))
@@ -97,8 +98,8 @@ describe('logo-skin：运行时 logo 底色应用', () => {
   })
 
   it('applyMacBundleIcon：white 态执行带图标路径脚本，black 态传 $.nil 清除图标', async () => {
-    // 指向工程内真实存在的目录作为 mock bundle
-    const mockBundle = '/tmp'
+    // 指向真实存在的目录作为 mock bundle（tmpdir 跨平台，Windows runner 无 /tmp）
+    const mockBundle = tmpdir()
     const calls: Array<{ file: string; args: string[] }> = []
     const runner = vi.fn(async (file: string, args: string[]) => {
       calls.push({ file, args })

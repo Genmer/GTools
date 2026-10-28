@@ -6,6 +6,7 @@ import {
   countLines,
   decodeUnicodeEscapes,
   escapeJsonString,
+  expandIfJson,
   parseJson,
   parseJsonInfo,
   pathAt,
@@ -21,7 +22,7 @@ import { findMatches, type SearchMatch } from './logic/search'
 import { windowRange } from './logic/window'
 import { SAMPLE_JSON } from './logic/sample'
 
-const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string; initialPayload?: MatchFile[] }>()
+const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string; initialPayload?: MatchFile[]; initialText?: string }>()
 
 const DRAFT_KEY = 'draft'
 const PARSE_DEBOUNCE_MS = 250
@@ -147,7 +148,8 @@ function loadSample(): void {
   autoFormat()
 }
 
-/** 自动格式化只在严格合法时执行：宽松才合法的文本原文不动（注释不可无损失恢复），交状态栏提示 */
+/** 自动格式化：优先走 expandIfJson（严格合法重排 + Mongo 导出等宽松 JSON 归一化展开，
+ *  危险数字形状与不可解析文本原样）；1MB 上限防大文本同步 parse 卡顿 */
 function autoFormat(): void {
   const t = text.value
   if (t.trim() === '') return
@@ -155,10 +157,10 @@ function autoFormat(): void {
     flash('内容较大，未自动格式化')
     return
   }
-  if (!parseJson(t).ok) return
-  const r = reformat(t, 2)
-  if (r.ok && r.text !== t) {
-    text.value = r.text
+  const expanded = expandIfJson(t)
+  if (expanded !== t) {
+    text.value = expanded
+    applyParse()
     void nextTick(() => editorEl.value?.setSelectionRange(0, 0))
   }
 }
@@ -238,7 +240,7 @@ onMounted(async () => {
   } catch {
     base = ''
   }
-  const q = props.query.trim()
+  const q = [props.query.trim(), (props.initialText ?? '').trim()].filter((s) => s !== '').join('\n')
   const fileText = await loadPayloadFiles()
   text.value = composeIncomingPayload(base, q, fileText)
   applyParse()

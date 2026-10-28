@@ -1,6 +1,8 @@
 // JSON 解析与错误定位：自写递归下降而非复用 JSON.parse 的报错——
 // 新版 V8 报错文本不再稳定携带 "at position N"，行列号只能自己算才跨版本可靠。
 
+import { looseJsonText } from '@sdk/loose-json'
+
 export interface JsonError {
   /** 人读原因（中文，不含位置信息） */
   message: string
@@ -297,11 +299,15 @@ export function reformat(text: string, indent: number): ReformatResult {
   return r.ok ? { ok: true, text: JSON.stringify(r.value, null, indent) } : r
 }
 
-/** 深链/拖入载荷合成：文件内容优先于 query 残留，各自独立校验——仅当新载荷自身是合法 JSON 才替换草稿；
- *  'foo' 之类非 JSON 残留不碰旧草稿（被 junk 覆盖会经 DRAFT_KEY 落盘不可恢复） */
+/**
+ * 深链/拖入/剪贴板注入载荷合成：文件内容优先于 query/initialText 残留，各自独立校验——
+ * 仅当新载荷自身是合法（或宽松可归一化的）JSON 才替换草稿；
+ * 'foo' 之类非 JSON 残留不碰旧草稿（被 junk 覆盖会经 DRAFT_KEY 落盘不可恢复）
+ */
 export function composeIncomingPayload(base: string, q: string, fileText: string): string {
   if (fileText !== '' && parseJson(fileText).ok) return fileText
   if (q !== '' && parseJson(q).ok) return q
+  if (q !== '' && looseJsonText(q) !== null) return q
   return base
 }
 
@@ -381,6 +387,83 @@ export function stripJsonc(text: string): StripResult {
 /** 整文 → 带引号的 JSON 字符串字面量（控制符/引号/反斜杠全转义） */
 export function escapeJsonString(text: string): string {
   return JSON.stringify(text)
+}
+
+const STRING_LITERAL_RE = /"(?:[^"\\\r\n]|\\.)*"/g
+const LOSSY_DIGITS_RE = /\d{16,}/
+const LOSSY_EXPONENT_RE = /\d[eE][+-]?\d/
+
+/**
+ * 顶层切段（与 sdk/json-detect 同构的独立实现，插件禁 import 宿主 core）：
+ * depth=0 遇 {/[ 记段起点、遇 }/] 归零即段尾；引号内内容跳过（含转义）；
+ * 段间非空白返回 null；未闭合尾段原样入列，交逐段展开兜底。
+ */
+export function topLevelSegments(text: string): string[] | null {
+  const segs: string[] = []
+  let depth = 0
+  let start = -1
+  let inStr = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (inStr) {
+      if (c === '\\') i++
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (depth === 0) {
+      if (c === '{' || c === '[') {
+        start = i
+        depth = 1
+      } else if (c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r') {
+        return null
+      }
+      continue
+    }
+    if (c === '"') inStr = true
+    else if (c === '{' || c === '[') depth++
+    else if (c === '}' || c === ']') {
+      if (--depth === 0) segs.push(text.slice(start, i + 1))
+    }
+  }
+  if (depth > 0) segs.push(text.slice(start))
+  return segs
+}
+
+/** 危险数字形状守卫：剥字符串后含超精度长整数或指数记法则原样保留（parse→stringify 往返会改写） */
+function hasLossyShape(text: string): boolean {
+  const numericOnly = text.replace(STRING_LITERAL_RE, '""')
+  return LOSSY_DIGITS_RE.test(numericOnly) || LOSSY_EXPONENT_RE.test(numericOnly)
+}
+
+/**
+ * 单候选展开：先经 @sdk/loose-json 四档（严格→归一化→去尾逗号→数组包裹）拿可解析文本，
+ * 不可解析返回 null（多段时任一段 null 整体原样）；可解析但危险数字形状（原文或归一化文本）
+ * 原样保留；Mongo 导出的 ObjectId/ISODate 等会转成对应字符串值后重排。
+ */
+function expandOne(c: string): string | null {
+  const loose = looseJsonText(c)
+  if (loose === null) return null
+  if (hasLossyShape(c) || hasLossyShape(loose)) return c
+  const r = reformat(loose, 2)
+  return r.ok ? r.text : null
+}
+
+/** 激活注入/粘贴时是 JSON 才展开（2 空格缩进），多段拼接逐段展开换行连接，否则原样返回；1MB 上限防大文本同步 parse 卡顿 */
+export function expandIfJson(text: string): string {
+  const t = text.trim()
+  if (t === '' || t.length > 1_000_000 || (!t.startsWith('{') && !t.startsWith('['))) return text
+  const segs = topLevelSegments(t)
+  if (segs !== null && segs.length >= 2) {
+    // 任一段不可展开整体原样（保守）；危险数字形状段原样保留、安全段照常展开
+    const out: string[] = []
+    for (const seg of segs) {
+      const r = expandOne(seg)
+      if (r === null) return text
+      out.push(r)
+    }
+    return out.join('\n')
+  }
+  return expandOne(t) ?? text
 }
 
 /** 整文恰为单个 JSON 字符串字面量时还原其内容，其余形态返回 null（调用方提示后不改写） */

@@ -404,7 +404,7 @@ describe('到期推进与通知', () => {
     expect((snap.pomodoro as Record<string, unknown>).phase).toBe('break')
     expect((snap.pomodoro as Record<string, unknown>).endAt).toBe(T0 + 25 * MIN + 100 + 5 * MIN)
     expect(snap.todayCount).toBe(1)
-    expect(h.float.lastHtml).toContain('☕')
+    expect(h.float.lastHtml).toContain('k-break')
 
     h.setNow(T0 + 30 * MIN + 200)
     await h.tick()
@@ -466,13 +466,13 @@ describe('悬浮球', () => {
     expect(h.float.created.length).toBe(2)
   })
 
-  it('create 参数：80x80、置顶、透明、不抢焦点、不可缩放', async () => {
+  it('create 参数：96x96、置顶、透明、不抢焦点、不可缩放', async () => {
     const h = await makeHarness()
     h.sendCmd(cdStart())
     await h.tick()
     const opts = h.float.created[0]!.opts
-    expect(opts.width).toBe(80)
-    expect(opts.height).toBe(80)
+    expect(opts.width).toBe(96)
+    expect(opts.height).toBe(96)
     expect(opts.alwaysOnTop).toBe(true)
     expect(opts.transparent).toBe(true)
     expect(opts.focus).toBe(false)

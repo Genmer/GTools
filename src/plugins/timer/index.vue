@@ -92,8 +92,19 @@ const todayKey = computed(() => dateKeyOf(now.value))
 const CD_PRESETS: readonly { label: string; ms: number }[] = [
   { label: '1m', ms: 60_000 },
   { label: '5m', ms: 300_000 },
-  { label: '25m', ms: 1_500_000 }
+  { label: '10m', ms: 600_000 },
+  { label: '25m', ms: 1_500_000 },
+  { label: '45m', ms: 2_700_000 },
+  { label: '1h', ms: 3_600_000 }
 ]
+
+// 圆环仪表（与悬浮球同语义：环=剩余量，从满递减到空）
+const DIAL_R = 53
+const DIAL_C = 2 * Math.PI * DIAL_R
+function dialStyle(frac: number): Record<string, string> {
+  const p = Math.min(1, Math.max(0, frac))
+  return { strokeDasharray: `${DIAL_C.toFixed(2)}`, strokeDashoffset: `${(DIAL_C * (1 - p)).toFixed(2)}` }
+}
 
 const cdInvalid = computed(() => cdInput.value.trim() !== '' && parseDuration(cdInput.value) === null)
 const cdClock = computed(() => {
@@ -104,22 +115,32 @@ const cdClock = computed(() => {
   const preview = parseDuration(cdInput.value) // 空闲态预览当前输入的时长
   return preview === null ? '00:00' : formatRemaining(preview)
 })
-const cdProgress = computed(() => {
+const cdDialFrac = computed(() => {
   const s = activeCountdown.value
   if (s.totalMs <= 0) return 0
-  const left = s.status === 'running' ? remaining(s.endAt, now.value) : s.status === 'paused' ? s.remainingMs : s.status === 'expired' ? 0 : s.totalMs
-  return Math.min(100, Math.max(0, ((s.totalMs - left) / s.totalMs) * 100))
+  if (s.status === 'running') return Math.min(1, Math.max(0, remaining(s.endAt, now.value) / s.totalMs))
+  if (s.status === 'paused') return Math.min(1, Math.max(0, s.remainingMs / s.totalMs))
+  return 0 // idle 预览 / expired 收尾都不画弧
 })
+const cdDialStyle = computed(() => dialStyle(cdDialFrac.value))
+const cdDialClass = computed(() => (activeCountdown.value.status === 'running' ? 'run' : 'hold'))
 
 const pmClock = computed(() => {
   const s = activePomodoro.value
   if (s.status === 'idle') return formatClock(effSettings.value.focusMin * 60_000)
   return formatClock(remainingMsOf(s, now.value))
 })
-const pmProgress = computed(() => {
+const pmDialFrac = computed(() => {
   const s = activePomodoro.value
-  if (s.totalMs <= 0) return 0
-  return Math.min(100, Math.max(0, ((s.totalMs - remainingMsOf(s, now.value)) / s.totalMs) * 100))
+  if (s.status === 'idle' || s.totalMs <= 0) return 0
+  return Math.min(1, Math.max(0, remainingMsOf(s, now.value) / s.totalMs))
+})
+const pmDialStyle = computed(() => dialStyle(pmDialFrac.value))
+const pmDialClass = computed(() => {
+  const s = activePomodoro.value
+  if (s.status === 'idle') return ''
+  if (s.status === 'paused') return 'hold'
+  return s.phase === 'break' ? 'run brk' : 'run'
 })
 const phasePill = computed(() => {
   const s = activePomodoro.value
@@ -418,36 +439,20 @@ onUnmounted(() => {
     </header>
 
     <section v-if="mode === 'countdown'" class="card" :class="{ running: activeCountdown.status === 'running' }">
-      <div class="clock mono">{{ cdClock }}</div>
-      <div class="track"><i class="fill" :style="{ width: `${cdProgress}%` }"></i></div>
-      <p v-if="activeCountdown.status !== 'idle' && activeCountdown.label !== ''" class="linked" :title="activeCountdown.label">
-        「{{ activeCountdown.label }}」 · 共 {{ formatDuration(activeCountdown.totalMs) }}
-      </p>
-      <p v-else-if="activeCountdown.status !== 'idle'" class="linked">共 {{ formatDuration(activeCountdown.totalMs) }}</p>
-      <p v-else class="linked">到点发系统通知 · 窗口隐藏也在计时</p>
-
-      <div class="controls">
-        <button
-          v-for="p in CD_PRESETS"
-          :key="p.label"
-          type="button"
-          class="btn"
-          :class="{ 'preset-on': cdInput === p.label }"
-          @click="applyPreset(p)"
-        >
-          {{ p.label }}
-        </button>
-        <input
-          v-model="cdInput"
-          class="input num mono"
-          type="text"
-          placeholder="25m / 1h30m / 90s"
-          spellcheck="false"
-          @keydown.enter="startCountdownFromInput"
-        />
-        <input v-model="cdLabel" class="input grow" type="text" placeholder="标签（可选，如：泡面）" spellcheck="false" maxlength="120" />
+      <div class="dial-wrap">
+        <svg class="dial" viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="track" cx="60" cy="60" :r="DIAL_R"></circle>
+          <circle class="arc" :class="cdDialClass" cx="60" cy="60" :r="DIAL_R" :style="cdDialStyle"></circle>
+        </svg>
+        <div class="dial-center">
+          <div class="clock mono" :class="{ dim: activeCountdown.status === 'idle' }">{{ cdClock }}</div>
+          <div class="cap">
+            <template v-if="activeCountdown.status === 'idle'">选择或输入时长</template>
+            <template v-else-if="activeCountdown.status === 'expired'">时间到</template>
+            <template v-else>{{ activeCountdown.label !== '' ? `${activeCountdown.label} · ` : '' }}共 {{ formatDuration(activeCountdown.totalMs) }}</template>
+          </div>
+        </div>
       </div>
-      <p v-if="cdInvalid" class="error">时长无法识别：支持 90s / 25m / 1h30m，或纯数字（按分钟）</p>
 
       <div class="actions">
         <template v-if="activeCountdown.status === 'running'">
@@ -466,20 +471,50 @@ onUnmounted(() => {
         </template>
       </div>
 
+      <div class="controls">
+        <div class="presets">
+          <button
+            v-for="p in CD_PRESETS"
+            :key="p.label"
+            type="button"
+            class="chip mono"
+            :class="{ 'preset-on': cdInput === p.label }"
+            @click="applyPreset(p)"
+          >
+            {{ p.label }}
+          </button>
+        </div>
+        <div class="inputs">
+          <input
+            v-model="cdInput"
+            class="input num mono"
+            type="text"
+            placeholder="自定义：90 / 90s / 1h30m"
+            spellcheck="false"
+            @keydown.enter="startCountdownFromInput"
+          />
+          <input v-model="cdLabel" class="input grow" type="text" placeholder="标签（可选，如：泡面）" spellcheck="false" maxlength="120" />
+        </div>
+        <p class="hint">纯数字按分钟 · 最长 7 天 · 到点系统通知，窗口隐藏也在计时</p>
+        <p v-if="cdInvalid" class="error">时长无法识别：支持 90s / 25m / 1h30m，或纯数字（按分钟）</p>
+      </div>
+
       <div v-if="activeCountdown.status === 'expired'" class="cd-banner">
         <span>⏰ 时间到！{{ activeCountdown.label !== '' ? `「${activeCountdown.label}」` : '' }}设定的 {{ formatDuration(activeCountdown.totalMs) }} 已到</span>
       </div>
     </section>
 
-    <section v-else class="card" :class="{ running: activePomodoro.status === 'running' }">
-      <div class="card-top">
-        <span class="phase" :class="{ on: activePomodoro.status === 'running' }">{{ phasePill }}</span>
-        <span class="spacer"></span>
-        <span class="linked">专注 {{ effSettings.focusMin }} 分钟 · 休息 {{ effSettings.breakMin }} 分钟</span>
+    <section v-else class="card" :class="{ running: activePomodoro.status === 'running', brk: activePomodoro.status === 'running' && activePomodoro.phase === 'break' }">
+      <div class="dial-wrap">
+        <svg class="dial" viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="track" cx="60" cy="60" :r="DIAL_R"></circle>
+          <circle class="arc" :class="pmDialClass" cx="60" cy="60" :r="DIAL_R" :style="pmDialStyle"></circle>
+        </svg>
+        <div class="dial-center">
+          <div class="clock mono" :class="{ dim: activePomodoro.status === 'idle' }">{{ pmClock }}</div>
+          <span class="phase" :class="{ on: activePomodoro.status === 'running' }">{{ phasePill }}</span>
+        </div>
       </div>
-
-      <div class="clock mono">{{ pmClock }}</div>
-      <div class="track"><i class="fill" :style="{ width: `${pmProgress}%` }"></i></div>
 
       <div class="actions">
         <button type="button" class="btn primary grow" @click="onPmMainButton">{{ pmMainText }}</button>
@@ -578,19 +613,14 @@ onUnmounted(() => {
 .card {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   padding: var(--sp-4);
   background: var(--bg-raised);
   border-radius: var(--r-lg);
 }
-.card-top {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
 .phase {
-  padding: 2px 8px;
-  border-radius: var(--r-sm);
+  padding: 2px 10px;
+  border-radius: 999px;
   background: var(--hover);
   color: var(--fg-dim);
   font-size: var(--fs-foot);
@@ -600,47 +630,109 @@ onUnmounted(() => {
   color: var(--accent);
   font-weight: 600;
 }
+
+/* 圆环仪表：环=剩余量，从满递减；与悬浮球进度环同一语义 */
+.dial-wrap {
+  position: relative;
+  width: 176px;
+  height: 176px;
+  margin: var(--sp-1) auto 0;
+}
+.dial {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.dial circle {
+  fill: none;
+  stroke-width: 7;
+}
+.dial .track {
+  stroke: var(--border);
+}
+.dial .arc {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.4s linear, stroke 0.2s;
+}
+.dial .arc.hold {
+  stroke: var(--fg-dim);
+}
+.dial .arc.brk {
+  stroke: var(--ok);
+}
+.dial-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
 .clock {
-  font-size: 46px;
+  font-size: 34px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: 2px;
   line-height: 1.1;
-  text-align: center;
   color: var(--fg);
+}
+.clock.dim {
+  color: var(--fg-dim);
 }
 .card.running .clock {
   color: var(--accent);
 }
-.track {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--hover);
-  overflow: hidden;
+.card.running.brk .clock {
+  color: var(--ok);
 }
-.fill {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: var(--accent);
-  transition: width 0.3s linear;
-}
-.linked {
-  margin: 0;
-  min-height: 18px;
+.cap {
   color: var(--fg-dim);
   font-size: var(--fs-sub);
+  max-width: 130px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: center;
 }
 
 .controls {
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: var(--sp-2);
+}
+.presets {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
   flex-wrap: wrap;
+}
+.chip {
+  height: 28px;
+  min-width: 52px;
+  box-sizing: border-box;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: var(--fs-sub);
+  cursor: pointer;
+}
+.chip:hover {
+  background: var(--hover);
+}
+.chip.preset-on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+  font-weight: 600;
+}
+.inputs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
 }
 .input {
   height: 32px;
@@ -656,8 +748,14 @@ onUnmounted(() => {
 .input:focus {
   box-shadow: 0 0 0 2px var(--accent-dim);
 }
-.num {
-  width: 108px;
+.input.num {
+  width: 168px;
+  text-align: center;
+}
+.hint {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: var(--fs-foot);
   text-align: center;
 }
 .error {
@@ -698,11 +796,6 @@ onUnmounted(() => {
 .btn.primary:hover:not(:disabled) {
   background: var(--accent);
   filter: brightness(1.08);
-}
-.btn.preset-on {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-dim);
 }
 .grow {
   flex: 1;
