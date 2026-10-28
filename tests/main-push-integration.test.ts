@@ -60,7 +60,7 @@ function makeCtx(emits: { event: string; payload: unknown }[]): BackendContext {
     net: { fetch: async () => { throw new Error('no net') }, lanAddresses: async () => [] },
     notification: { show: async () => {} },
     shell: { openApp: async () => {}, openPath: async () => {}, openExternal: async () => {} },
-    window: { hide: async () => {}, float: { create: async () => '', update: async () => {}, close: async () => {}, closeAll: async () => {} } },
+    window: { hide: async () => {}, showMain: async () => {}, float: { create: async () => '', update: async () => {}, close: async () => {}, closeAll: async () => {} } },
     screenshot: { capture: async () => ({ action: 'cancel' as const }) },
     dialog: { openFile: async () => [], saveFile: async () => null },
     fs: {

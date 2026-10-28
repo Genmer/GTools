@@ -12,6 +12,8 @@ interface RouterState {
   initialCommand: string | null
   /** 拖拽携参进入插件时携带的文件列表（如拖 PDF 进 pdf-tools）；清理点见 syncMode/enterPlugin/resetForShow */
   initialPayload: MatchFile[] | null
+  /** 激活注入文本（如剪贴板 JSON 全文），大文本不走 query 通道；清理点同 initialPayload */
+  initialText: string | null
 }
 
 export const router = reactive<RouterState>({
@@ -19,7 +21,8 @@ export const router = reactive<RouterState>({
   query: '',
   activePluginId: null,
   initialCommand: null,
-  initialPayload: null
+  initialPayload: null,
+  initialText: null
 })
 
 /** "kw rest" 形态（keyword 后必须跟空格）才进入插件模式，避免输入中途劫持候选列表 */
@@ -44,7 +47,10 @@ export function syncMode(manifests: PluginManifest[]): void {
   if (hit) {
     // 手输关键字进入插件态不经 enterPlugin、不带 payload，须清残留；
     // 条件必要：enterPlugin 先置 mode='plugin'，query watcher 后跑的 syncMode 不得误清刚携入的 payload
-    if (router.mode !== 'plugin') router.initialPayload = null
+    if (router.mode !== 'plugin') {
+      router.initialPayload = null
+      router.initialText = null
+    }
     router.mode = 'plugin'
     router.activePluginId = hit.id
   } else if (router.mode === 'plugin') {
@@ -52,6 +58,7 @@ export function syncMode(manifests: PluginManifest[]): void {
     router.activePluginId = null
     router.initialCommand = null
     router.initialPayload = null
+    router.initialText = null
   }
 }
 
@@ -66,7 +73,8 @@ export function enterPlugin(
   manifests: PluginManifest[],
   initialCommand?: string,
   rest = '',
-  payload?: MatchFile[]
+  payload?: MatchFile[],
+  text?: string
 ): void {
   const m = manifests.find((x) => x.id === id)
   if (!m) return
@@ -76,6 +84,7 @@ export function enterPlugin(
   router.initialCommand = initialCommand ?? null
   // 无条件覆盖：exitLevel 直改字段退插件不经 syncMode，残留靠此处清掉；不带参即置 null
   router.initialPayload = payload ?? null
+  router.initialText = text ?? null
 }
 
 export function isSettingsEntry(pluginId: string): boolean {
@@ -90,4 +99,5 @@ export function resetForShow(force = false): void {
   router.activePluginId = null
   router.initialCommand = null
   router.initialPayload = null
+  router.initialText = null
 }

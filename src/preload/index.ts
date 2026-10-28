@@ -6,6 +6,7 @@ const allowedEventChannels = (channel: string): boolean =>
   channel === 'plugin-state-changed' ||
   channel === 'api-services-changed' ||
   channel === 'host:open-settings' ||
+  channel === 'host:open-plugin' ||
   channel === 'command-hotkey' ||
   channel === 'hotkey-captured' ||
   channel === 'update-download-progress' ||

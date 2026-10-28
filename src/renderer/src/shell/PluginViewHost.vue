@@ -88,6 +88,7 @@ defineExpose({ focusContent })
         :query="rest"
         :initial-command="router.initialCommand"
         :initial-payload="router.initialPayload ?? undefined"
+        :initial-text="router.initialText ?? undefined"
       />
       <div v-else class="plugin-error"><p>插件视图未找到</p></div>
     </div>

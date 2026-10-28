@@ -1,44 +1,44 @@
 /**
- * 渲染层 → backend 的计时命令通道：storage 单槽 + 单调 seq。
+ * 渲染层 → backend 的统一命令槽（storage 单槽 + 单调 seq，倒计时与番茄钟共用）。
  * backend 只认 seq 更新的命令，渲染层覆盖写「最新者胜」——
- * 500ms 轮询窗口内连点多个命令时，语义上最后一条就是用户当前意图（如连点 开始→停止 只落「停止」）。
+ * 轮询窗口内连点多个命令时，语义上最后一条就是用户当前意图（如连点 开始→停止 只落「停止」）。
  */
 
-import { clampMinutes, DEFAULT_TIMER_SETTINGS } from './timer'
+import { clampDurationMs } from './countdown'
+import { clampMinutes, DEFAULT_TIMER_SETTINGS } from './pomodoro'
 
-export const CMD_KEY = 'timer-cmd'
+export const CMD_KEY = 'cmd'
 
-export interface StartCommand {
-  type: 'start'
-  todoId: string | null
-  todoTitle: string
-  focusMin: number
-  breakMin: number
-  autoStartBreak: boolean
-}
-
-export type TimerCommand =
-  | StartCommand
+export type TimerPluginCommand =
+  | { type: 'cd-start'; ms: number; label: string }
+  | { type: 'pm-start'; focusMin: number; breakMin: number; autoStartBreak: boolean }
   | { type: 'pause' }
   | { type: 'resume' }
   | { type: 'stop' }
   | { type: 'skip' }
-  | { type: 'note-toggle'; visible: boolean }
+  | { type: 'ball-toggle'; visible: boolean }
 
 export interface CommandEnvelope {
   seq: number
-  cmd: TimerCommand
+  cmd: TimerPluginCommand
 }
 
-function parseCommandBody(raw: unknown): TimerCommand | null {
+function parseCommandBody(raw: unknown): TimerPluginCommand | null {
   if (typeof raw !== 'object' || raw === null) return null
   const r = raw as Record<string, unknown>
   switch (r.type) {
-    case 'start':
+    case 'cd-start': {
+      const ms = clampDurationMs(r.ms)
+      if (ms === null) return null
       return {
-        type: 'start',
-        todoId: typeof r.todoId === 'string' && r.todoId !== '' ? r.todoId : null,
-        todoTitle: typeof r.todoTitle === 'string' ? r.todoTitle.trim().slice(0, 120) : '',
+        type: 'cd-start',
+        ms,
+        label: typeof r.label === 'string' ? r.label.trim().slice(0, 120) : ''
+      }
+    }
+    case 'pm-start':
+      return {
+        type: 'pm-start',
         focusMin: clampMinutes(r.focusMin, DEFAULT_TIMER_SETTINGS.focusMin),
         breakMin: clampMinutes(r.breakMin, DEFAULT_TIMER_SETTINGS.breakMin),
         autoStartBreak: r.autoStartBreak !== false
@@ -48,8 +48,8 @@ function parseCommandBody(raw: unknown): TimerCommand | null {
     case 'stop':
     case 'skip':
       return { type: r.type }
-    case 'note-toggle':
-      return { type: 'note-toggle', visible: r.visible === true }
+    case 'ball-toggle':
+      return { type: 'ball-toggle', visible: r.visible === true }
     default:
       return null
   }

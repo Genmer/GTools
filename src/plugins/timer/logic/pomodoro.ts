@@ -1,7 +1,7 @@
 /** 番茄钟纯状态机：钟面时间以 endAt 换算，容忍 tick 漂移与系统休眠。 */
 
 export type TimerPhase = 'focus' | 'break'
-export type TimerStatus = 'idle' | 'running' | 'paused'
+export type PomodoroStatus = 'idle' | 'running' | 'paused'
 
 export interface TimerSettings {
   focusMin: number
@@ -29,87 +29,51 @@ export function normalizeTimerSettings(raw: unknown): TimerSettings {
   }
 }
 
-export interface TimerState {
-  status: TimerStatus
+export interface PomodoroState {
+  status: PomodoroStatus
   phase: TimerPhase
   /** paused/idle 定格的剩余毫秒；running 时以 endAt 为准 */
   remainingMs: number
   endAt: number | null
   /** 当前阶段总时长，供进度展示 */
   totalMs: number
-  linkedTodoId: string | null
-  linkedTodoTitle: string
 }
 
-export const IDLE_TIMER_STATE: TimerState = {
+export const IDLE_POMODORO_STATE: PomodoroState = {
   status: 'idle',
   phase: 'focus',
   remainingMs: 0,
   endAt: null,
-  totalMs: 0,
-  linkedTodoId: null,
-  linkedTodoTitle: ''
+  totalMs: 0
 }
 
-export interface SessionSettings extends TimerSettings {}
-
-export interface StartOptions {
-  focusMin: number
-  breakMin: number
-  autoStartBreak: boolean
-  todoId: string | null
-  todoTitle: string
-}
-
-function titleOf(raw: unknown): string {
-  if (typeof raw !== 'string') return ''
-  return raw.trim().slice(0, 120)
-}
-
-export function startFocus(_s: TimerState, opts: StartOptions, now: number): TimerState {
+export function startFocus(opts: { focusMin: number }, now: number): PomodoroState {
   const focusMin = clampMinutes(opts.focusMin, DEFAULT_TIMER_SETTINGS.focusMin)
   const totalMs = focusMin * 60_000
-  return {
-    status: 'running',
-    phase: 'focus',
-    remainingMs: totalMs,
-    endAt: now + totalMs,
-    totalMs,
-    linkedTodoId: typeof opts.todoId === 'string' && opts.todoId !== '' ? opts.todoId : null,
-    linkedTodoTitle: titleOf(opts.todoTitle)
-  }
+  return { status: 'running', phase: 'focus', remainingMs: totalMs, endAt: now + totalMs, totalMs }
 }
 
-export function startBreak(s: TimerState, breakMin: number, now: number): TimerState {
+export function startBreak(_s: PomodoroState, breakMin: number, now: number): PomodoroState {
   const totalMs = clampMinutes(breakMin, DEFAULT_TIMER_SETTINGS.breakMin) * 60_000
-  return {
-    status: 'running',
-    phase: 'break',
-    remainingMs: totalMs,
-    endAt: now + totalMs,
-    totalMs,
-    // 休息期保留关联待办，便签/通知可显示上下文
-    linkedTodoId: s.linkedTodoId,
-    linkedTodoTitle: s.linkedTodoTitle
-  }
+  return { status: 'running', phase: 'break', remainingMs: totalMs, endAt: now + totalMs, totalMs }
 }
 
-export function pauseTimer(s: TimerState, now: number): TimerState {
+export function pausePomodoro(s: PomodoroState, now: number): PomodoroState {
   if (s.status !== 'running' || s.endAt === null) return s
   return { ...s, status: 'paused', remainingMs: Math.max(0, s.endAt - now), endAt: null }
 }
 
-export function resumeTimer(s: TimerState, now: number): TimerState {
+export function resumePomodoro(s: PomodoroState, now: number): PomodoroState {
   if (s.status !== 'paused') return s
   return { ...s, status: 'running', endAt: now + Math.max(0, s.remainingMs) }
 }
 
-export function stopTimer(): TimerState {
-  return { ...IDLE_TIMER_STATE }
+export function stopPomodoro(): PomodoroState {
+  return { ...IDLE_POMODORO_STATE }
 }
 
 export interface TickResult {
-  state: TimerState
+  state: PomodoroState
   /** 本 tick 刚结束的阶段（跳过不算） */
   completed: TimerPhase | null
 }
@@ -123,18 +87,18 @@ export interface TickOptions {
  * 推进计时：未到期返回 null（调用方免写盘/免通知）。
  * focus 结束按 autoStartBreak 决定自动进入 break 或回 idle；break 结束回 idle。
  */
-export function tickTimer(s: TimerState, now: number, opts: TickOptions): TickResult | null {
+export function tickPomodoro(s: PomodoroState, now: number, opts: TickOptions): TickResult | null {
   if (s.status !== 'running' || s.endAt === null || now < s.endAt) return null
   if (s.phase === 'focus') {
     if (opts.autoStartBreak) {
       return { state: startBreak(s, opts.breakMin, now), completed: 'focus' }
     }
-    return { state: { ...stopTimer(), linkedTodoId: null, linkedTodoTitle: '' }, completed: 'focus' }
+    return { state: stopPomodoro(), completed: 'focus' }
   }
-  return { state: { ...stopTimer(), linkedTodoId: null, linkedTodoTitle: '' }, completed: 'break' }
+  return { state: stopPomodoro(), completed: 'break' }
 }
 
-export function remainingMsOf(s: TimerState, now: number): number {
+export function remainingMsOf(s: PomodoroState, now: number): number {
   if (s.status === 'running' && s.endAt !== null) return Math.max(0, s.endAt - now)
   return Math.max(0, s.remainingMs)
 }
@@ -148,19 +112,8 @@ export function formatClock(ms: number): string {
   return `${pad(m)}:${pad(s)}`
 }
 
-export interface PersistedTimer {
-  v: 1
-  state: TimerState
-  /** 会话设置快照（idle 时为 null），重启恢复自动休息等行为 */
-  session: SessionSettings | null
-  noteVisible: boolean
-}
-
-export function toPersistedTimer(state: TimerState, session: SessionSettings | null, noteVisible: boolean): PersistedTimer {
-  return { v: 1, state, session, noteVisible }
-}
-
-function parseState(raw: unknown): TimerState | null {
+/** 持久化态防御式解析：结构不对返回 null（按空闲启动） */
+export function parsePomodoroState(raw: unknown): PomodoroState | null {
   if (typeof raw !== 'object' || raw === null) return null
   const r = raw as Record<string, unknown>
   const status = r.status
@@ -173,18 +126,6 @@ function parseState(raw: unknown): TimerState | null {
     phase,
     remainingMs: typeof r.remainingMs === 'number' && Number.isFinite(r.remainingMs) ? Math.max(0, r.remainingMs) : 0,
     endAt,
-    totalMs: typeof r.totalMs === 'number' && Number.isFinite(r.totalMs) ? Math.max(0, r.totalMs) : 0,
-    linkedTodoId: typeof r.linkedTodoId === 'string' && r.linkedTodoId !== '' ? r.linkedTodoId : null,
-    linkedTodoTitle: titleOf(r.linkedTodoTitle)
+    totalMs: typeof r.totalMs === 'number' && Number.isFinite(r.totalMs) ? Math.max(0, r.totalMs) : 0
   }
-}
-
-/** 解析持久化计时态；结构非法返回 null（按空闲启动） */
-export function parsePersistedTimer(raw: unknown): PersistedTimer | null {
-  if (typeof raw !== 'object' || raw === null) return null
-  const r = raw as Record<string, unknown>
-  const state = parseState(r.state)
-  if (state === null) return null
-  const session = state.status === 'idle' ? null : normalizeTimerSettings(r.session)
-  return { v: 1, state, session, noteVisible: r.noteVisible !== false }
 }

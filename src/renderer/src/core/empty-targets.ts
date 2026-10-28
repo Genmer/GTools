@@ -6,7 +6,15 @@ import type { MatchFile, RecItem } from './recommend'
 
 /** 空态键盘导航的扁平目标 */
 export type EmptyTarget =
-  | { kind: 'plugin'; pluginId: string; commandId?: string; payload?: string; files?: MatchFile[] }
+  | {
+      kind: 'plugin'
+      pluginId: string
+      commandId?: string
+      payload?: string
+      files?: MatchFile[]
+      /** 激活注入文本（initialText 通道）：json 源携带全文，payload 置空不进 query */
+      text?: string
+    }
   | { kind: 'app'; appId: string }
   | { kind: 'apps-toggle' }
   | { kind: 'history'; query: string }
@@ -53,8 +61,10 @@ function clipTargets(base: EmptyTargetsBase): EmptyTarget[] {
     kind: 'plugin' as const,
     pluginId: r.pluginId,
     commandId: r.commandId,
-    payload: r.payload,
-    files: r.source === 'files' || r.source === 'img' ? base.dropFiles : undefined
+    // json 源全文走 initialText 通道（text 字段），不拼进 query 通路
+    payload: r.source === 'json' ? undefined : r.payload,
+    files: r.source === 'files' || r.source === 'img' ? base.dropFiles : undefined,
+    text: r.source === 'json' ? r.payload : undefined
   }))
 }
 

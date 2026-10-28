@@ -592,7 +592,7 @@ await ctx.host.window.float.closeAll()   // 关自己插件的全部浮窗
   - `gtoolsFloat.close()` —— 关掉自己（关闭按钮用）；
   - `gtoolsFloat.emit(event, payload)` —— 向创建方插件回传事件；
   - `gtoolsFloat.info()` —— 拿到 `{ id, pluginId }`；
-- 渲染层监听回传：`ctx.host.events.on('float-event', (p) => ...)`，`p: { id, event, payload }`（`FloatWindowEvent` 类型）。
+- 渲染层监听回传：`ctx.host.events.on('float-event', (p) => ...)`，`p: { id, event, payload }`（`FloatWindowEvent` 类型）。**backend 同样可订阅**：`ctx.events.on('float-event', cb)`（见 A.10），`float-event` 会同时投递渲染层与 backend 订阅者。
 
 **生命周期与防泄漏（宿主保证）**：单插件上限 8 个（超限报错）；`html` 上限 200 万字符；插件被禁用时宿主自动关掉它的全部浮窗；应用退出统一关闭；窗口被用户关闭后 `update/close` 报「不存在」。插件只能操作自己创建的浮窗。浮窗页面**没有**宿主能力面（不能调 storage/net 等），需要数据时经 `emit` 回插件视图再 `update` 刷新内容。
 
@@ -658,6 +658,19 @@ backend（主进程模块）import 白名单在原有基础上**增加 `node:` �
 ### A.9 uTools 移植容器 POC（utools-port 插件，阶段 1）
 
 外部 uTools 插件整个目录放进 `userData/utools-plugins/`（独立目录，与 `userData/plugins/` 安全边界无关——那边仍只校验不实例化）；仅在 utools-port 管理页**显式打开**才运行。主进程起 127.0.0.1 随机端口静态服务（插件目录白名单 + resolve 防穿越）供 iframe 加载页面并注入 `window.utools` shim；**不执行插件 preload.js**（require 全量 Node，与渲染沙箱互斥），API 仅白名单 onPluginEnter / onPluginOut（离开容器广播）/ copyText / notify / hideMainWindow，经 postMessage 桥由 `gtools:host` 的 `utools:api` 代理，其余 `utools.*` 成员不存在（插件自行降级）。容器页不支持分离独立窗口：`utools:serve/stop/api` 仅主搜索窗可调，分离态打开会报「启动本地服务失败」并优雅降级。
+
+### A.10 backend 事件订阅与 window.showMain（v0.1.0 新增）
+
+**backend 订阅事件**：backend 在 `init(ctx)` 里 `ctx.events.on(event, cb)`（返回退订函数，订阅随 BackendContext 存活）。当前宿主投递给 backend 订阅者的事件是 `float-event`（浮窗页面回传，载荷 `{ id, event, payload }`）；backend 自己 `ctx.emit(...)` 仍只发渲染层，不自环。渲染层 `ctx.host.events.on(...)` 语义不变。
+
+**唤起主窗 `window.showMain`（权限 `window:main`）**：悬浮窗/后台场景回到主 UI 的入口，渲染层与 backend 同一面：
+
+```ts
+await ctx.window.showMain()                                  // 仅唤起主搜索窗
+await ctx.window.showMain({ pluginId: 'timer', commandId: 'pomodoro', query: '' })  // 唤起并直达插件命令态
+```
+
+参数三字段均可选且须为字符串；带 `pluginId` 时主窗经 `host:open-plugin` 通道进入该插件（等同用户点开搜索结果，`query` 进插件剩余输入）。
 
 ---
 

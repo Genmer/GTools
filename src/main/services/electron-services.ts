@@ -21,6 +21,7 @@ import { assertHttpUrl, resolveFetchBody } from './net-guard'
 import { lanIPv4Addresses } from './lan'
 import type { StreamFetchResponse } from './update-downloader'
 import { FloatWindowManager, type FloatWindowHostOptions, type FloatWindowLike } from './float-window'
+import { getSearchWindow, showSearchWindow } from '../window'
 import { FileAccessService, type FileAccessFs } from './file-access'
 import { createScreenshotService, type CapturedFrame, type OverlayHandle } from './screenshot'
 import { extractIcnsPngForSize, lnkIconCandidates } from './native-apps'
@@ -193,6 +194,13 @@ export function createElectronServices(opts: {
   const storage = new PluginStorageService(opts.storageRoot)
   const fileAccess = new FileAccessService(nodeFs as unknown as FileAccessFs)
 
+  // backend 事件订阅登记：key=pluginId，值为该插件全部订阅（随 BackendContext 存活，退订即删）
+  interface BackendSub {
+    event: string
+    cb: (p: unknown) => void
+  }
+  const backendSubs = new Map<string, Set<BackendSub>>()
+
   const events = {
     emitToRenderer: (pluginId: string, event: string, payload: unknown): void => {
       const channel = `plugin-event:${pluginId}`
@@ -202,6 +210,32 @@ export function createElectronServices(opts: {
         } catch {
           // 窗口销毁竞态：跳过该窗口
         }
+      }
+    },
+    // 渲染层 + backend 订阅者双投递；backend 自己 ctx.emit 仍走 emitToRenderer（不自环）
+    emit: (pluginId: string, event: string, payload: unknown): void => {
+      events.emitToRenderer(pluginId, event, payload)
+      const subs = backendSubs.get(pluginId)
+      if (subs === undefined) return
+      for (const s of [...subs]) {
+        if (s.event !== event) continue
+        try {
+          s.cb(payload)
+        } catch {
+          // 单个订阅者抛错不影响其余投递
+        }
+      }
+    },
+    onPluginEvent: (pluginId: string, event: string, cb: (p: unknown) => void): (() => void) => {
+      let set = backendSubs.get(pluginId)
+      if (set === undefined) {
+        set = new Set()
+        backendSubs.set(pluginId, set)
+      }
+      const sub: BackendSub = { event, cb }
+      set.add(sub)
+      return () => {
+        set!.delete(sub)
       }
     }
   }
@@ -264,7 +298,7 @@ export function createElectronServices(opts: {
         return screen.getPrimaryDisplay().workArea
       }
     },
-    onFloatEvent: (pluginId, payload) => events.emitToRenderer(pluginId, 'float-event', payload)
+    onFloatEvent: (pluginId, payload) => events.emit(pluginId, 'float-event', payload)
   })
 
   const screenshot = createScreenshotService({
@@ -460,6 +494,13 @@ export function createElectronServices(opts: {
       hide: () => {
         opts.getWindow()?.hide()
         return Promise.resolve()
+      },
+      // 浮窗/后台回到主 UI：唤起主窗 + 可选直达插件命令态（渲染层经 host:open-plugin 白名单通道接收）
+      showMain: async (o) => {
+        showSearchWindow()
+        if (o?.pluginId) {
+          getSearchWindow()?.webContents.send('host:open-plugin', { pluginId: o.pluginId, commandId: o.commandId, query: o.query })
+        }
       },
       float
     },

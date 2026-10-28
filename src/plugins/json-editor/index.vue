@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { MatchFile, PluginContext } from '@sdk/api'
-import { countLines, parseJson, posToLineCol, reformat, windowRange, type JsonError } from './logic/json'
-import { highlightJson } from './logic/highlight'
+import { countLines, expandIfJson, parseJson, posToLineCol, reformat, topLevelSegments, windowRange, type JsonError } from './logic/json'
+import { buildFindMarks, highlightJson, highlightJsonWithFinds } from './logic/highlight'
+import { parseFindHistory, pushFindHistory } from './logic/find-history'
 import {
   TREE_ROW_HEIGHT,
   collectExpandAll,
@@ -13,10 +14,18 @@ import {
 } from './logic/tree'
 import { SAMPLE_JSON } from './logic/sample'
 
-const props = defineProps<{ ctx: PluginContext; query: string; initialCommand?: string; initialPayload?: MatchFile[] }>()
+const props = defineProps<{
+  ctx: PluginContext
+  query: string
+  initialCommand?: string
+  initialPayload?: MatchFile[]
+  initialText?: string
+}>()
 
 const DRAFT_KEY = 'draft'
 const TREE_ON_KEY = 'treeOn'
+const FIND_HISTORY_KEY = 'findHistory'
+const FIND_ALL_KEY = 'findAll'
 const PARSE_DEBOUNCE_MS = 250
 const SAVE_DEBOUNCE_MS = 500
 /** 草稿超过 256KB 不再走 IPC 持久化，避免每击键防抖序列化大字符串卡主进程 */
@@ -25,6 +34,8 @@ const DRAFT_MAX_SAVE = 262144
 const TREE_EXPAND_CAP = 50000
 const LINE_HEIGHT = 22
 const PAD_TOP = 8
+/** 全部高亮渲染的匹配条数上限：超过只渲染前 N 条，防超长文本海量 span 拖垮覆盖层 */
+const FIND_MARKS_RENDER_CAP = 2000
 
 // demo 态（deep-link demo=1 → initialCommand='demo'）：预填稳定示例且不落盘，避免覆盖用户草稿
 const demoMode = props.initialCommand === 'demo'
@@ -43,7 +54,17 @@ const editorEl = ref<HTMLTextAreaElement | null>(null)
 const hlEl = ref<HTMLElement | null>(null)
 const treeEl = ref<HTMLElement | null>(null)
 
-const highlightedText = computed(() => highlightJson(text.value))
+const findHistory = ref<string[]>([])
+// 默认 false = 仅当前条选区高亮（改造前现状），开 = 覆盖层标出全部匹配
+const findHlAll = ref(false)
+
+const highlightedText = computed(() => {
+  if (!findOn.value || !findHlAll.value || findCount.value === 0) return highlightJson(text.value)
+  return highlightJsonWithFinds(
+    text.value,
+    buildFindMarks(findMatches.value, findText.value.length, findIndex.value, FIND_MARKS_RENDER_CAP)
+  )
+})
 
 // 滚动位置与视口高度驱动虚拟窗口（行号槽 + 树）
 const editScroll = ref(0)
@@ -170,6 +191,10 @@ function toggleFind(): void {
 }
 
 function openFind(): void {
+  if (treeOn.value) {
+    flash('树视图不支持查找，请切回编辑视图')
+    return
+  }
   findOn.value = true
   void nextTick(() => {
     findEl.value?.focus()
@@ -189,9 +214,42 @@ watch(findText, () => {
 })
 
 function onFindStep(dir: 1 | -1): void {
+  recordFindHistory()
   if (findCount.value === 0) return
   findIndex.value = (findIndex.value + dir + findCount.value) % findCount.value
   showFindCurrent()
+}
+
+// 点历史 chip 覆盖查找词并定位；无匹配不动焦点（有定位时 showFindCurrent 会把焦点移到编辑区）
+function onPickFindHistory(term: string): void {
+  findText.value = term
+  findIndex.value = 0
+  if (findCount.value > 0) showFindCurrent()
+}
+
+function onRemoveFindHistory(term: string): void {
+  findHistory.value = findHistory.value.filter((t) => t !== term)
+  persistFindHistory()
+}
+
+function recordFindHistory(): void {
+  findHistory.value = pushFindHistory(findHistory.value, findText.value)
+  persistFindHistory()
+}
+
+function persistFindHistory(): void {
+  if (demoMode) return
+  void props.ctx.host.storage.set(FIND_HISTORY_KEY, findHistory.value).catch(() => {
+    // 存储失败不打断查找
+  })
+}
+
+function toggleFindHlAll(): void {
+  findHlAll.value = !findHlAll.value
+  if (demoMode) return
+  void props.ctx.host.storage.set(FIND_ALL_KEY, findHlAll.value).catch(() => {
+    // 存储失败不打断查找
+  })
 }
 
 function showFindCurrent(): void {
@@ -263,9 +321,27 @@ onMounted(async () => {
   } catch {
     treeOn.value = false
   }
-  const q = props.query.trim()
-  const fileText = await loadPayloadFiles()
-  text.value = [base, q, fileText].filter((s) => s !== '').join('\n')
+  try {
+    findHistory.value = parseFindHistory(await props.ctx.host.storage.get(FIND_HISTORY_KEY))
+  } catch {
+    findHistory.value = []
+  }
+  try {
+    findHlAll.value = (await props.ctx.host.storage.get(FIND_ALL_KEY)) === true
+  } catch {
+    findHlAll.value = false
+  }
+  // 三段注入（query 余文/initialText 激活注入文本/拖入文件内容）是 JSON 先展开再追加进草稿（base 不动）
+  const qRaw = props.query.trim()
+  const injectedRaw = props.initialText ?? ''
+  const fileRaw = await loadPayloadFiles()
+  const q = expandIfJson(qRaw)
+  const injected = expandIfJson(injectedRaw)
+  const fileText = expandIfJson(fileRaw)
+  // 多段展开只在确有改写时提示一次，取各注入源的最大段数
+  const segs = Math.max(segCountIfExpanded(qRaw, q), segCountIfExpanded(injectedRaw, injected), segCountIfExpanded(fileRaw, fileText))
+  if (segs >= 2) flash(`检测到 ${segs} 段 JSON，已分段展开`)
+  text.value = [base, q, injected, fileText].filter((s) => s !== '').join('\n')
   applyParse()
   expanded.value = defaultExpanded(parsed.value)
   void nextTick(() => editorEl.value?.focus())
@@ -409,6 +485,28 @@ function onTab(e: KeyboardEvent): void {
   text.value = `${text.value.slice(0, s)}  ${text.value.slice(end)}`
   void nextTick(() => ta.setSelectionRange(s + 2, s + 2))
 }
+
+// 多段拼接展开成功（切段 ≥2 且确有改写）才返回段数供 flash 提示，否则 0
+function segCountIfExpanded(raw: string, expanded: string): number {
+  if (raw.trim() === '' || expanded === raw) return 0
+  const segs = topLevelSegments(raw.trim())
+  return segs !== null && segs.length >= 2 ? segs.length : 0
+}
+
+// 粘贴的是 JSON 就展开后插入（同 expandIfJson 口径），非 JSON 走默认粘贴
+function onPaste(e: ClipboardEvent): void {
+  const raw = e.clipboardData?.getData('text/plain') ?? ''
+  if (raw === '') return
+  const fmt = expandIfJson(raw)
+  if (fmt === raw) return
+  const segs = segCountIfExpanded(raw, fmt)
+  if (segs >= 2) flash(`检测到 ${segs} 段 JSON，已分段展开`)
+  e.preventDefault()
+  const ta = e.target as HTMLTextAreaElement
+  const { selectionStart: s, selectionEnd: end } = ta
+  text.value = `${text.value.slice(0, s)}${fmt}${text.value.slice(end)}`
+  void nextTick(() => ta.setSelectionRange(s + fmt.length, s + fmt.length))
+}
 </script>
 
 <template>
@@ -432,7 +530,7 @@ function onTab(e: KeyboardEvent): void {
       <button class="btn" @click="loadSample">载入示例</button>
     </div>
 
-    <div v-if="findOn" class="findbar">
+    <div v-if="findOn && !treeOn" class="findbar">
       <input
         ref="findEl"
         v-model="findText"
@@ -443,9 +541,16 @@ function onTab(e: KeyboardEvent): void {
         @keydown.esc.prevent="closeFind"
       />
       <span class="find-count">{{ findCount === 0 ? '无匹配' : `${findIndex + 1}/${findCount}` }}</span>
+      <button class="btn mini-btn" :class="{ on: findHlAll }" :title="findHlAll ? '恢复仅高亮当前条' : '高亮全部匹配'" @click="toggleFindHlAll">全部</button>
       <button class="btn mini-btn" title="上一个 (Shift+Enter)" :disabled="findCount === 0" @click="onFindStep(-1)">↑</button>
       <button class="btn mini-btn" title="下一个 (Enter)" :disabled="findCount === 0" @click="onFindStep(1)">↓</button>
       <button class="btn mini-btn" title="关闭 (Esc)" @click="closeFind">×</button>
+      <div v-if="findHistory.length > 0" class="find-chips">
+        <span v-for="term in findHistory" :key="term" class="find-chip">
+          <button class="chip-text" :title="term" @click="onPickFindHistory(term)">{{ term }}</button>
+          <button class="chip-x" title="删除该历史词" @click.stop="onRemoveFindHistory(term)">×</button>
+        </span>
+      </div>
     </div>
 
     <div class="main">
@@ -473,6 +578,7 @@ function onTab(e: KeyboardEvent): void {
             spellcheck="false"
             placeholder='输入或粘贴 JSON&#10;支持格式化 / 压缩 / 校验 / 复制'
             @scroll="onEditorScroll"
+            @paste="onPaste"
             @keydown.tab="onTab"
             @keydown.ctrl.f.prevent="openFind"
             @keydown.meta.f.prevent="openFind"
@@ -724,6 +830,13 @@ function onTab(e: KeyboardEvent): void {
   color: var(--fg-dim);
   opacity: 0.8;
 }
+/* 高亮全部模式：命中底色比当前条（find-hit）弱一档，嵌在语法色 span 内 */
+.editor-hl :deep(.find-all) {
+  background: var(--accent-dim);
+}
+.editor-hl :deep(.find-all.cur) {
+  background: var(--find-hit);
+}
 .btn.on {
   border-color: var(--accent);
   color: var(--accent);
@@ -759,6 +872,51 @@ function onTab(e: KeyboardEvent): void {
   color: var(--fg-dim);
   font-size: var(--fs-foot);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.find-chips {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  gap: var(--sp-1);
+}
+.find-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-raised);
+}
+.find-chip .chip-text {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: none;
+  padding: 0 var(--sp-1);
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: var(--fs-foot);
+  line-height: 20px;
+  cursor: pointer;
+}
+.find-chip .chip-text:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+.find-chip .chip-x {
+  flex: none;
+  border: none;
+  padding: 0 var(--sp-1) 0 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: var(--fs-foot);
+  line-height: 20px;
+  cursor: pointer;
+}
+.find-chip .chip-x:hover {
+  color: var(--danger);
 }
 .tree-pane {
   flex: 1;

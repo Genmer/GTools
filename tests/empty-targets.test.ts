@@ -72,9 +72,10 @@ describe('buildEmptyTargets appsMode 段序锁定（推荐→历史→最近 til
     expect(targets[6]).toEqual({ kind: 'plugin', pluginId: 'cb', commandId: 'search' })
   })
 
-  it('files/img 源推荐行携带拖入集同一引用，json/push 源不带', () => {
+  it('files/img 源推荐行携带拖入集同一引用；json 源全文走 text 字段、payload 置 undefined', () => {
     const pluginTargets = targets.filter((t): t is PluginTarget => t.kind === 'plugin')
-    expect(pluginTargets[0]).toMatchObject({ pluginId: 'jsoner', payload: '{}, payload 透传' })
+    expect(pluginTargets[0]).toMatchObject({ pluginId: 'jsoner', text: '{}, payload 透传' })
+    expect(pluginTargets[0].payload).toBeUndefined()
     expect(pluginTargets[0].files).toBeUndefined()
     expect(pluginTargets[1].files).toBe(dropFiles)
     expect(pluginTargets[2].files).toBeUndefined()
@@ -97,6 +98,55 @@ describe('buildEmptyTargets 兜底分支段序锁定（推荐→历史→启用�
     expect(targets[2]).toEqual({ kind: 'plugin', pluginId: 'cb' })
     expect(targets[4]).toEqual({ kind: 'plugin', pluginId: 'cb', commandId: 'cmd-a' })
     expect(targets[5]).toEqual({ kind: 'plugin', pluginId: 'fy', commandId: undefined })
+  })
+})
+
+describe('clipTargets 按源分流 payload/text', () => {
+  it('json 源 text 携带命中文本且 payload 为 undefined；其余源维持 payload 通路、text 不带', () => {
+    const targets = buildEmptyTargets({
+      appsMode: false,
+      clipRecs: [
+        rec('jsoner', 'json', undefined, '{"a":1}'),
+        rec('texter', 'text', undefined, 'hello'),
+        rec('pusher', 'push', 'cmd', '推送文本')
+      ],
+      dropFiles: [],
+      history: [],
+      pluginIds: [],
+      recentRows: []
+    })
+    const [jsonT, textT, pushT] = targets as PluginTarget[]
+    expect(jsonT.text).toBe('{"a":1}')
+    expect(jsonT.payload).toBeUndefined()
+    expect(textT.payload).toBe('hello')
+    expect(textT.text).toBeUndefined()
+    expect(pushT.payload).toBe('推送文本')
+    expect(pushT.text).toBeUndefined()
+  })
+
+  it('img 源携带拖入集同一引用；json 源 payload 已被剥离（敏感 query）时 text 也为 undefined，多源混合保序', () => {
+    const targets = buildEmptyTargets({
+      appsMode: false,
+      clipRecs: [
+        rec('jsoner', 'json', undefined, '{"a":1}'),
+        rec('imger', 'img'),
+        rec('stripped', 'json', undefined, undefined),
+        rec('texter', 'text', undefined, 'hi')
+      ],
+      dropFiles,
+      history: [],
+      pluginIds: [],
+      recentRows: []
+    })
+    const [j1, imgT, strippedT, textT] = targets as PluginTarget[]
+    expect(j1.text).toBe('{"a":1}')
+    expect(imgT.files).toBe(dropFiles)
+    expect(imgT.text).toBeUndefined()
+    // 敏感剥离只进入不注入：text 不复活被 recommend 层剥掉的 payload
+    expect(strippedT.text).toBeUndefined()
+    expect(strippedT.payload).toBeUndefined()
+    expect(textT.payload).toBe('hi')
+    expect(targets.map((t) => (t as PluginTarget).pluginId)).toEqual(['jsoner', 'imger', 'stripped', 'texter'])
   })
 })
 

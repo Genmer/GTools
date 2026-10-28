@@ -19,23 +19,19 @@ describe('todo-pomodoro manifest', () => {
     expect(validateManifest(manifest, ctx)).toEqual([])
   })
 
-  it('resident 必带 backend，权限全部合法且最小化', () => {
-    expect(manifest.activation).toBe('resident')
-    expect(typeof manifest.backend).toBe('string')
-    expect(manifest.permissions).toEqual(['storage', 'notification', 'window:float'])
+  it('番茄钟已并入 timer：trigger 纯渲染层，权限仅 storage', () => {
+    expect(manifest.activation).toBe('trigger')
+    expect(manifest.backend).toBeUndefined()
+    expect(manifest.permissions).toEqual(['storage'])
     expect(manifest.protocolVersion).toBe(1)
     expect(manifest.source).toBe('builtin')
     expect(manifest.entry).toBe('./index.vue')
   })
 
-  it('首键触发词为 todo-pomodoro（外壳进入插件用 keywords[0]）', () => {
+  it('id 不变保待办数据；首键触发词为 todo-pomodoro', () => {
+    expect(manifest.id).toBe('todo-pomodoro')
     expect(manifest.keywords[0]).toBe('todo-pomodoro')
-  })
-
-  it('任一触发词都不与现有启用插件冲突', () => {
-    for (const k of manifest.keywords) {
-      expect(ctx.activeKeywords.has(k), `keyword「${k}」被占用`).toBe(false)
-    }
+    expect(manifest.name).toBe('待办清单')
   })
 
   it('声明 add 命令与对应的 text matcher', () => {

@@ -90,6 +90,7 @@ async function makeHarness(seedState?: unknown): Promise<Harness> {
     screenshot: { capture: async () => ({ action: 'cancel' as const }) },
     window: {
       hide: async () => {},
+      showMain: async () => {},
       float: {
         create: async () => '',
         update: async () => {},

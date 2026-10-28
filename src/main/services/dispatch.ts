@@ -15,6 +15,7 @@ import type {
   HostFetchInit,
   HostFetchResult,
   LanAddress,
+  ShowMainOptions,
   TranslateRequest,
   TranslateResult
 } from '@sdk/api'
@@ -56,6 +57,7 @@ export interface ServiceBag {
   }
   window: {
     hide(): Promise<void>
+    showMain(opts?: ShowMainOptions): Promise<void>
     float: FloatWindowApi
   }
   screenshot: ScreenshotService
@@ -78,7 +80,13 @@ export interface ServiceBag {
     translate(req: TranslateRequest): Promise<TranslateResult>
     status(service: ApiServiceId): ApiServiceStatus
   }
-  events: { emitToRenderer(pluginId: string, event: string, payload: unknown): void }
+  events: {
+    emitToRenderer(pluginId: string, event: string, payload: unknown): void
+    /** 渲染层 + backend 订阅者双投递（backend ctx.emit 仍走 emitToRenderer，不自环） */
+    emit(pluginId: string, event: string, payload: unknown): void
+    /** backend 订阅登记（随 BackendContext 存活，退订由返回函数触发） */
+    onPluginEvent(pluginId: string, event: string, cb: (p: unknown) => void): () => void
+  }
 }
 
 /**
@@ -133,6 +141,18 @@ export async function dispatchApi(
         return { ok: true, data: await services.shell.openExternal(str(payload[0])) }
       case 'window.hide':
         return { ok: true, data: await services.window.hide() }
+      case 'window.showMain': {
+        const p = obj(payload[0])
+        if (
+          p !== undefined &&
+          ((p.pluginId !== undefined && typeof p.pluginId !== 'string') ||
+            (p.commandId !== undefined && typeof p.commandId !== 'string') ||
+            (p.query !== undefined && typeof p.query !== 'string'))
+        ) {
+          throw new Error('参数必须是 { pluginId?, commandId?, query? } 且均为字符串')
+        }
+        return { ok: true, data: await services.window.showMain(p) }
+      }
       case 'window.float.create':
         return { ok: true, data: services.window.float.create(pluginId, obj(payload[0]) as unknown as FloatWindowOptions) }
       case 'window.float.update':
@@ -261,6 +281,7 @@ export function createBackendContext(registry: PluginRegistry, services: Service
     },
     window: {
       hide: () => call('window.hide'),
+      showMain: (opts) => call('window.showMain', opts),
       float: {
         create: (opts) => call<string>('window.float.create', opts),
         update: (id, patch) => call('window.float.update', id, patch),
@@ -289,7 +310,7 @@ export function createBackendContext(registry: PluginRegistry, services: Service
       status: (service) => call(`apis.${service}.status`)
     },
     events: {
-      on: () => () => {} // backend 侧事件订阅点，随首个常驻插件启用时补实现
+      on: (event, cb) => services.events.onPluginEvent(pluginId, event, cb)
     },
     emit: (event, payload) => services.events.emitToRenderer(pluginId, event, payload)
   }

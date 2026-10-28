@@ -10,9 +10,11 @@ export interface CountdownState {
   remainingMs: number
   /** 本次设定总时长（进度与通知文案用） */
   totalMs: number
+  /** 用户自定义标签（通知文案与悬浮球 title），空串 = 未设置 */
+  label: string
 }
 
-export const IDLE_COUNTDOWN: CountdownState = { status: 'idle', endAt: 0, remainingMs: 0, totalMs: 0 }
+export const IDLE_COUNTDOWN: CountdownState = { status: 'idle', endAt: 0, remainingMs: 0, totalMs: 0, label: '' }
 
 /** 单次时长上限 7 天：防溢出，也防超长倒计时被遗忘占用通知 */
 export const MAX_DURATION_MS = 7 * 24 * 3_600_000
@@ -41,8 +43,13 @@ export function clampDurationMs(value: unknown): number | null {
   return clampDuration(value)
 }
 
-export function startCountdown(durationMs: number, now: number): CountdownState {
-  return { status: 'running', endAt: now + durationMs, remainingMs: 0, totalMs: durationMs }
+function labelOf(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  return raw.trim().slice(0, 120)
+}
+
+export function startCountdown(durationMs: number, label: string, now: number): CountdownState {
+  return { status: 'running', endAt: now + durationMs, remainingMs: 0, totalMs: durationMs, label: labelOf(label) }
 }
 
 export function pauseCountdown(state: CountdownState, now: number): CountdownState {
@@ -89,44 +96,7 @@ export function parseCountdownState(raw: unknown): CountdownState | null {
   const status = o.status
   if (status !== 'idle' && status !== 'running' && status !== 'paused' && status !== 'expired') return null
   const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, v) : 0)
-  return { status, endAt: num(o.endAt), remainingMs: num(o.remainingMs), totalMs: num(o.totalMs) }
-}
-
-/** 渲染层 → backend 命令通道：storage 单槽 + 单调 seq（同 todo-pomodoro「最新者胜」模式） */
-export const COUNTDOWN_CMD_KEY = 'countdown-cmd'
-export const COUNTDOWN_STATE_KEY = 'countdown'
-
-/** backend → 渲染层状态推送事件名（放 logic 侧，渲染层不必为常量把 backend 单例拖进 bundle） */
-export const COUNTDOWN_EVENT = 'countdown-changed'
-
-export type CountdownCommand = { type: 'start'; ms: number } | { type: 'pause' } | { type: 'resume' } | { type: 'stop' }
-
-export interface CountdownCommandEnvelope {
-  seq: number
-  cmd: CountdownCommand
-}
-
-/** 解析命令；seq 不大于 lastSeq（乱序/回放）或结构非法一律忽略 */
-export function takeCountdownCommand(raw: unknown, lastSeq: number): CountdownCommandEnvelope | null {
-  if (typeof raw !== 'object' || raw === null) return null
-  const r = raw as Record<string, unknown>
-  if (typeof r.seq !== 'number' || !Number.isFinite(r.seq) || r.seq <= lastSeq) return null
-  const body = r.cmd
-  if (typeof body !== 'object' || body === null) return null
-  const b = body as Record<string, unknown>
-  switch (b.type) {
-    case 'start': {
-      const ms = clampDurationMs(b.ms)
-      if (ms === null) return null
-      return { seq: r.seq, cmd: { type: 'start', ms } }
-    }
-    case 'pause':
-    case 'resume':
-    case 'stop':
-      return { seq: r.seq, cmd: { type: b.type } }
-    default:
-      return null
-  }
+  return { status, endAt: num(o.endAt), remainingMs: num(o.remainingMs), totalMs: num(o.totalMs), label: labelOf(o.label) }
 }
 
 /** 毫秒 → 人话时长：'25 分钟' / '1 小时 30 分钟' / '90 秒'（通知与页内文案用） */

@@ -274,6 +274,72 @@ export function reformat(text: string, indent: number): ReformatResult {
   return r.ok ? { ok: true, text: JSON.stringify(r.value, null, indent) } : r
 }
 
+// 自动展开必须无损：parse→stringify 往返会改写 >2^53 整数（16 位起可能溢出进位）与溢出指数（1e999→null），
+// 命中危险数字形状即保守跳过；手动格式化按钮不在此列。
+// 只检数字 token（先剥字符串字面量）：长 ID/订单号等字符串值重排原样保留、无损，不剥会被误伤挡掉真实日志 JSON
+const STRING_LITERAL_RE = /"(?:[^"\\\r\n]|\\.)*"/g
+const LOSSY_DIGITS_RE = /\d{16,}/
+const LOSSY_EXPONENT_RE = /\d[eE][+-]?\d/
+
+/**
+ * 顶层切段（与宿主 recommend 同构的独立实现，插件禁 import 宿主 core）：
+ * depth=0 遇 {/[ 记段起点、遇 }/] 归零即段尾；引号内内容跳过（含转义）；
+ * 段间非空白返回 null；未闭合尾段原样入列，交逐段 reformat 兜底。
+ * 导出供 index.vue 数段数做多段提示。
+ */
+export function topLevelSegments(text: string): string[] | null {
+  const segs: string[] = []
+  let depth = 0
+  let start = -1
+  let inStr = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (inStr) {
+      if (c === '\\') i++
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (depth === 0) {
+      if (c === '{' || c === '[') {
+        start = i
+        depth = 1
+      } else if (c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r') {
+        return null
+      }
+      continue
+    }
+    if (c === '"') inStr = true
+    else if (c === '{' || c === '[') depth++
+    else if (c === '}' || c === ']') {
+      if (--depth === 0) segs.push(text.slice(start, i + 1))
+    }
+  }
+  if (depth > 0) segs.push(text.slice(start))
+  return segs
+}
+
+/** 激活注入/粘贴时是 JSON 才展开（2 空格缩进），多段拼接逐段展开换行连接，否则原样返回；1MB 上限防大文本同步 parse 卡顿 */
+export function expandIfJson(text: string): string {
+  const t = text.trim()
+  if (t === '' || t.length > 1_000_000 || (!t.startsWith('{') && !t.startsWith('['))) return text
+  const segs = topLevelSegments(t)
+  if (segs !== null && segs.length >= 2) {
+    // 任一段非法整体原样（保守）；危险数字形状段原样保留、安全段照常展开
+    const out: string[] = []
+    for (const seg of segs) {
+      const r = reformat(seg, 2)
+      if (!r.ok) return text
+      const numericOnly = seg.replace(STRING_LITERAL_RE, '""')
+      out.push(LOSSY_DIGITS_RE.test(numericOnly) || LOSSY_EXPONENT_RE.test(numericOnly) ? seg : r.text)
+    }
+    return out.join('\n')
+  }
+  const numericOnly = t.replace(STRING_LITERAL_RE, '""')
+  if (LOSSY_DIGITS_RE.test(numericOnly) || LOSSY_EXPONENT_RE.test(numericOnly)) return text
+  const r = reformat(t, 2)
+  return r.ok ? r.text : text
+}
+
 /** 虚拟滚动可视窗口：start/end 为行下标区间 [start, end)，含 overscan 缓冲（行号槽用） */
 export function windowRange(
   totalRows: number,

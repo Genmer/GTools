@@ -57,6 +57,13 @@ export interface FloatWindowEvent {
   payload: unknown
 }
 
+/** window.showMain 参数：唤起主搜索窗并可选直达插件命令态 */
+export interface ShowMainOptions {
+  pluginId?: string
+  commandId?: string
+  query?: string
+}
+
 /** 浮窗 HTML 内可用的全局桥（window.gtoolsFloat），插件组装 html 时自行声明使用 */
 export interface FloatPageBridge {
   close(): Promise<{ ok: boolean }>
@@ -223,6 +230,8 @@ export interface HostApi {
   }
   window: {
     hide(): Promise<void>
+    /** 唤起主搜索窗（悬浮窗/后台场景回到主 UI 的唯一入口）；带 pluginId 时直达该插件命令态 */
+    showMain(opts?: ShowMainOptions): Promise<void>
     /** 置顶无边框小浮窗；插件禁用/应用退出时由宿主统一关闭，防泄漏 */
     float: {
       create(opts: FloatWindowOptions): Promise<string>
@@ -304,6 +313,7 @@ export const API_PERMISSIONS: Readonly<Record<string, Permission | undefined>> =
   'shell.openPath': 'shell:open',
   'shell.openExternal': 'shell:open',
   'window.hide': 'window:hide',
+  'window.showMain': 'window:main',
   'window.float.create': 'window:float',
   'window.float.update': 'window:float',
   'window.float.close': 'window:float',

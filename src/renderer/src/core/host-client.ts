@@ -50,6 +50,7 @@ export function createHostClient(pluginId: string): HostApi & { subInput: SubInp
     },
     window: {
       hide: () => call('window.hide'),
+      showMain: (opts) => call('window.showMain', opts),
       float: {
         create: (opts) => call<string>('window.float.create', opts),
         update: (id, patch) => call('window.float.update', id, patch),

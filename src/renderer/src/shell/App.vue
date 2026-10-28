@@ -546,7 +546,7 @@ function pushRecentApp(appId: string): void {
   persistRecent()
 }
 
-function activateEntry(pluginId: string, commandId?: string, rest?: string, payload?: MatchFile[]): void {
+function activateEntry(pluginId: string, commandId?: string, rest?: string, payload?: MatchFile[], text?: string): void {
   // 拖入集生命周期到激活为止；先进入（enterPlugin 已持有数组引用）再释放 ref
   if (isSettingsEntry(pluginId)) {
     releaseDrop()
@@ -555,8 +555,8 @@ function activateEntry(pluginId: string, commandId?: string, rest?: string, payl
     return
   }
   // rest 为推荐命中文本（超限已被 recommend 层剥离），经既有 "kw rest" 通路进插件 query；
-  // payload 为拖入文件列表，走 initialPayload 通道
-  enterPlugin(pluginId, enabledManifests.value, commandId, rest ?? '', payload)
+  // payload 为拖入文件列表走 initialPayload 通道；text 为激活注入文本（如剪贴板 JSON 全文）走 initialText 通道
+  enterPlugin(pluginId, enabledManifests.value, commandId, rest ?? '', payload, text)
   // trigger 型带 backend 的插件（如 app-launcher）在首次进入时启动
   void window.gtools.host('plugin:enter', { id: pluginId })
   pushRecentPlugin(pluginId, commandId)
@@ -567,7 +567,7 @@ function activateEmptyTarget(t: EmptyTarget): void {
   if (t.kind === 'app') void openAppById(t.appId)
   else if (t.kind === 'apps-toggle') toggleAppsExpanded()
   else if (t.kind === 'history') onHistorySelect(t.query)
-  else activateEntry(t.pluginId, t.commandId, t.payload, t.files)
+  else activateEntry(t.pluginId, t.commandId, t.payload, t.files, t.text)
 }
 
 // appsMode 键盘导航：扁平序 = 剪贴板推荐行 + 搜索历史 chips + 最近行（三段合并为一个 1×N 前缀）→ 可见应用网格（9 列）→ 抽屉开关格；
@@ -649,13 +649,16 @@ function onSelect(index: number): void {
 }
 
 function activateRec(rec: RecItem): void {
-  // matcher 命中型带命中文本进插件既有 query 通路；keyword 沾边型无 payload 只进入；
+  // json 源命中文本（可能超 query 通道长度上限）全文走 initialText 通道，rest 不带；
+  // 其余 matcher 命中型带命中文本进既有 query 通路；keyword 沾边型无 payload 只进入；
   // 拖入行（files/img 源）把拖入集经 initialPayload 通道带给插件
+  const asText = rec.source === 'json'
   activateEntry(
     rec.pluginId,
     rec.commandId,
-    rec.payload,
-    rec.source === 'files' || rec.source === 'img' ? dropFiles.value : undefined
+    asText ? undefined : rec.payload,
+    rec.source === 'files' || rec.source === 'img' ? dropFiles.value : undefined,
+    asText ? rec.payload : undefined
   )
 }
 
@@ -904,6 +907,12 @@ onMounted(async () => {
     if (typeof d.pluginId === 'string' && d.pluginId !== '') activateEntry(d.pluginId, d.commandId)
   })
   if (offHotkey) offFns.push(offHotkey)
+  // 浮窗/后台经 window.showMain 唤起主窗后的直达指令（与指令热键同址同语义，多带 query 预填）
+  const offOpenPlugin = window.gtools.on('host:open-plugin', (p) => {
+    const d = (p ?? {}) as { pluginId?: string; commandId?: string; query?: string }
+    if (typeof d.pluginId === 'string' && d.pluginId !== '') activateEntry(d.pluginId, d.commandId, d.query)
+  })
+  if (offOpenPlugin) offFns.push(offOpenPlugin)
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') {
       // 隐私默认：推送与拖入集只在窗口可见会话内保留，隐藏即清（对齐 dropFiles 声明处注释）
@@ -915,6 +924,10 @@ onMounted(async () => {
       resetForShow()
       return
     }
+    // 唤起即 peek 不分模式：插件/设置态唤醒不读板的话，Esc 退回 global 空态后剪贴板推荐无源；
+    // peek 内部已有 clipboardSuggest 开关与敏感过滤，隐私语义不变（单次读取、隐藏即清、仅存内存）。
+    // detached 浮窗不渲染推荐 UI，读了白读，不扩大读取面
+    if (!isDetachedWindow.value) void peekClipboard()
     if (router.mode === 'global') {
       // resetForShow 的推送清理点（router-core 不持有推送态，外壳侧同步清）
       pushedItems.value = []
@@ -923,7 +936,6 @@ onMounted(async () => {
       searchBox.value?.focus()
       // 重新唤起时低成本刷新（宿主内存缓存命中即回），顺带收敛 TTL 过期与新装应用
       void loadApps()
-      void peekClipboard()
       // 覆盖「拷入新 uTools 插件目录后重唤启动器」的词条刷新
       void loadUtoolsEntries()
     } else if (router.mode === 'plugin') {

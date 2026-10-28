@@ -29,17 +29,14 @@ describe('time-toolbox manifest', () => {
       for (const k of m.keywords) expect(mine.has(k)).toBe(false)
     }
   })
-  it('目录与入口约定：trigger 带 backend（到点通知须主进程驱动）', () => {
+  it('目录与入口约定：纯渲染层触发式（倒计时已并入 timer 插件，无 backend 无命令）', () => {
     expect(manifest.id).toBe('time-toolbox')
     expect(manifest.entry).toBe('./index.vue')
     expect(manifest.activation).toBe('trigger')
-    expect(manifest.backend).toBe('./backend/index.ts')
+    expect(manifest.backend).toBeUndefined()
+    expect(manifest.commands).toBeUndefined()
   })
-  it('权限：复制 + 到点通知，无多余项', () => {
-    expect(manifest.permissions).toEqual(['clipboard:write', 'notification'])
-  })
-  it('倒计时命令词条进全局池，keywords 无内部重复', () => {
-    expect(manifest.commands).toEqual([{ id: 'countdown', title: '倒计时', keywords: ['daojishi', 'djs'] }])
-    expect(new Set(manifest.keywords).size).toBe(manifest.keywords.length)
+  it('权限：仅复制，无多余项', () => {
+    expect(manifest.permissions).toEqual(['clipboard:write'])
   })
 })

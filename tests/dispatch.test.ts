@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { PluginManifest } from '@sdk/manifest'
+import type { ShowMainOptions } from '@sdk/api'
 import { PluginRegistry } from '../src/main/plugin-registry'
 import { dispatchApi } from '../src/main/services/dispatch'
 import type { ServiceBag } from '../src/main/services/dispatch'
@@ -22,7 +23,7 @@ function manifest(id: string, permissions: PluginManifest['permissions']): Plugi
 
 function makeRegistry(): PluginRegistry {
   const reg = new PluginRegistry()
-  reg.register(manifest('full', ['window:float', 'dialog', 'fs', 'net', 'shell:open', 'storage', 'apis:translate', 'screenshot']), true)
+  reg.register(manifest('full', ['window:float', 'window:main', 'dialog', 'fs', 'net', 'shell:open', 'storage', 'apis:translate', 'screenshot']), true)
   reg.register(manifest('bare', ['storage']), true)
   reg.register(manifest('off', ['fs', 'apis:translate']), false)
   return reg
@@ -67,6 +68,9 @@ function makeServices(): ServiceBag & {
     },
     window: {
       hide: async () => {},
+      showMain: async (opts?: ShowMainOptions) => {
+        calls.push({ api: 'window.showMain', pluginId: '', args: [opts] })
+      },
       float: {
         create: rec('float.create'),
         update: rec('float.update'),
@@ -104,7 +108,7 @@ function makeServices(): ServiceBag & {
         providers: []
       })
     },
-    events: { emitToRenderer: () => {} }
+    events: { emitToRenderer: () => {}, emit: () => {}, onPluginEvent: () => () => {} }
   }
   return Object.assign(services, { calls })
 }
@@ -129,7 +133,8 @@ describe('dispatchApi 新增能力面的权限校验', () => {
       'net.lanAddresses',
       'apis.translate',
       'apis.translate.status',
-      'screenshot.capture'
+      'screenshot.capture',
+      'window.showMain'
     ]) {
       const r = await dispatchApi(makeRegistry(), services, 'bare', api, [])
       expect(r, api).toMatchObject({ ok: false, error: 'PERMISSION_DENIED' })
@@ -168,6 +173,46 @@ describe('dispatchApi 新增能力面的权限校验', () => {
     expect(await dispatchApi(makeRegistry(), services, 'full', 'fs.teleport', [])).toMatchObject({ ok: false, error: 'UNKNOWN_API' })
     expect(await dispatchApi(makeRegistry(), services, 'full', 'fs.grant', ['not-array'])).toMatchObject({ ok: false, error: 'BAD_REQUEST' })
     expect(await dispatchApi(makeRegistry(), services, 'full', 'fs.read', [123])).toMatchObject({ ok: false, error: 'BAD_REQUEST' })
+  })
+
+  it('window.showMain：声明权限放行且参数透传；字段非字符串 → BAD_REQUEST', async () => {
+    const services = makeServices()
+    const r = await dispatchApi(makeRegistry(), services, 'full', 'window.showMain', [
+      { pluginId: 'timer', commandId: 'pomodoro', query: '' }
+    ])
+    expect(r).toEqual({ ok: true, data: undefined })
+    expect(services.calls).toEqual([
+      { api: 'window.showMain', pluginId: '', args: [{ pluginId: 'timer', commandId: 'pomodoro', query: '' }] }
+    ])
+    const bare = await dispatchApi(makeRegistry(), makeServices(), 'full', 'window.showMain', [{ pluginId: 9 }])
+    expect(bare).toMatchObject({ ok: false, error: 'BAD_REQUEST' })
+    const noArg = await dispatchApi(makeRegistry(), makeServices(), 'full', 'window.showMain', [])
+    expect(noArg).toEqual({ ok: true, data: undefined })
+  })
+
+  it('window.showMain 字段校验补全：commandId / query 非字符串 → BAD_REQUEST 且不触达服务', async () => {
+    const services = makeServices()
+    expect(await dispatchApi(makeRegistry(), services, 'full', 'window.showMain', [{ pluginId: 'timer', commandId: 9 }])).toMatchObject({
+      ok: false,
+      error: 'BAD_REQUEST'
+    })
+    expect(await dispatchApi(makeRegistry(), services, 'full', 'window.showMain', [{ query: null }])).toMatchObject({
+      ok: false,
+      error: 'BAD_REQUEST'
+    })
+    expect(await dispatchApi(makeRegistry(), services, 'full', 'window.showMain', [{ query: 25 }])).toMatchObject({
+      ok: false,
+      error: 'BAD_REQUEST'
+    })
+    expect(services.calls).toHaveLength(0)
+
+    const ok = await dispatchApi(makeRegistry(), services, 'full', 'window.showMain', [
+      { pluginId: 'timer', commandId: 'countdown', query: '90s' }
+    ])
+    expect(ok).toEqual({ ok: true, data: undefined })
+    expect(services.calls).toEqual([
+      { api: 'window.showMain', pluginId: '', args: [{ pluginId: 'timer', commandId: 'countdown', query: '90s' }] }
+    ])
   })
 })
 

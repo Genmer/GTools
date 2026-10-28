@@ -13,7 +13,7 @@ const manifest: PluginManifest = {
   permissions: ['storage', 'clipboard:write', 'fs'],
   source: 'builtin',
   entry: './index.vue',
-  // 剪贴板 JSON 智能推荐（C2）：JSON 判定在宿主 core，激活时整段文本追加进草稿不覆盖
+  // 剪贴板 JSON 智能推荐（C2）：JSON 判定在宿主 core，激活时全文经 initialText 通道注入（不进 query 通路），追加进草稿不覆盖
   matchers: [
     { type: 'json', label: '打开 JSON 编辑器' },
     { type: 'files', extensions: ['json'], label: '编辑 JSON 文件' }

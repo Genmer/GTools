@@ -39,12 +39,13 @@ vi.mock('node:fs/promises', () => ({
 }))
 
 import { PluginStorageService } from '../src/main/services/storage'
-import { CountdownBackend, COUNTDOWN_IDLE_POLL_MS, COUNTDOWN_TICK_MS } from '../src/plugins/time-toolbox/backend'
-import { COUNTDOWN_CMD_KEY, COUNTDOWN_STATE_KEY } from '../src/plugins/time-toolbox/logic/countdown'
+import { IDLE_POLL_MS, TICK_MS, TimerBackend } from '../src/plugins/timer/backend'
+import { CMD_KEY } from '../src/plugins/timer/logic/commands'
 
 const ROOT = '/gtools-test/storage'
-const PLUGIN = 'time-toolbox'
+const PLUGIN = 'timer'
 const KV = `${ROOT}/${PLUGIN}/kv.json`
+const STATE_KEY = 'timer-state'
 
 interface FakeTimer {
   id: number
@@ -60,7 +61,7 @@ beforeEach(() => {
 })
 
 async function makeHarness(): Promise<{
-  backend: CountdownBackend
+  backend: TimerBackend
   timers: FakeTimer[]
   fireTick: () => Promise<void>
   setSlot: (key: string, value: unknown) => Promise<void>
@@ -80,7 +81,7 @@ async function makeHarness(): Promise<{
     }
   }
   const nowMs = { v: 1_700_000_000_000 }
-  const backend = new CountdownBackend(scheduler, { now: () => nowMs.v })
+  const backend = new TimerBackend(scheduler, { now: () => nowMs.v })
   const ctx = {
     storage: {
       get: (key: string) => svc.get(PLUGIN, key),
@@ -88,7 +89,8 @@ async function makeHarness(): Promise<{
       remove: (key: string) => svc.remove(PLUGIN, key)
     },
     emit: () => {},
-    notification: { show: async () => {} }
+    notification: { show: async () => {} },
+    events: { on: () => () => {} }
   } as unknown as BackendContext
   await backend.init(ctx)
   const fireTick = async (): Promise<void> => {
@@ -99,11 +101,11 @@ async function makeHarness(): Promise<{
   return { backend, timers, fireTick, setSlot: (key, value) => svc.set(PLUGIN, key, value) }
 }
 
-describe('倒计时 backend 空闲轮询 × 存储内存缓存', () => {
+describe('计时器 backend 空闲轮询 × 存储内存缓存', () => {
   it('空闲期多轮慢档 tick：零盘读零写，interval 不重建', async () => {
     const h = await makeHarness()
     await h.backend.start()
-    expect(h.timers.map((t) => t.ms)).toEqual([COUNTDOWN_IDLE_POLL_MS]) // 空闲慢档
+    expect(h.timers.map((t) => t.ms)).toEqual([IDLE_POLL_MS]) // 空闲慢档
     expect(mem.reads).toBe(1) // 仅 init 恢复状态那一次盘读（文件不存在）
 
     const timerIdBefore = h.timers[0]!.id
@@ -116,19 +118,19 @@ describe('倒计时 backend 空闲轮询 × 存储内存缓存', () => {
     expect(h.timers).toHaveLength(0)
   })
 
-  it('慢档仍接得住命令：storage 槽下发 start 被空闲 tick 接住，切快档且状态落盘（全程零新增盘读）', async () => {
+  it('慢档仍接得住命令：storage 槽下发 cd-start 被空闲 tick 接住，切快档且状态落盘（全程零新增盘读）', async () => {
     const h = await makeHarness()
     await h.backend.start()
     await h.fireTick()
     expect(mem.reads).toBe(1)
 
     // 渲染层等价动作：命令写进 storage 槽（同一 service 实例，写盘但读走缓存）
-    await h.setSlot(COUNTDOWN_CMD_KEY, { seq: 1, cmd: { type: 'start', ms: 60_000 } })
+    await h.setSlot(CMD_KEY, { seq: 1, cmd: { type: 'cd-start', ms: 60_000, label: '' } })
     await h.fireTick() // 空闲慢档 tick 接住命令
-    expect(h.backend.snapshot().status).toBe('running')
-    expect(h.timers.map((t) => t.ms)).toEqual([COUNTDOWN_TICK_MS]) // 活跃切快档
-    const persisted = JSON.parse(mem.files.get(KV) ?? '{}')[COUNTDOWN_STATE_KEY]
-    expect(persisted?.status).toBe('running')
+    expect(h.backend.snapshot().countdown.status).toBe('running')
+    expect(h.timers.map((t) => t.ms)).toEqual([TICK_MS]) // 活跃切快档
+    const persisted = JSON.parse(mem.files.get(KV) ?? '{}')[STATE_KEY]
+    expect(persisted?.countdown?.status).toBe('running')
     expect(mem.reads).toBe(1) // 命令读取同样命中缓存：全程只有 init 那一次盘读
   })
 })

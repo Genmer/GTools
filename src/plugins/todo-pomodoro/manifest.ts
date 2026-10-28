@@ -2,18 +2,16 @@ import type { PluginManifest } from '@sdk/manifest'
 
 const manifest: PluginManifest = {
   id: 'todo-pomodoro',
-  name: '待办 · 番茄钟',
-  version: '0.1.0',
+  name: '待办清单',
+  version: '0.2.0',
   protocolVersion: 1,
-  description: '待办清单（优先级 · 今日/全部视图）＋ 番茄钟（25/5 可调 · 到点通知 · 今日统计 · 便签悬浮常驻）',
-  icon: '🍅',
-  keywords: ['todo-pomodoro', 'todo', '待办', '番茄钟', 'fanqie'],
-  activation: 'resident',
-  // 通知用于倒计时结束提醒；浮窗用于便签式常驻小窗（backend 驱动，视图关掉也在）
-  permissions: ['storage', 'notification', 'window:float'],
+  description: '待办清单：优先级标记、今日/全部视图、快捷添加（长任务配「计时器」插件的番茄钟使用）',
+  icon: '📝',
+  keywords: ['todo-pomodoro', 'todo', '待办'],
+  activation: 'trigger',
+  permissions: ['storage'],
   source: 'builtin',
   entry: './index.vue',
-  backend: './backend/index.ts',
   commands: [
     { id: 'add', title: '添加到待办' }
   ],

@@ -21,7 +21,10 @@ export interface RecItem {
   key: string
   pluginId: string
   commandId?: string
-  /** matcher 命中型注入插件的文本；>2000 字符时剥离（只进入不注入）；keyword 沾边型无 */
+  /**
+   * matcher 命中型注入插件的文本；json 型走 initialText 通道不剥长度，其余型走 query 通道
+   * 超 2000 字符时剥离（只进入不注入）；keyword 沾边型无
+   */
   payload?: string
   /** 详情条主标题：命令 title 或插件名 */
   title: string
@@ -35,7 +38,7 @@ export interface RecItem {
 const MATCHER_MAX_LENGTH_DEFAULT = 10_000
 /** 大文本不进 JSON.parse，防解析卡顿 */
 const JSON_PARSE_MAX_LENGTH = 100_000
-/** 注入插件参数通路（enterPlugin rest）的上限，超出只进入不注入 */
+/** 注入插件参数通路（enterPlugin rest）的上限，超出只进入不注入；json 型走 initialText 通道不受此限 */
 const PAYLOAD_MAX_LENGTH = 2000
 const REC_CAP = 4
 
@@ -60,17 +63,61 @@ function memoizeByInput(fn: (s: string) => boolean, cap: number): (s: string) =>
   }
 }
 
-/** trim 后以 {/[ 开头且可解析且顶层为 object/array 才算 JSON */
-export const looksLikeJson = memoizeByInput((text: string): boolean => {
-  const t = text.trim()
-  if (t === '' || t.length > JSON_PARSE_MAX_LENGTH) return false
-  if (!t.startsWith('{') && !t.startsWith('[')) return false
+/**
+ * 顶层切段（O(n) 单次扫描）：depth=0 遇 {/[ 记段起点、遇 }/] 归零即段尾；引号内内容跳过（含转义）。
+ * 段间出现非空白字符（垃圾文本/多余闭合）返回 null；未闭合尾段原样入列，交逐段 parse 兜底。
+ */
+function topLevelSegments(text: string): string[] | null {
+  const segs: string[] = []
+  let depth = 0
+  let start = -1
+  let inStr = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (inStr) {
+      if (c === '\\') i++
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (depth === 0) {
+      if (c === '{' || c === '[') {
+        start = i
+        depth = 1
+      } else if (c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r') {
+        return null
+      }
+      continue
+    }
+    if (c === '"') inStr = true
+    else if (c === '{' || c === '[') depth++
+    else if (c === '}' || c === ']') {
+      if (--depth === 0) segs.push(text.slice(start, i + 1))
+    }
+  }
+  if (depth > 0) segs.push(text.slice(start))
+  return segs
+}
+
+function parseTopLevelContainer(s: string): boolean {
   try {
-    const v: unknown = JSON.parse(t)
+    const v: unknown = JSON.parse(s)
     return typeof v === 'object' && v !== null
   } catch {
     return false
   }
+}
+
+/** trim 后以 {/[ 开头且可解析且顶层为 object/array 才算 JSON；多段拼接（≥2 段且每段皆合法顶层容器）同样算 */
+export const looksLikeJson = memoizeByInput((text: string): boolean => {
+  const t = text.trim()
+  if (t === '' || t.length > JSON_PARSE_MAX_LENGTH) return false
+  const segs = topLevelSegments(t)
+  // 日志/聊天复制常是两段 JSON 直拼或换行分隔，任一段非法即不算
+  if (segs !== null && segs.length >= 2) {
+    return segs.every((seg) => (seg.startsWith('{') || seg.startsWith('[')) && parseTopLevelContainer(seg))
+  }
+  if (!t.startsWith('{') && !t.startsWith('[')) return false
+  return parseTopLevelContainer(t)
 }, 8)
 
 // 剪贴板敏感检测 memo（容量 4：当前剪贴板 + 近几次唤起的旧文本）
@@ -182,7 +229,8 @@ export function matcherHits(text: string, manifests: PluginManifest[], jsonText?
         key: `${m.id}:${mt.commandId ?? '_main'}`,
         pluginId: m.id,
         commandId: mt.commandId,
-        payload: hit.length > PAYLOAD_MAX_LENGTH ? undefined : hit,
+        // json 型经 initialText 通道注入（looksLikeJson 已保证 ≤100k），不按 query 通道长度剥离
+        payload: mt.type === 'json' ? hit : hit.length > PAYLOAD_MAX_LENGTH ? undefined : hit,
         title: commandTitle(m, mt.commandId) ?? m.name,
         subtitle: mt.commandId !== undefined ? m.name : (m.description ?? m.name),
         label: mt.label,

@@ -166,3 +166,68 @@ describe('initialPayload 生命周期（拖拽携参通道）', () => {
     expect(router.initialPayload).toEqual(files)
   })
 })
+
+describe('initialText 生命周期（激活注入文本通道）', () => {
+  const bigJson = '{"k":"' + 'x'.repeat(2500) + '"}'
+
+  it('enterPlugin 带 text 写入；不带进入无条件覆盖为 null', () => {
+    resetForShow(true)
+    enterPlugin('calc', manifests, undefined, '', undefined, bigJson)
+    expect(router.initialText).toBe(bigJson)
+    // 不带 text 的进入（deep-link 5 参调用同型）清掉残留
+    enterPlugin('markdown-notes', manifests)
+    expect(router.initialText).toBeNull()
+  })
+
+  it('syncMode 手输关键字进入（global→plugin）清残留', () => {
+    resetForShow(true)
+    router.initialText = bigJson
+    router.mode = 'global'
+    router.query = 'calc 1'
+    syncMode(manifests)
+    expect(router.mode).toBe('plugin')
+    expect(router.initialText).toBeNull()
+  })
+
+  it('syncMode 退插件（plugin→global）清 initialText', () => {
+    resetForShow(true)
+    enterPlugin('calc', manifests, undefined, '1+1', undefined, bigJson)
+    router.query = ''
+    syncMode(manifests)
+    expect(router.mode).toBe('global')
+    expect(router.initialText).toBeNull()
+  })
+
+  it('resetForShow 清 initialText（含 global 态手动残留）', () => {
+    resetForShow(true)
+    enterPlugin('calc', manifests, undefined, 'x', undefined, bigJson)
+    resetForShow(true)
+    expect(router.initialText).toBeNull()
+    router.initialText = bigJson
+    resetForShow()
+    expect(router.initialText).toBeNull()
+  })
+
+  it('syncMode 命中分支：enterPlugin 携 text 后 query watcher 再跑不清（mode 已是 plugin）', () => {
+    // activateRec → enterPlugin(text) 先置 mode='plugin'，随后 query watcher 触发的 syncMode 命中
+    // 走「mode 已是 plugin」分支，不得误清刚携入的注入文本（否则 initialText 通道整条失效）
+    resetForShow(true)
+    enterPlugin('calc', manifests, undefined, '1', undefined, bigJson)
+    expect(router.initialText).toBe(bigJson)
+    syncMode(manifests)
+    expect(router.mode).toBe('plugin')
+    expect(router.initialText).toBe(bigJson)
+  })
+
+  it('initialText 与 initialPayload 独立清理：只重进不带 text 时 payload 保留、text 清空', () => {
+    resetForShow(true)
+    const files: MatchFile[] = [{ name: 'a.pdf', path: 'C:/tmp/a.pdf', isFile: true, isDirectory: false }]
+    enterPlugin('calc', manifests, undefined, 'r', files, bigJson)
+    expect(router.initialPayload).toEqual(files)
+    expect(router.initialText).toBe(bigJson)
+    // 换插件进入带 payload 不带 text：text 无条件覆盖为 null，payload 不受牵连
+    enterPlugin('markdown-notes', manifests, undefined, 'r', files)
+    expect(router.initialPayload).toEqual(files)
+    expect(router.initialText).toBeNull()
+  })
+})

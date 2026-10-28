@@ -9,6 +9,7 @@ export type Permission =
   | 'shell:open'
   | 'window:hide'
   | 'window:float'
+  | 'window:main'
   | 'dialog'
   | 'fs'
   | 'apis:translate'
@@ -26,6 +27,7 @@ export const ALL_PERMISSIONS: readonly Permission[] = [
   'shell:open',
   'window:hide',
   'window:float',
+  'window:main',
   'dialog',
   'fs',
   'apis:translate',

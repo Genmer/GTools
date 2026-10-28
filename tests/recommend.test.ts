@@ -47,6 +47,24 @@ describe('looksLikeJson', () => {
     expect(big.length).toBeGreaterThan(100_000)
     expect(looksLikeJson(big)).toBe(false)
   })
+
+  it('多段拼接为真：两段直拼、换行/多空白分隔，每段皆合法顶层 object/array', () => {
+    expect(looksLikeJson('{"a":1}{"b":2}')).toBe(true)
+    expect(looksLikeJson('{"a":1}\n{"b":2}')).toBe(true)
+    expect(looksLikeJson('  [1,2]\r\n\t{"a":{"c":3}}  ')).toBe(true)
+    // 引号内的括号不切段、转义引号不提前闭串
+    expect(looksLikeJson('{"k":"a]{b"}[2]')).toBe(true)
+    expect(looksLikeJson('{"k":"a\\"b"}[1]')).toBe(true)
+  })
+
+  it('多段拼接任一段非法即假：段间垃圾、未闭合、段内残缺', () => {
+    expect(looksLikeJson('{"a":1}notjson')).toBe(false)
+    expect(looksLikeJson('{"a":1}notjson{"b":2}')).toBe(false)
+    expect(looksLikeJson('{"a":1}{"b":2')).toBe(false)
+    expect(looksLikeJson('{"a":1}{bad}')).toBe(false)
+    // 段是合法 JSON 但顶层非 object/array（多段里混入顶层字符串）
+    expect(looksLikeJson('{"a":1}"str"')).toBe(false)
+  })
 })
 
 describe('keywordSideHits', () => {
@@ -165,13 +183,71 @@ describe('matcherHits', () => {
     expect(matcherHits('hello', many)).toHaveLength(4)
   })
 
-  it('超 2000 字符的命中文本剥离 payload（只进入不注入）', () => {
+  it('超 2000 字符的命中文本剥离 payload（只进入不注入）：text/regex 型走 query 通道维持剥离', () => {
     const m = manifest('translate', { matchers: [{ type: 'text', label: 'x' }] })
     const big = 'x'.repeat(2001)
     const [hit] = matcherHits(big, [m])
     expect(hit.payload).toBeUndefined()
     const ok = 'x'.repeat(2000)
     expect(matcherHits(ok, [m])[0].payload).toBe(ok)
+
+    const re = manifest('re-p', { matchers: [{ type: 'regex', match: '.', label: 'x' }] })
+    expect(matcherHits(big, [re])[0].payload).toBeUndefined()
+  })
+
+  it('json 型超 2000 字符不剥离 payload（走 initialText 通道，looksLikeJson 已限 ≤100k）', () => {
+    const j = manifest('json-editor', { matchers: [{ type: 'json', label: '打开 JSON 编辑器' }] })
+    const bigJson = '{"k":"' + 'x'.repeat(2500) + '"}'
+    expect(bigJson.length).toBeGreaterThan(2000)
+    const [hit] = matcherHits(bigJson, [j])
+    expect(hit.payload).toBe(bigJson)
+    // 剪贴板源同样不剥离
+    const clipBig = '{"c":"' + 'y'.repeat(2500) + '"}'
+    expect(matcherHits('hello', [j], clipBig)[0].payload).toBe(clipBig)
+  })
+
+  it('json 型通道上限由 looksLikeJson 锁定：恰 100k 保留全文，超 100k 双源都不产出', () => {
+    const j = manifest('json-editor', { matchers: [{ type: 'json', label: 'J' }] })
+    // 前缀 {"k":" 6 字符 + 后缀 "} 2 字符 = 8 字符壳
+    const exact = '{"k":"' + 'x'.repeat(100_000 - 8) + '"}'
+    expect(exact.length).toBe(100_000)
+    expect(matcherHits(exact, [j])[0].payload).toBe(exact)
+    const over = '{"k":"' + 'x'.repeat(100_000 - 6) + '"}'
+    expect(over.length).toBe(100_002)
+    expect(matcherHits(over, [j])).toEqual([])
+    expect(matcherHits('hello', [j], over)).toEqual([])
+  })
+
+  it('同调用混型分流：json 超 2000 保留全文，text 同文本剥离', () => {
+    const j = manifest('json-editor', { matchers: [{ type: 'json', label: 'J' }] })
+    const t = manifest('translate', { matchers: [{ type: 'text', label: 'T' }] })
+    const bigJson = '{"k":"' + 'x'.repeat(2500) + '"}'
+    const hits = matcherHits(bigJson, [j, t])
+    expect(hits.find((h) => h.source === 'json')?.payload).toBe(bigJson)
+    expect(hits.find((h) => h.source === 'text')?.payload).toBeUndefined()
+  })
+
+  it('多段拼接产出 json 推荐，payload 为全文（initialText 注入源）', () => {
+    const j = manifest('json-editor', { matchers: [{ type: 'json', label: '打开 JSON 编辑器' }] })
+    // 空态：剪贴板两段直拼
+    const clip = '{"a":1}\n{"b":2}'
+    const r = buildRecommendations({ query: '', manifests: [j], clipboardText: clip })
+    expect(r).toHaveLength(1)
+    expect(r[0]).toMatchObject({ source: 'json', payload: clip })
+    // query 态：两段直拼输入同样命中且 payload 全文
+    const q = matcherHits('{"a":1}{"b":2}', [j])
+    expect(q).toHaveLength(1)
+    expect(q[0].payload).toBe('{"a":1}{"b":2}')
+    // 两段之一非法不产出
+    expect(matcherHits('hello', [j], '{"a":1}notjson')).toEqual([])
+  })
+
+  it('超 100k 的拼接多段同样不产出（长度门先于切段）', () => {
+    const j = manifest('json-editor', { matchers: [{ type: 'json', label: 'J' }] })
+    const big = '{"a":"' + 'x'.repeat(50_000) + '"}{"b":"' + 'y'.repeat(50_000) + '"}'
+    expect(big.length).toBeGreaterThan(100_000)
+    expect(looksLikeJson(big)).toBe(false)
+    expect(matcherHits('hello', [j], big)).toEqual([])
   })
 })
 
