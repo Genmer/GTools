@@ -110,7 +110,8 @@ describe('logo-skin：运行时 logo 底色应用', () => {
     expect(rWhite).toBe(true)
     expect(calls[0].file).toBe('osascript')
     expect(calls[0].args[3]).toContain('initWithContentsOfFile')
-    expect(calls[0].args[3]).toContain(mockBundle)
+    // bundlePath 经 JSON.stringify 进脚本：Windows 路径反斜杠被转义，须按转义后形态断言
+    expect(calls[0].args[3]).toContain(JSON.stringify(mockBundle).slice(1, -1))
 
     const rBlack = await applyMacBundleIcon('black', { targetBundle: mockBundle, runner })
     expect(rBlack).toBe(true)
