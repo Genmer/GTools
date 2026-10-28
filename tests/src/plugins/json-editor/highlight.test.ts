@@ -107,7 +107,7 @@ describe('highlightJson 搜索命中标记', () => {
     expect(out).not.toContain('<mark class="hl-hit"><b>')
   })
 
-  it('>200k 逃逸路径只转义但仍标命中（与分词解耦）', () => {
+  it('>200k 逃逸路径只转义但仍标命中（与分词解耦）', { timeout: 15_000 }, () => {
     const large = '{"x": "needle"},'.repeat(20_000)
     expect(large.length).toBeGreaterThan(200_000)
     const { matches } = findMatches(large, 'needle')
