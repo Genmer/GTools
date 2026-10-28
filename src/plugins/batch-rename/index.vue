@@ -168,15 +168,22 @@ function applyExecuted(ops: readonly RenameOp[]): void {
   })
 }
 
+// POSIX rename 会静默覆盖同名文件，目录清单拿不到时绝不执行（执行前两处把关共用文案）
+const DIR_LIST_FAILED_MSG = '目录清单不可用，无法安全执行（可能覆盖同名文件）；请重新添加文件'
+
 async function execute(): Promise<void> {
   if (busy.value || !preview.value.ok || items.value.length === 0) return
   error.value = ''
   if (dirListFailed.value) {
-    // POSIX rename 会静默覆盖同名文件，目录清单拿不到时绝不执行
-    error.value = '目录清单不可用，无法安全执行（可能覆盖同名文件）；请重新添加文件'
+    error.value = DIR_LIST_FAILED_MSG
     return
   }
   await refreshExisting()
+  // 刷新期间目录清单可能再次失败（目录被删/失授权），执行前二次把关
+  if (dirListFailed.value) {
+    error.value = DIR_LIST_FAILED_MSG
+    return
+  }
   const ops = planExecution(preview.value.rows)
   if (ops.length === 0) {
     error.value = '没有可执行的重命名（检查冲突 / 非法名 / 无变化）'

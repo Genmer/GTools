@@ -38,6 +38,7 @@ set existingItems to (every login item whose path is itemPath)
 set hasItem to ((count of existingItems) > 0)
 if ${want} then
 if not hasItem then
+delete (every login item whose name is itemName)
 make new login item at end with properties {name:itemName, path:itemPath, hidden:false}
 return "applied"
 else
@@ -59,7 +60,7 @@ end tell`
 
 /**
  * 未打包时 process.execPath 是 electron.exe，跳过以防污染启动项；
- * macOS 双轨同步：Electron 原生 SMAppService + System Events（登录时打开列表，免签名兜底）。
+ * macOS 建项方向双轨择一（SMAppService 回读生效即独占，防双登录项）；删除方向两轨都清——两存储互不可见，防 System Events 残留项。
  */
 export function syncLoginItem(
   app: LoginItemApp,
@@ -79,6 +80,10 @@ export function syncLoginItem(
   if (platform === 'darwin') {
     const bundlePath = opts?.bundlePath !== undefined ? opts.bundlePath : getMacBundlePath(app)
     if (bundlePath) {
+      // 择一门槛只护建项方向：want=true 且 Electron 轨（SMAppService）回读生效则不跑 System Events，防双登录项；
+      // 删除方向无条件跑清理——SMAppService 与 System Events 两存储互不可见，回读一致不代表 System Events 无残留项
+      // （未签名 app 的 set 静默失败、双轨时代旧项），脚本对无可删项幂等返回 noop
+      if (want && app.getLoginItemSettings().openAtLogin === want) return electronResult
       const macResult = syncMacLoginItem(bundlePath, want, opts?.runner)
       return macResult === 'applied' || electronResult === 'applied' ? 'applied' : 'noop'
     }

@@ -225,3 +225,52 @@ describe('FloatWindowManager 生命周期', () => {
     expect(manager.closeByWebContents(windows[0].webContentsId)).toBe(false)
   })
 })
+
+describe('setGeometryByWebContents（浮窗页自管几何 op）', () => {
+  it('按 webContents 定位应用：宽高夹取、坐标取整', () => {
+    const { manager, windows } = setup()
+    manager.create('p', { html: 'x', width: 200, height: 150 })
+    const ok = manager.setGeometryByWebContents(windows[0].webContentsId, {
+      x: 10.6,
+      y: -20.2,
+      width: 9999,
+      height: 10
+    })
+    expect(ok).toBe(true)
+    expect(windows[0].bounds).toMatchObject({ x: 11, y: -20, width: 4000, height: 80 })
+  })
+
+  it('部分字段缺省只改给定字段，其余 bounds 不动', () => {
+    const { manager, windows } = setup()
+    manager.create('p', { html: 'x', width: 200, height: 150 })
+    expect(manager.setGeometryByWebContents(windows[0].webContentsId, { width: 300 })).toBe(true)
+    expect(windows[0].bounds).toMatchObject({ width: 300, height: 150 })
+    expect(manager.setGeometryByWebContents(windows[0].webContentsId, { x: 7 })).toBe(true)
+    expect(windows[0].bounds).toMatchObject({ x: 7, width: 300 })
+  })
+
+  it('未知 webContents / 空对象 / 非对象拒绝', () => {
+    const { manager, windows } = setup()
+    manager.create('p', { html: 'x' })
+    const wc = windows[0].webContentsId
+    expect(manager.setGeometryByWebContents(99999, { width: 300 })).toBe(false)
+    expect(manager.setGeometryByWebContents(wc, {})).toBe(false)
+    expect(manager.setGeometryByWebContents(wc, null)).toBe(false)
+    expect(manager.setGeometryByWebContents(wc, 42)).toBe(false)
+  })
+
+  it('NaN / 非数 / 超限坐标 / 无限宽高整体拒绝，不半套用', () => {
+    const { manager, windows } = setup()
+    manager.create('p', { html: 'x', width: 200, height: 150 })
+    const wc = windows[0].webContentsId
+    const bad: Array<{ x?: unknown; y?: unknown; width?: unknown; height?: unknown }> = [
+      { x: Number.NaN, y: 5 },
+      { width: '300' },
+      { y: 1e9 },
+      { height: Number.POSITIVE_INFINITY },
+      { x: 1, width: Number.NaN }
+    ]
+    for (const g of bad) expect(manager.setGeometryByWebContents(wc, g)).toBe(false)
+    expect(windows[0].bounds).toMatchObject({ x: 100 + (1000 - 200) / 2, y: 50 + (800 - 150) / 2, width: 200, height: 150 })
+  })
+})

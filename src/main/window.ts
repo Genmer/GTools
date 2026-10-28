@@ -1,20 +1,27 @@
 import { BrowserWindow, nativeTheme, screen } from 'electron'
+import type { WebContents } from 'electron'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { ThemeName, TransparencySettings } from './settings-store'
 import { DEFAULT_TRANSPARENCY } from '@sdk/settings'
 import type { DetachedWindowLike, DetachedWindowOptions } from './detached-window-manager'
+import {
+  MARGIN_BOTTOM,
+  MARGIN_TOP,
+  MARGIN_X,
+  detachedWindowBounds,
+  wantsDetachedMargin
+} from './detached-window-geometry'
+import { closeClipboardFlyout, hideClipboardFlyout, showClipboardFlyout } from './clipboard-flyout-window'
 import { decideShowPosition, applyResizeDelta } from './window-position'
 import { logoIconPath } from './logo-skin'
+import { decideAutoReload } from './services/crash-reload-policy'
 
 // 内容口径 800×560 为四期 uTools 视觉规范（docs/design/ui-style-guide.md §1.1）。
 // 透明窗的 OS 窗口比内容大一圈透明边距，外圈投影落进边距才可见（Electron 透明+无边框窗
 // DWM 不给影，setHasShadow 在 Windows 路径是空操作）；不透明窗零改动（DWM 系统投影为主）。
-// base.css 的 html[data-wintx='1'] #app padding 与 MARGIN 必须一致，两处手改需同步
+// MARGIN 常数单源在 detached-window-geometry.ts（与 base.css #app padding 两处手改需同步）
 const CONTENT_W = 800
 const CONTENT_H = 560
-const MARGIN_X = 32
-const MARGIN_TOP = 32
-const MARGIN_BOTTOM = 48
 const WINDOW_W = CONTENT_W + MARGIN_X * 2
 const WINDOW_H = CONTENT_H + MARGIN_TOP + MARGIN_BOTTOM
 
@@ -27,6 +34,10 @@ let lastShownAt = 0
 // 首帧就绪门控：冷启动后立即按热键 show 会白屏，未就绪时挂起等 ready-to-show 再显
 let rendererReady = false
 let showPending = false
+
+// 渲染进程崩溃/加载失败的自动重载时间戳（60 秒滑动窗，超限放弃），窗口重建时清零新账；
+// 垂死旧窗晚到的 ERR_ABORTED/崩溃事件须先查 isDestroyed 再记账，防污染新窗刚清零的历史
+let crashReloadHistory: number[] = []
 
 /** 失焦自动隐藏的模块内镜像（设置页开关即时生效，只约束主窗） */
 let hideOnBlurEnabled = true
@@ -70,13 +81,32 @@ const preloadPath = fileURLToPath(new URL('../preload/index.cjs', import.meta.ur
  *   会在显隐/缩放时闪烁（实测白闪根因）；且 macOS 没有 Win32「透明窗不可拖缘拉伸」约束
  * - win32/linux：模糊关闭的透明档与玻璃清透档才要透明标志；带模糊走不透明窗+系统材质（DWM acrylic 只给不透明窗）
  */
-function wantsTransparentFlag(tx: TransparencySettings, theme: ThemeName): boolean {
+export function wantsTransparentFlag(tx: TransparencySettings, theme: ThemeName): boolean {
   if (process.platform === 'darwin') return true
   return (tx.enabled || theme === 'glass') && !tx.blur
 }
 
 // Electron 无 isTransparent()：创建时带透明标志的窗口记入此表，材质应用时判断能否直透桌面
 const transparentWindows = new WeakSet<object>()
+
+/** 飞窗等 window.ts 外部创建的透明窗共用同一登记表：不登记会被材质应用/数据同步当不透明窗处理 */
+export function markTransparentWindow(target: BrowserWindow): void {
+  transparentWindows.add(target)
+}
+
+/** ipc 等外部消费方查透明标志（Electron 无 isTransparent()，只认创建时登记） */
+export function isTransparentWindow(target: BrowserWindow): boolean {
+  return transparentWindows.has(target)
+}
+
+/** 当前视觉类别快照（飞窗创建/锚定与主窗同源）：transparent 取主窗实际标志，无窗时回退公式值 */
+export function currentVisualState(): { theme: ThemeName; tx: TransparencySettings; transparent: boolean } {
+  return {
+    theme: currentTheme,
+    tx: { ...currentTransparency },
+    transparent: win ? transparentWindows.has(win) : wantsTransparentFlag(currentTransparency, currentTheme)
+  }
+}
 
 /** 把窗口真实透明标志同步给渲染层（html[data-wintx]）：CSS 据此决定根圆角画不画——
  *  透明窗画（四角透空），不透明窗不画（内容满幅交 OS 裁弧，双弧夹层露底色即「圆角主体+直角边」穿帮根因） */
@@ -89,13 +119,24 @@ function syncWindowTransparentFlag(target: BrowserWindow): void {
     })
 }
 
-function bindTransparentFlagSync(target: BrowserWindow): void {
+export function bindTransparentFlagSync(target: BrowserWindow): void {
   target.webContents.on('dom-ready', () => syncWindowTransparentFlag(target))
   syncWindowTransparentFlag(target)
 }
 
+/** 全部自建窗口统一导航钳制：SPA 只认本渲染源，其余顶层导航一律拦下、弹窗恒 deny（iframe sandbox 为第一道防线）。
+ *  loadURL 初始加载不触发 will-navigate，data:URL 遮罩/浮窗初始页不受影响。 */
+export function secureWebContents(wc: WebContents): void {
+  const rendererOrigin = process.env.ELECTRON_RENDERER_URL ?? 'file://'
+  wc.on('will-navigate', (e, url) => {
+    if (!url.startsWith(rendererOrigin)) e.preventDefault()
+  })
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }))
+}
+
 export function createSearchWindow(): BrowserWindow {
-  if (win) return win
+  // 销毁间隙的旧引用不认（closed 置 null 与销毁非同拍），与 getSearchWindow 口径一致
+  if (win && !win.isDestroyed()) return win
   const { workArea } = screen.getPrimaryDisplay()
   const transparent = wantsTransparentFlag(currentTransparency, currentTheme)
   // 透明窗加投影边距；不透明窗维持内容尺寸（uiFixes：外圈投影为透明窗专属，不透明窗零改动）
@@ -131,9 +172,12 @@ export function createSearchWindow(): BrowserWindow {
     }
   })
   if (transparent) transparentWindows.add(win)
+  // closed/render-process-gone 等回调晚于窗口重建触发时模块 win 可能已指向新窗，回调只认本窗
+  const self = win
 
   rendererReady = false
   showPending = false
+  crashReloadHistory = []
   win.once('ready-to-show', () => {
     rendererReady = true
     if (showPending) {
@@ -165,37 +209,76 @@ export function createSearchWindow(): BrowserWindow {
     }, 600)
   })
   win.on('closed', () => {
-    win = null
+    transparentWindows.delete(self)
+    if (win === self) win = null
   })
-  // 容器插件页可发起顶层导航/弹窗：SPA 只认本渲染源，其余一律拦下（iframe sandbox 为第一道防线）
-  const rendererOrigin = process.env.ELECTRON_RENDERER_URL ?? 'file://'
-  win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith(rendererOrigin)) e.preventDefault()
+  // 渲染进程崩溃（OOM/原生崩溃）后白死窗口无自愈：按滑动窗策略自动重载，超限放弃防 reload 风暴
+  win.webContents.on('render-process-gone', (_e, details) => {
+    if (details.reason === 'clean-exit' || self.isDestroyed()) return
+    const decision = decideAutoReload(crashReloadHistory, Date.now())
+    crashReloadHistory = decision.history
+    if (decision.reload) {
+      console.error('GTools 主窗渲染进程异常（' + details.reason + '），自动重载')
+      if (!self.isDestroyed()) self.webContents.reload()
+    } else {
+      console.error('GTools 主窗渲染进程异常（' + details.reason + '），60 秒内已 3 次，放弃自动重载')
+    }
   })
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  // 容器插件页可发起顶层导航/弹窗：统一导航钳制（见 secureWebContents）
+  secureWebContents(win.webContents)
 
   if (process.env.ELECTRON_RENDERER_URL) {
     const base = process.env.ELECTRON_RENDERER_URL
     const url = deepLinkHash ? `${base}#${deepLinkHash}` : base
     const load = (): void => {
-      win?.loadURL(url).catch(() => {
-        setTimeout(load, 200)
+      if (self.isDestroyed()) return
+      // dev server 未起时的 200ms 重试同样受滑动窗策略封顶，不再无限重试
+      self.loadURL(url).catch((err: unknown) => {
+        if (self.isDestroyed()) return
+        const decision = decideAutoReload(crashReloadHistory, Date.now())
+        crashReloadHistory = decision.history
+        if (decision.reload) setTimeout(load, 200)
+        else console.error('GTools 主窗 dev 加载重试超限（60 秒内已 3 次），放弃：', err)
       })
     }
     load()
   } else {
     const file = fileURLToPath(new URL('../renderer/index.html', import.meta.url))
-    void win.loadFile(file, deepLinkHash ? { hash: deepLinkHash } : undefined)
+    void self.loadFile(file, deepLinkHash ? { hash: deepLinkHash } : undefined).catch((err: unknown) => {
+      if (self.isDestroyed()) return
+      console.error('GTools 主窗加载失败：', err)
+      const decision = decideAutoReload(crashReloadHistory, Date.now())
+      crashReloadHistory = decision.history
+      if (decision.reload) {
+        setTimeout(() => {
+          if (!self.isDestroyed()) self.webContents.reload()
+        }, 200)
+      } else {
+        console.error('GTools 主窗加载重试超限（60 秒内已 3 次），放弃自动重载')
+      }
+    })
   }
   return win
 }
 
+/** 主窗销毁后（Alt+F4 真关/透明类别重建间隙）不得把 destroyed 引用交给消费者，send 会抛错 */
 export function getSearchWindow(): BrowserWindow | null {
-  return win
+  return win !== null && !win.isDestroyed() ? win : null
+}
+
+/** 全窗投递广播的目标集合：getAllWindows 含销毁中窗口，须过滤防 destroyed send */
+export function allLiveWindows(): BrowserWindow[] {
+  return BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed())
 }
 
 export function showSearchWindow(): void {
-  if (!win) return
+  if (!win || win.isDestroyed()) {
+    // 主窗被真关（Alt+F4/Cmd+W 后 closed 置 null）后热键/托盘唤起须重建，否则托盘常驻应用整体僵尸；
+    // 新窗 rendererReady 恒 false，挂起待 ready-to-show 再显（与下方未就绪分支同语义）
+    createSearchWindow()
+    showPending = true
+    return
+  }
   if (!rendererReady) {
     // 页面首帧未就绪：挂起待 ready-to-show 再显，防冷启动白屏
     showPending = true
@@ -220,9 +303,11 @@ export function showSearchWindow(): void {
   win.show()
   win.focus()
   lastShownAt = Date.now()
+  showClipboardFlyout()
 }
 
 export function hideSearchWindow(): void {
+  hideClipboardFlyout()
   // 拖动防抖未到期即隐藏（hideOnBlur 常见）：就地落一次位置，防本次摆放被丢弃
   if (movedDebounce !== null && win && !win.isDestroyed()) {
     clearTimeout(movedDebounce)
@@ -296,11 +381,19 @@ let currentTransparency: TransparencySettings = { ...DEFAULT_TRANSPARENCY }
 
 /**
  * 主题×透明联动单个窗口原生效果（主窗/独立窗共用）——不截图不读壁纸：
- * - 磨霜：win32 不透明窗走 DWM acrylic；macOS 不用 vibrancy（整窗矩形磨霜会越出卡片圆角边距，
- *   即实测的「外圈玻璃块」），霜面由渲染层 .app/.detached 的 CSS backdrop-filter 实时采样桌面承担
+ * - 磨霜：win32 不透明窗走 DWM acrylic（allowMaterial=false 的窗口不申请，见下）；macOS 不用
+ *   vibrancy（整窗矩形磨霜会越出卡片圆角边距，即实测的「外圈玻璃块」），霜面由渲染层
+ *   .app/.detached 的 CSS backdrop-filter 实时采样桌面承担
  * - 模糊关：透明窗直透桌面（clear 效果）；win32 不透明档回退主题底色
+ * - allowMaterial：DWM 同进程只有单活霜面槽，新材质窗会抢走旧窗的槽——独立窗必须传 false，
+ *   否则 attach 即打死主窗霜面
  */
-export function applyThemeToBrowserWindow(target: BrowserWindow, theme: ThemeName, tx: TransparencySettings = currentTransparency): void {
+export function applyThemeToBrowserWindow(
+  target: BrowserWindow,
+  theme: ThemeName,
+  tx: TransparencySettings = currentTransparency,
+  allowMaterial = true
+): void {
   syncWindowTransparentFlag(target)
   // 原生实时模糊：透明开+模糊，或玻璃磨砂档（玻璃强制视为透明开）
   const nativeBlur = tx.blur && (tx.enabled || theme === 'glass')
@@ -313,13 +406,21 @@ export function applyThemeToBrowserWindow(target: BrowserWindow, theme: ThemeNam
       // darwin 恒透明窗：alpha 底色让桌面从页面半透明涂层下透出
       target.setBackgroundColor('#00000000')
     } else {
-      try {
-        // Win11 acrylic 只给不透明窗；DWM tint 亮度只跟系统明暗（与 nativeTheme.themeSource 无关）
-        if (nativeBlur && !transparent) target.setBackgroundMaterial('acrylic')
-      } catch {
-        // 旧版 Windows 无此 API，忽略
+      let materialApplied = false
+      // DWM tint 亮度只跟系统明暗（与 nativeTheme.themeSource 无关）
+      if (nativeBlur && !transparent && allowMaterial) {
+        try {
+          target.setBackgroundMaterial('acrylic')
+          materialApplied = true
+        } catch {
+          // Win10/旧版无此 API：退主题实色
+        }
       }
-      target.setBackgroundColor(transparent ? '#00000000' : theme === 'dark' ? '#1e1e1e' : '#f2f3f5')
+      // 材质生效前提是窗口底色透明（不透明色会从内部盖死 DWM 霜面，与调用顺序无关）；
+      // 材质未生效（API 缺失/独立窗）时不透明窗必须回退主题实色防透明黑底
+      target.setBackgroundColor(
+        transparent || materialApplied ? '#00000000' : theme === 'dark' ? '#1e1e1e' : '#f2f3f5'
+      )
     }
   } catch {
     // 窗口效果失败不阻塞主题切换（CSS 变量仍生效）
@@ -344,32 +445,59 @@ export function applyThemeToWindow(theme: ThemeName, transparency?: Transparency
   applyThemeToBrowserWindow(win, theme)
 }
 
-/** 销毁并按最新镜像重建主窗；原可见则复显（win32 透明类别切换专用，darwin 恒透明不会走到） */
+/**
+ * 销毁并按最新镜像重建主窗；原可见则复显（win32 透明类别切换专用，darwin 恒透明不会走到）。
+ * DWM 霜面槽同进程单活且销毁后同矩形区域烧毁不可复活：重建窗的磨砂观感只能靠 CSS 兜底（噪点+曲线）。
+ */
 function recreateSearchWindow(): void {
   if (!win) return
   const wasVisible = win.isVisible()
   const old = win
+  // 飞窗监听与锚定都挂在旧主窗上：跨透明类别重建必须连飞窗一起销毁，下次 show 按新类别惰性重建
+  closeClipboardFlyout()
   win = null
   old.destroy()
   createSearchWindow()
   if (wasVisible) showSearchWindow()
 }
 
+/** 车道契约：把本窗是否带边距环同步给渲染层（html[data-dmargin]）——CSS 据此决定独立窗
+ *  吃不吃 #app 边距环（darwin 恒无环维持满幅现状）；几何创建时定死，窗口生命周期内不变 */
+function syncDetachedMarginFlag(target: BrowserWindow, withMargin: boolean): void {
+  const flag = withMargin ? '1' : '0'
+  target.webContents
+    .executeJavaScript(`document.documentElement.dataset.dmargin = '${flag}'; undefined`, true)
+    .catch(() => {
+      // 页面未就绪/导航竞态：dom-ready 监听会再同步
+    })
+}
+
+export function bindDetachedMarginSync(target: BrowserWindow, withMargin: boolean): void {
+  target.webContents.on('dom-ready', () => syncDetachedMarginFlag(target, withMargin))
+  syncDetachedMarginFlag(target, withMargin)
+}
+
 /** 独立插件窗口：titleBarStyle hidden 保留 macOS 交通灯（渲染层顶栏做 70px 避让），安全配置与主窗一致；透明+无模糊模式创建即带透明标志 */
 export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindowLike {
   const transparent = wantsTransparentFlag(currentTransparency, currentTheme)
+  // win32/linux 透明窗加边距环容纳 CSS 外影；darwin 恒透明但不加环（零改动门控）
+  const withMargin = wantsDetachedMargin(transparent, process.platform)
+  // manager opts 是内容口径，此处换算成 OS 窗口口径（无环恒等，不透明窗 + darwin 同现状）
+  const bounds = detachedWindowBounds(opts, withMargin)
   const win32Icon = process.platform === 'win32' ? logoIconPath() : null
   const w = new BrowserWindow({
-    width: opts.width,
-    height: opts.height,
-    x: opts.x,
-    y: opts.y,
+    width: bounds.width,
+    height: bounds.height,
+    x: bounds.x,
+    y: bounds.y,
     titleBarStyle: 'hidden',
     // Win11 DWM 默认对 frameless 窗做系统圆角裁剪会咬掉轮廓环四角，win32 一律关掉；darwin 不设，保持系统行为
     ...(process.platform === 'win32' ? { roundedCorners: false } : {}),
+    // win32 透明档放开 OS 拖缘拉伸会使透明失效（与主窗同约束）；darwin 恒透明但无此约束，保持可拉伸
+    resizable: !(process.platform === 'win32' && transparent),
     show: false,
-    minWidth: 360,
-    minHeight: 240,
+    minWidth: bounds.minWidth,
+    minHeight: bounds.minHeight,
     transparent,
     // 与主窗同因：透明窗关原生影，防原生整窗矩形影与 CSS 影叠加出方框
     hasShadow: !transparent,
@@ -383,27 +511,34 @@ export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindo
       spellcheck: false
     }
   })
-  if (wantsTransparentFlag(currentTransparency, currentTheme)) transparentWindows.add(w)
+  if (transparent) transparentWindows.add(w)
   if (opts.alwaysOnTop) w.setAlwaysOnTop(true, 'floating')
   // macOS 全屏覆盖：与主窗同法，分离窗常驻全工作区可见（含全屏空间），不切走前台 app 全屏
   if (process.platform === 'darwin') {
     w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   }
-  applyThemeToBrowserWindow(w, currentTheme)
+  // 独立窗不申请系统材质：DWM 霜面槽唯一，attach 即抢死主窗霜面（磨砂观感由噪点+CSS 曲线承担）
+  applyThemeToBrowserWindow(w, currentTheme, currentTransparency, false)
   bindTransparentFlagSync(w)
+  bindDetachedMarginSync(w, withMargin)
+  secureWebContents(w.webContents)
   return {
     webContentsId: w.webContents.id,
     webContents: { send: (channel, payload) => w.webContents.send(channel, payload) },
     loadURL: (url) => void w.loadURL(url),
     show: () => w.show(),
+    hide: () => w.hide(),
     focus: () => w.focus(),
     setAlwaysOnTop: (v, level) => w.setAlwaysOnTop(v, level ?? 'floating'),
-    applyTheme: (theme, tx) => applyThemeToBrowserWindow(w, theme, tx),
+    applyTheme: (theme, tx) => applyThemeToBrowserWindow(w, theme, tx, false),
     close: () => w.close(),
     destroy: () => w.destroy(),
     isDestroyed: () => w.isDestroyed(),
-    on: (event, cb) => {
-      w.on(event, cb)
+    // 'close' 回调带 preventDefault（两阶段关窗拦截用），'closed' 回调无参；BrowserWindow.on
+    // 的重载族不接受事件名联合，按字面量分派
+    on: (event: 'close' | 'closed', cb: (e: { preventDefault(): void }) => void): void => {
+      if (event === 'closed') w.on('closed', cb as () => void)
+      else w.on('close', cb)
     },
     once: (event, cb) => {
       w.once(event, cb)

@@ -1,4 +1,6 @@
 import type {
+  AiChatRequest,
+  AiChatResult,
   ApiServiceId,
   ApiServiceStatus,
   ApiCallResult,
@@ -31,6 +33,8 @@ export interface ServiceBag {
   clipboard: {
     readText(): Promise<string>
     writeText(t: string): Promise<void>
+    writeTextEphemeral(t: string, opts?: { ttlMs?: number }): Promise<void>
+    isTextExempted(t: string): Promise<boolean>
     readImage(): Promise<{ width: number; height: number; dataUrl: string } | null>
     readImageThumb(maxHeight?: number): Promise<{ thumb: string; width: number; height: number } | null>
     writeImage(dataUrl: string): Promise<void>
@@ -78,6 +82,7 @@ export interface ServiceBag {
   app: { platform: string; version: string; arch: string }
   apis: {
     translate(req: TranslateRequest): Promise<TranslateResult>
+    chat(req: AiChatRequest): Promise<AiChatResult>
     status(service: ApiServiceId): ApiServiceStatus
   }
   events: {
@@ -98,11 +103,13 @@ export async function dispatchApi(
   services: ServiceBag,
   pluginId: string,
   api: string,
-  payload: unknown[]
+  payload: unknown[],
+  opts?: { allowDisabled?: boolean }
 ): Promise<ApiCallResult> {
   const entry = registry.get(pluginId)
   if (!entry) return { ok: false, error: 'PLUGIN_NOT_FOUND', message: `插件不存在：${pluginId}` }
-  if (!entry.enabled) return { ok: false, error: 'PLUGIN_DISABLED', message: `插件已禁用：${pluginId}` }
+  // backend 收尾期（stop/dispose）的落盘 flush 不得因 registry 已先置禁用而被拒；渲染层 IPC 不传 opts，照旧受限
+  if (!entry.enabled && !opts?.allowDisabled) return { ok: false, error: 'PLUGIN_DISABLED', message: `插件已禁用：${pluginId}` }
 
   const required = API_PERMISSIONS[api]
   if (required && !entry.manifest.permissions.includes(required)) {
@@ -115,6 +122,13 @@ export async function dispatchApi(
         return { ok: true, data: await services.clipboard.readText() }
       case 'clipboard.writeText':
         return { ok: true, data: await services.clipboard.writeText(str(payload[0])) }
+      case 'clipboard.writeTextEphemeral':
+        return {
+          ok: true,
+          data: await services.clipboard.writeTextEphemeral(str(payload[0]), obj(payload[1]) as { ttlMs?: number } | undefined)
+        }
+      case 'clipboard.isTextExempted':
+        return { ok: true, data: await services.clipboard.isTextExempted(str(payload[0])) }
       case 'clipboard.readImage':
         return { ok: true, data: await services.clipboard.readImage() }
       case 'clipboard.writeImage':
@@ -221,6 +235,27 @@ export async function dispatchApi(
           throw err
         }
       }
+      case 'apis.ai': {
+        const p = obj(payload[0])
+        if (p === undefined || typeof p.text !== 'string' || (p.providerId !== undefined && typeof p.providerId !== 'string')) {
+          throw new Error('参数必须是 { text } 且 text 为字符串（providerId 可选，须为字符串）')
+        }
+        // SERVICE_* 错误码要在通用 catch（BAD_REQUEST）之前透出，插件据此区分未配置与执行失败
+        try {
+          return {
+            ok: true,
+            data: await services.apis.chat({
+              text: p.text,
+              providerId: typeof p.providerId === 'string' && p.providerId !== '' ? p.providerId : undefined
+            })
+          }
+        } catch (err) {
+          if (err instanceof ApiServiceError) return { ok: false, error: err.code, message: err.message }
+          throw err
+        }
+      }
+      case 'apis.ai.status':
+        return { ok: true, data: services.apis.status('ai') }
       case 'apis.translate.status':
         return { ok: true, data: services.apis.status('translate') }
       default:
@@ -250,8 +285,9 @@ function strArray(v: unknown): string[] {
 
 /** backend 的同构上下文：主进程内直调 dispatch（无 IPC 往返）+ emit 推送渲染层 */
 export function createBackendContext(registry: PluginRegistry, services: ServiceBag, pluginId: string): BackendContext {
+  // allowDisabled 只放行这条主进程内闭包直调路径（禁用链先置禁用再 stop，flush 不能被拒）；渲染层 gtools:api 不经此处
   const call = <T>(api: string, ...args: unknown[]): Promise<T> =>
-    dispatchApi(registry, services, pluginId, api, args).then((r) => {
+    dispatchApi(registry, services, pluginId, api, args, { allowDisabled: true }).then((r) => {
       if (!r.ok) throw new HostApiError(r.error, r.message)
       return r.data as T
     })
@@ -260,6 +296,8 @@ export function createBackendContext(registry: PluginRegistry, services: Service
     clipboard: {
       readText: () => call('clipboard.readText'),
       writeText: (t) => call('clipboard.writeText', t),
+      writeTextEphemeral: (t, opts) => call('clipboard.writeTextEphemeral', t, opts),
+      isTextExempted: (t) => call<boolean>('clipboard.isTextExempted', t),
       readImage: () => call('clipboard.readImage'),
       writeImage: (d) => call('clipboard.writeImage', d)
     },

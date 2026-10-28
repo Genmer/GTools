@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as nodeFs from 'node:fs/promises'
@@ -45,5 +45,18 @@ describe('PluginStorageService dumpAll / replaceAll（备份配套）', () => {
   it('根目录不存在时 dumpAll 返回空对象', async () => {
     const svc = new PluginStorageService(join(root, 'not-exist'))
     expect(await svc.dumpAll()).toEqual({})
+  })
+
+  it('单插件读失败只跳过该插件留痕，好插件照常进备份（不炸整包）', async () => {
+    const svc = new PluginStorageService(root)
+    await svc.set('good', 'k', 'v')
+    // bad 插件的 kv.json 换成目录：readFile 必失败（win32 报 EPERM、POSIX 报 EISDIR，均非 ENOENT）
+    await mkdir(join(root, 'bad', 'kv.json'), { recursive: true })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const all = await svc.dumpAll()
+    expect(all).toEqual({ good: { k: 'v' } })
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(String(warnSpy.mock.calls[0]![0])).toContain('bad')
+    warnSpy.mockRestore()
   })
 })

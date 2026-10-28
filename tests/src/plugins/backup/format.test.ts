@@ -49,6 +49,17 @@ describe('backup format：序列化与文件名', () => {
     expect(withApi.apiServices).toEqual({ services: { translate: { activeProviderId: '', providers: [] } } })
   })
 
+  it('settings 整段克隆携带 background 段（导出携带；normalizeSettings 侧忽略不恢复）', () => {
+    const b = serializeBackup({
+      settings: { ...DEFAULT_SETTINGS, background: { enabled: true, file: 'current.jpg', dim: 60 } },
+      pluginStorage: {},
+      platform: 'win32',
+      appVersion: '0.1.0'
+    })
+    expect(b.settings.background).toEqual({ enabled: true, file: 'current.jpg', dim: 60 })
+    expect(normalizeSettings(b.settings).background).toEqual(DEFAULT_SETTINGS.background)
+  })
+
   it('defaultBackupFileName 含时间戳与 .gtools 扩展名', () => {
     expect(defaultBackupFileName(new Date(2026, 0, 2, 3, 4, 5))).toBe('gtools-backup-20260102-030405.gtools')
     expect(defaultBackupFileName(new Date(2026, 0, 2, 3, 4, 5), '.json')).toBe('gtools-backup-20260102-030405.json')
@@ -131,36 +142,53 @@ describe('backup format：parseBackup 校验（宁可拒绝也不猜）', () => 
     if (!r.ok) expect(r.error).toContain('v3')
   })
 
-  it('v2 的 apiServices 段原样透传（不解析内部结构）；结构异常丢弃并告警；v1 无段保持 undefined', () => {
-    const api = { services: { translate: { activeProviderId: 'u-1', providers: [{ id: 'u-1', apiKey: 'sk' }] } } }
+  it('v2 的 apiServices 段原样透传；坏段（非对象/坏 providers/元素缺 id/type）带段名拒绝；v1 无段保持 undefined', () => {
+    const api = { services: { translate: { activeProviderId: 'u-1', providers: [{ id: 'u-1', type: 'deepl', apiKey: 'sk' }] } } }
     const ok = parseBackup(JSON.stringify({ ...sampleBackup(), apiServices: api }))
     expect(ok.ok).toBe(true)
     if (ok.ok) expect(ok.backup.apiServices).toEqual(api)
 
     const bad = parseBackup(JSON.stringify({ ...sampleBackup(), apiServices: 'oops' }))
-    expect(bad.ok).toBe(true)
-    if (bad.ok) {
-      expect(bad.backup.apiServices).toBeUndefined()
-      expect(bad.warnings.join()).toContain('API 服务')
-    }
+    expect(bad.ok).toBe(false)
+    if (!bad.ok) expect(bad.error).toContain('apiServices')
+
+    const badItem = parseBackup(
+      JSON.stringify({
+        ...sampleBackup(),
+        apiServices: { services: { ai: { activeProviderId: 'z', providers: [{ id: 'z', name: 'n' }] } } }
+      })
+    )
+    expect(badItem.ok).toBe(false)
+    if (!badItem.ok) expect(badItem.error).toContain('id/type')
 
     const v1 = parseBackup(JSON.stringify({ ...sampleBackup(), version: 1 }))
     expect(v1.ok).toBe(true)
     if (v1.ok) expect(v1.backup.apiServices).toBeUndefined()
   })
 
-  it('结构异常的插件数据跳过并记 warning；空命名空间丢弃', () => {
+  it('结构异常的插件数据带段名拒绝；空命名空间丢弃', () => {
     const raw = JSON.stringify({
       ...sampleBackup(),
-      pluginStorage: { good: { a: 1 }, bad: [1, 2], empty: {}, worse: 'str' }
+      pluginStorage: { good: { a: 1 }, empty: {} }
     })
     const r = parseBackup(raw)
     expect(r.ok).toBe(true)
-    if (r.ok) {
-      expect(Object.keys(r.backup.pluginStorage)).toEqual(['good'])
-      expect(r.warnings.some((w) => w.includes('bad'))).toBe(true)
-      expect(r.warnings.some((w) => w.includes('worse'))).toBe(true)
+    if (r.ok) expect(Object.keys(r.backup.pluginStorage)).toEqual(['good'])
+
+    for (const bad of [[1, 2], 'str']) {
+      const bad1 = parseBackup(JSON.stringify({ ...sampleBackup(), pluginStorage: { bad } }))
+      expect(bad1.ok).toBe(false)
+      if (!bad1.ok) {
+        expect(bad1.error).toContain('pluginStorage')
+        expect(bad1.error).toContain('bad')
+      }
     }
+  })
+
+  it('settings 段非对象（数组）拒绝且错误带段名', () => {
+    const r = parseBackup(JSON.stringify({ ...sampleBackup(), settings: [1, 2] }))
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('settings')
   })
 
   it('超过大小上限拒绝（maxBytes 可注入便于测试）', () => {
@@ -248,6 +276,8 @@ describe('normalizeSettings', () => {
       disabledPlugins: ['hello'],
       // 偏好/机器相关字段不从备份读取（sdk/settings.ts：导入恢复不覆盖），保持本机默认
       launchAtLogin: true,
+      clipboardPanel: { position: 'off' },
+      background: { enabled: true, file: 'current.jpg', dim: 90 },
       clipboardSuggest: false,
       hideOnBlur: false,
       outlineEnabled: false,
@@ -259,11 +289,14 @@ describe('normalizeSettings', () => {
     })
     expect(s).toEqual({
       theme: 'glass',
-      transparency: { enabled: true, opacity: 80, blur: false },
+      // 缺 glassFrost 按 opacity 派生（80 → 20），与宿主 SettingsStore.load 同语义
+      transparency: { enabled: true, opacity: 80, blur: false, glassFrost: 20 },
       hotkey: { darwin: 'Cmd+Shift+P', win32: 'Ctrl+Alt+Space' },
       disabledPlugins: ['hello'],
       launchAtLogin: false,
+      clipboardPanel: { position: 'right' },
       clipboardSuggest: true,
+      background: { enabled: false, file: '', dim: 40 },
       hideOnBlur: true,
       outlineEnabled: false,
       outlineWidth: 5,
@@ -276,6 +309,25 @@ describe('normalizeSettings', () => {
       windowPos: null
     })
   })
+
+  it('glassFrost：合法收录夹取；缺字段按 opacity 派生（同宿主），已带字段不派生，无 opacity 回默认 45', () => {
+    expect(normalizeSettings({ transparency: { glassFrost: 150 } }).transparency.glassFrost).toBe(100)
+    expect(normalizeSettings({ transparency: { glassFrost: -5 } }).transparency.glassFrost).toBe(0)
+    expect(normalizeSettings({ transparency: { opacity: 30 } }).transparency.glassFrost).toBe(70)
+    expect(normalizeSettings({ transparency: { opacity: 0 } }).transparency.glassFrost).toBe(100)
+    expect(normalizeSettings({ transparency: { opacity: 55 } }).transparency.glassFrost).toBe(45)
+    expect(normalizeSettings({ transparency: { opacity: 30, glassFrost: 10 } }).transparency.glassFrost).toBe(10)
+    expect(normalizeSettings({ transparency: { opacity: 30, glassFrost: 'x' } }).transparency.glassFrost).toBe(45)
+    expect(normalizeSettings({ transparency: { blur: false } }).transparency.glassFrost).toBe(45)
+    expect(normalizeSettings({}).transparency.glassFrost).toBe(45)
+  })
+
+  it('background 段一律忽略（导入不恢复，同 launchAtLogin/clipboardPanel）', () => {
+    expect(normalizeSettings({ background: { enabled: true, file: 'current.jpg', dim: 90 } }).background).toEqual(
+      DEFAULT_SETTINGS.background
+    )
+  })
+
   it('轮廓环宽/色/流速：合法值往返保留，环宽越界夹取，非法值回退默认 3/auto/3档', () => {
     const ok = normalizeSettings({ outlineWidth: 2, outlineColor: 'rainbow' })
     expect(ok.outlineWidth).toBe(2)

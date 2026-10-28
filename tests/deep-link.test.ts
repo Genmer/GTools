@@ -45,19 +45,38 @@ describe('parseDeepLink', () => {
       pluginId: 'calc',
       query: '1+2',
       demo: true,
-      isDetached: false
+      isDetached: false,
+      isFlyout: false
     })
   })
 
   it('无 # 前缀与非 plugin 开头的 hash 返回 null', () => {
-    expect(parseDeepLink('plugin=calc')).toEqual({ pluginId: 'calc', query: '', demo: false, isDetached: false })
+    expect(parseDeepLink('plugin=calc')).toEqual({
+      pluginId: 'calc',
+      query: '',
+      demo: false,
+      isDetached: false,
+      isFlyout: false
+    })
     expect(parseDeepLink('#foo=bar')).toBeNull()
     expect(parseDeepLink('#')).toBeNull()
   })
 
   it('q 缺省为空串，+ 不当空格（计算式里的真实加号）', () => {
-    expect(parseDeepLink('#plugin=md&q=a%2Bb')).toEqual({ pluginId: 'md', query: 'a+b', demo: false, isDetached: false })
-    expect(parseDeepLink('#plugin=calc&demo=true')).toEqual({ pluginId: 'calc', query: '', demo: true, isDetached: false })
+    expect(parseDeepLink('#plugin=md&q=a%2Bb')).toEqual({
+      pluginId: 'md',
+      query: 'a+b',
+      demo: false,
+      isDetached: false,
+      isFlyout: false
+    })
+    expect(parseDeepLink('#plugin=calc&demo=true')).toEqual({
+      pluginId: 'calc',
+      query: '',
+      demo: true,
+      isDetached: false,
+      isFlyout: false
+    })
   })
 
   it('中文与空格经 encode 后可还原', () => {
@@ -65,7 +84,8 @@ describe('parseDeepLink', () => {
       pluginId: 'translate',
       query: '你好 世界',
       demo: true,
-      isDetached: false
+      isDetached: false,
+      isFlyout: false
     })
   })
 
@@ -79,9 +99,16 @@ describe('parseDeepLink', () => {
       pluginId: 'calc',
       query: '1+1',
       demo: false,
-      isDetached: true
+      isDetached: true,
+      isFlyout: false
     })
-    expect(parseDeepLink('detached=1&plugin=md')).toEqual({ pluginId: 'md', query: '', demo: false, isDetached: true })
+    expect(parseDeepLink('detached=1&plugin=md')).toEqual({
+      pluginId: 'md',
+      query: '',
+      demo: false,
+      isDetached: true,
+      isFlyout: false
+    })
   })
 
   it('detached=true 但缺 plugin 返回 null，detached=false 不算独立窗口', () => {
@@ -93,12 +120,29 @@ describe('parseDeepLink', () => {
   it('detached 形态下缺省 query 与 q 键均可回退', () => {
     expect(parseDeepLink('#detached=true&plugin=calc&q=%E4%BD%A0%E5%A5%BD')?.query).toBe('你好')
   })
+
+  it('clipboard-flyout 飞窗形态：无 pluginId 合法放行，isFlyout=true', () => {
+    expect(parseDeepLink('#clipboard-flyout=1')).toEqual({
+      pluginId: '',
+      query: '',
+      demo: false,
+      isDetached: false,
+      isFlyout: true
+    })
+    expect(parseDeepLink('clipboard-flyout=true')?.isFlyout).toBe(true)
+    expect(parseDeepLink('#plugin=calc&clipboard-flyout=0')?.isFlyout).toBe(false)
+  })
+
+  it('flyout=0 且无 plugin/demo 仍返回 null，未知前缀不因白名单扩项放行', () => {
+    expect(parseDeepLink('#clipboard-flyout=0')).toBeNull()
+    expect(parseDeepLink('#clipboard-panel=1')).toBeNull()
+  })
 })
 
 describe('applyDeepLink', () => {
   it('命中插件：进入 plugin 模式，query 带 keyword 前缀，demo=1 → initialCommand=demo', () => {
     resetRouter()
-    const ok = applyDeepLink({ pluginId: 'calc', query: '1+2', demo: true, isDetached: false }, manifests)
+    const ok = applyDeepLink({ pluginId: 'calc', query: '1+2', demo: true, isDetached: false, isFlyout: false }, manifests)
     expect(ok).toBe(true)
     expect(router.mode).toBe('plugin')
     expect(router.activePluginId).toBe('calc')
@@ -108,22 +152,35 @@ describe('applyDeepLink', () => {
 
   it('无 q 时 query 以 keyword+空格 收尾，保持插件模式成立', () => {
     resetRouter()
-    expect(applyDeepLink({ pluginId: 'markdown-notes', query: '', demo: false, isDetached: false }, manifests)).toBe(true)
+    expect(
+      applyDeepLink({ pluginId: 'markdown-notes', query: '', demo: false, isDetached: false, isFlyout: false }, manifests)
+    ).toBe(true)
     expect(router.query).toBe('md ')
     expect(router.initialCommand).toBeNull()
   })
 
   it('未启用/不存在的插件返回 false 且不改动路由', () => {
     resetRouter()
-    expect(applyDeepLink({ pluginId: 'nope', query: 'x', demo: false, isDetached: false }, manifests)).toBe(false)
+    expect(applyDeepLink({ pluginId: 'nope', query: 'x', demo: false, isDetached: false, isFlyout: false }, manifests)).toBe(
+      false
+    )
     expect(router.mode).toBe('global')
     expect(router.activePluginId).toBeNull()
   })
 
   it('detached 链接同样进入插件模式（独立窗口渲染层据此分流）', () => {
     resetRouter()
-    expect(applyDeepLink({ pluginId: 'calc', query: '2*3', demo: false, isDetached: true }, manifests)).toBe(true)
+    expect(applyDeepLink({ pluginId: 'calc', query: '2*3', demo: false, isDetached: true, isFlyout: false }, manifests)).toBe(
+      true
+    )
     expect(router.mode).toBe('plugin')
     expect(router.query).toBe('calc 2*3')
+  })
+
+  it('flyout 链接无插件不进入路由（飞窗渲染层据 isFlyout 分流，不走 applyDeepLink）', () => {
+    resetRouter()
+    expect(applyDeepLink({ pluginId: '', query: '', demo: false, isDetached: false, isFlyout: true }, manifests)).toBe(false)
+    expect(router.mode).toBe('global')
+    expect(router.activePluginId).toBeNull()
   })
 })

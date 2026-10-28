@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto'
 import type { FsLike } from '../../settings-store'
 import type {
+  AiChatRequest,
+  AiChatResult,
   ApiServiceId,
   ApiServiceStatus,
   TranslateRequest,
@@ -14,6 +16,7 @@ import { executeHttpTemplate } from './executors/http-template'
 import { executeHunyuan } from './executors/hunyuan'
 import { executeIflytek } from './executors/iflytek'
 import { executeMyMemory, DEFAULT_MYMEMORY_PROVIDER_ID } from './executors/mymemory'
+import { executeAiChat } from './executors/openai-chat'
 import { TranslateExecutorError, type FetchFn } from './executors/types'
 import { executeVolcano } from './executors/volcano'
 import { executeYoudao } from './executors/youdao'
@@ -45,6 +48,14 @@ function summarizeProviders(list: ApiProviderConfig[]): { id: string; name: stri
 }
 
 function viewProvider(p: ApiProviderConfig): ApiProviderView {
+  return {
+    ...baseView(p),
+    ...(p.type === 'ai-chat' ? { baseUrl: p.baseUrl ?? '', model: p.model ?? '' } : {}),
+    hasKey: Object.keys(p.secrets ?? {}).length > 0
+  }
+}
+
+function baseView(p: ApiProviderConfig): ApiProviderView {
   const secrets = p.secrets ?? {}
   const hasSecrets: Record<string, boolean> = {}
   for (const field of getPreset(p.type)?.credentials ?? []) {
@@ -59,7 +70,8 @@ function viewProvider(p: ApiProviderConfig): ApiProviderView {
     method: p.method,
     bodyTemplate: p.bodyTemplate,
     resultPath: p.resultPath,
-    hasSecrets
+    hasSecrets,
+    hasKey: Object.keys(secrets).length > 0
   }
 }
 
@@ -105,30 +117,37 @@ export class ApiCenterService {
     return this.store.config.services.translate.providers.length === 0
   }
 
-  /** 备份导入：sanitize 后整体替换，完成即广播（内存态即时生效，无需重启） */
+  /** 备份导入：sanitize 后整体替换，完成即广播（内存态即时生效，无需重启）。
+   *  executor 不缓存配置（每次调用现取 store.config），按 id 残留的只有熔断记录——换配置即失效重连 */
   async replaceAll(raw: unknown): Promise<void> {
     await this.store.replace(raw)
+    this.breaker.reset()
     this.notify?.()
   }
 
-  status(_service: ApiServiceId): ApiServiceStatus {
-    const t = this.store.config.services.translate
-    const active = t.activeProviderId === '' ? null : (t.providers.find((p) => p.id === t.activeProviderId) ?? null)
-    if (!active) {
-      return {
-        service: 'translate',
-        configured: false,
-        activeProviderId: '',
-        activeProviderName: DEFAULT_PROVIDER_NAME,
-        providers: summarizeProviders(t.providers)
-      }
-    }
+  status(service: ApiServiceId): ApiServiceStatus {
+    const seg = service === 'ai' ? this.store.config.services.ai : this.store.config.services.translate
+    const active = seg.activeProviderId === '' ? null : (seg.providers.find((p) => p.id === seg.activeProviderId) ?? null)
     return {
-      service: 'translate',
-      configured: true,
-      activeProviderId: active.id,
-      activeProviderName: active.name,
-      providers: summarizeProviders(t.providers)
+      service,
+      configured: active !== null,
+      activeProviderId: active?.id ?? '',
+      activeProviderName: active?.name ?? (service === 'translate' ? DEFAULT_PROVIDER_NAME : ''),
+      providers: summarizeProviders(seg.providers)
+    }
+  }
+
+  /** AI 服务（ai-translator 插件）：单 active 直连，不进容灾循环 */
+  async chat(req: AiChatRequest): Promise<AiChatResult> {
+    const a = this.store.config.services.ai
+    const active = a.activeProviderId === '' ? null : (a.providers.find((p) => p.id === a.activeProviderId) ?? null)
+    if (active === null || active.type !== 'ai-chat' || !active.enabled) {
+      throw new ApiServiceError('SERVICE_UNCONFIGURED', null, 'AI 服务未配置：到 设置 → API 服务 添加并启用 AI 翻译供应商')
+    }
+    try {
+      return await executeAiChat(req, { fetch: this.fetch }, active)
+    } catch (err) {
+      throw this.toServiceError(err)
     }
   }
 
@@ -240,16 +259,23 @@ export class ApiCenterService {
         return executeHunyuan(req, rt, provider)
       case 'volcano':
         return executeVolcano(req, rt, provider)
+      case 'ai-chat':
+        throw new TranslateExecutorError('config', 'AI 供应商不能用于翻译服务')
     }
   }
 
   sanitized(): ApiServicesView {
     const t = this.store.config.services.translate
+    const a = this.store.config.services.ai
     return {
       services: {
         translate: {
           activeProviderId: t.activeProviderId,
           providers: t.providers.map(viewProvider)
+        },
+        ai: {
+          activeProviderId: a.activeProviderId,
+          providers: a.providers.map(viewProvider)
         }
       }
     }
@@ -263,6 +289,24 @@ export class ApiCenterService {
     // mymemory 免 key 且无字段：固定 id，重复添加即更新既有条目
     const id = type === 'mymemory' ? DEFAULT_MYMEMORY_PROVIDER_ID : form.id?.trim() || this.generateId()
 
+    if (type === 'ai-chat') {
+      const baseUrl = (form.baseUrl ?? '').trim().replace(/\/+$/, '')
+      const model = (form.model ?? '').trim()
+      if (!HTTP_URL_RE.test(baseUrl)) throw new Error('AI 服务地址必须以 http:// 或 https:// 开头')
+      if (model === '') throw new Error('模型名不能为空')
+      const ai: ApiProviderConfig = { id: form.id?.trim() || this.generateId(), type, name, enabled: form.enabled ?? true, baseUrl, model }
+      const allowedAi = getPreset(type)?.credentials.map((c) => c.key) ?? []
+      const cleanAi: Record<string, string> = {}
+      const incoming = { ...(form.newSecrets ?? {}) }
+      if (typeof form.newApiKey === 'string' && form.newApiKey.trim() !== '') incoming.apiKey = form.newApiKey.trim()
+      for (const [key, value] of Object.entries({ ...(existing?.secrets ?? {}), ...incoming })) {
+        if (typeof value !== 'string') continue
+        const v = value.trim()
+        if (v !== '' && allowedAi.includes(key)) cleanAi[key] = v
+      }
+      if (Object.keys(cleanAi).length > 0) ai.secrets = cleanAi
+      return ai
+    }
     const isTemplate = type === 'http-template'
     const endpoint = (form.endpoint ?? '').trim()
     if (isTemplate && !HTTP_URL_RE.test(endpoint)) {
@@ -301,9 +345,10 @@ export class ApiCenterService {
   }
 
   /** 新建或更新 provider，返回脱敏配置。 */
-  async upsertProvider(form: ProviderForm): Promise<ApiServicesView> {
+  async upsertProvider(form: ProviderForm, service: ApiServiceId = 'translate'): Promise<ApiServicesView> {
+    await this.store.ensureLoaded() // 降级会话：先取真实盘态再快照，锁未解则此处干净报错不落盘
     const cfg = structuredClone(this.store.config)
-    const t = cfg.services.translate
+    const t = service === 'ai' ? cfg.services.ai : cfg.services.translate
     const existing = t.providers.find((p) => p.id === form.id) ?? null
     const next = this.buildProvider(form, existing)
     const at = t.providers.findIndex((p) => p.id === next.id)
@@ -315,9 +360,10 @@ export class ApiCenterService {
     return this.sanitized()
   }
 
-  async removeProvider(id: string): Promise<ApiServicesView> {
+  async removeProvider(id: string, service: ApiServiceId = 'translate'): Promise<ApiServicesView> {
+    await this.store.ensureLoaded()
     const cfg = structuredClone(this.store.config)
-    const t = cfg.services.translate
+    const t = service === 'ai' ? cfg.services.ai : cfg.services.translate
     t.providers = t.providers.filter((p) => p.id !== id)
     if (t.activeProviderId === id) t.activeProviderId = ''
     await this.store.replace(cfg)
@@ -325,9 +371,10 @@ export class ApiCenterService {
     return this.sanitized()
   }
 
-  async setActive(id: string): Promise<ApiServicesView> {
+  async setActive(id: string, service: ApiServiceId = 'translate'): Promise<ApiServicesView> {
+    await this.store.ensureLoaded()
     const cfg = structuredClone(this.store.config)
-    const t = cfg.services.translate
+    const t = service === 'ai' ? cfg.services.ai : cfg.services.translate
     if (id !== '' && !t.providers.some((p) => p.id === id)) throw new Error(`服务商不存在：${id}`)
     t.activeProviderId = id
     await this.store.replace(cfg)
@@ -337,17 +384,29 @@ export class ApiCenterService {
 
   /** 测试连接（text='hello', from='en', to='zh-CN'）：executeOne 直连目标，不进容灾循环、不 trip 熔断。
    *  draft 优先（不落库，凭证取 newSecrets 或既有值），否则用已存 provider；无 id 无 draft = 测内置 MyMemory。 */
-  async testProvider(id?: string, draft?: ProviderForm): Promise<{ ok: boolean; resultText?: string; error?: string }> {
+  async testProvider(
+    id?: string,
+    draft?: ProviderForm,
+    service: ApiServiceId = 'translate'
+  ): Promise<{ ok: boolean; resultText?: string; error?: string }> {
     try {
+      const seg = service === 'ai' ? this.store.config.services.ai : this.store.config.services.translate
       let provider: ApiProviderConfig | null
+      if (service === 'ai' && !draft && (id === undefined || id === '')) {
+        return { ok: false, error: 'AI 服务未配置：先在 设置 → API 服务 添加 AI 翻译供应商' }
+      }
       if (draft) {
-        const existing = id ? (this.store.config.services.translate.providers.find((p) => p.id === id) ?? null) : null
+        const existing = id ? (seg.providers.find((p) => p.id === id) ?? null) : null
         provider = this.buildProvider({ ...draft, id: draft.id ?? id }, existing)
       } else if (id) {
-        provider = this.store.config.services.translate.providers.find((p) => p.id === id) ?? null
+        provider = seg.providers.find((p) => p.id === id) ?? null
         if (!provider) return { ok: false, error: `服务商不存在：${id}` }
       } else {
         provider = null
+      }
+      if (provider !== null && provider.type === 'ai-chat') {
+        const outAi = await executeAiChat({ text: 'hello' }, { fetch: this.fetch }, provider)
+        return { ok: true, resultText: outAi.resultText }
       }
       const out = await this.executeOne(provider, { text: 'hello', from: 'en', to: 'zh-CN' })
       return { ok: true, resultText: out.resultText }
@@ -360,6 +419,7 @@ export class ApiCenterService {
 
   /** 启动迁移专用：追加 provider 并设为 active（是否执行由 migrateLegacyTranslate 的一次性标记保证） */
   async adoptMigratedProvider(provider: ApiProviderConfig): Promise<void> {
+    await this.store.ensureLoaded()
     const cfg = structuredClone(this.store.config)
     cfg.services.translate.providers.push(provider)
     cfg.services.translate.activeProviderId = provider.id

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 // 无 DOM 测试基建，轮廓环 CSS 用静态文本断言：关键选择器存在 + 特异性层级正确
-const css = readFileSync(new URL('../src/renderer/src/assets/themes.css', import.meta.url), 'utf-8')
+const css = readFileSync(new URL('../src/renderer/src/assets/themes.css', import.meta.url), 'utf-8').replace(/\r\n/g, '\n')
 const bare = css.replace(/\/\*[\s\S]*?\*\//g, '')
 
 const escapeReg = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

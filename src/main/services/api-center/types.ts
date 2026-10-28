@@ -11,6 +11,7 @@ export type ProviderType =
   | 'iflytek'
   | 'hunyuan'
   | 'volcano'
+  | 'ai-chat'
 
 export const PROVIDER_TYPES: readonly ProviderType[] = [
   'mymemory',
@@ -20,7 +21,8 @@ export const PROVIDER_TYPES: readonly ProviderType[] = [
   'youdao',
   'iflytek',
   'hunyuan',
-  'volcano'
+  'volcano',
+  'ai-chat'
 ]
 
 /** 通用第三方 API 的 provider 配置（主进程内部结构，不进 sdk；secrets 明文只存本机，永不下发渲染层） */
@@ -38,16 +40,20 @@ export interface ApiProviderConfig {
   resultPath?: string
   /** 凭证字段，键集合由 preset 声明；值非空才保留 */
   secrets?: Record<string, string>
+  /** 仅 ai-chat：OpenAI 兼容根地址（不带 /chat/completions）与模型名 */
+  baseUrl?: string
+  model?: string
 }
 
 export interface ApiServicesConfig {
   services: {
     translate: { activeProviderId: string; providers: ApiProviderConfig[] }
+    ai: { activeProviderId: string; providers: ApiProviderConfig[] }
   }
 }
 
 export const DEFAULT_API_SERVICES: ApiServicesConfig = {
-  services: { translate: { activeProviderId: '', providers: [] } }
+  services: { translate: { activeProviderId: '', providers: [] }, ai: { activeProviderId: '', providers: [] } }
 }
 
 /** 设置页 upsert 表单：newSecrets 某键留空或缺省 = 保留已存值；键集合须 ⊆ preset.credentials */
@@ -60,7 +66,11 @@ export interface ProviderForm {
   method?: 'GET' | 'POST'
   bodyTemplate?: string
   resultPath?: string
+  baseUrl?: string
+  model?: string
   newSecrets?: Record<string, string>
+  /** ai-chat 糖字段：非空时等价 newSecrets.apiKey */
+  newApiKey?: string
 }
 
 /** 脱敏视图（secrets → hasSecrets），设置页与 api-services-changed 广播的唯一形态 */
@@ -73,13 +83,18 @@ export interface ApiProviderView {
   method?: 'GET' | 'POST'
   bodyTemplate?: string
   resultPath?: string
+  baseUrl?: string
+  model?: string
   /** 各凭证字段是否已有值（键集合 = 该 type 的 preset 声明） */
   hasSecrets: Record<string, boolean>
+  /** 是否持有任一凭证（ai 品类状态展示用） */
+  hasKey: boolean
 }
 
 export interface ApiServicesView {
   services: {
     translate: { activeProviderId: string; providers: ApiProviderView[] }
+    ai: { activeProviderId: string; providers: ApiProviderView[] }
   }
 }
 
@@ -119,42 +134,71 @@ function sanitizeSecrets(type: ProviderType, raw: Record<string, unknown>): Reco
 /** 文件级 sanitize：坏值丢弃回默认；strictActive=true 时 active 必须指向存在且启用的 provider（加载手改文件场景） */
 export function sanitizeApiServices(raw: unknown, opts?: { strictActive?: boolean }): ApiServicesConfig {
   const out = structuredClone(DEFAULT_API_SERVICES)
-  const root = raw as { services?: { translate?: unknown } } | null
+  const root = raw as { services?: { translate?: unknown; ai?: unknown } } | null
   const t = typeof root === 'object' && root !== null ? root.services?.translate : null
-  if (typeof t !== 'object' || t === null) return out
-  const src = t as { activeProviderId?: unknown; providers?: unknown }
+  if (t !== null && typeof t === 'object') {
+    const src = t as { activeProviderId?: unknown; providers?: unknown }
 
-  if (Array.isArray(src.providers)) {
-    const seen = new Set<string>()
-    for (const item of src.providers) {
-      if (typeof item !== 'object' || item === null) continue
-      const p = item as Record<string, unknown>
-      const type = PROVIDER_TYPES.includes(p.type as ProviderType) ? (p.type as ProviderType) : null
-      const id = typeof p.id === 'string' && p.id !== '' ? p.id : ''
-      const name = typeof p.name === 'string' && p.name.trim() !== '' ? p.name : ''
-      if (!type || id === '' || name === '' || seen.has(id)) continue
-      seen.add(id)
-      // preset 类型无模板字段：强制清空防手改文件残留
-      const isTemplate = type === 'http-template'
-      const provider: ApiProviderConfig = {
-        id,
-        type,
-        name,
-        enabled: p.enabled === undefined ? true : p.enabled === true,
-        endpoint: isTemplate ? str(p.endpoint) : '',
-        method: isTemplate && p.method === 'POST' ? 'POST' : 'GET',
-        bodyTemplate: isTemplate ? str(p.bodyTemplate) : '',
-        resultPath: isTemplate ? str(p.resultPath) : ''
+    if (Array.isArray(src.providers)) {
+      const seen = new Set<string>()
+      for (const item of src.providers) {
+        if (typeof item !== 'object' || item === null) continue
+        const p = item as Record<string, unknown>
+        const type = PROVIDER_TYPES.includes(p.type as ProviderType) ? (p.type as ProviderType) : null
+        const id = typeof p.id === 'string' && p.id !== '' ? p.id : ''
+        const name = typeof p.name === 'string' && p.name.trim() !== '' ? p.name : ''
+        if (!type || id === '' || name === '' || seen.has(id)) continue
+        seen.add(id)
+        // preset 类型无模板字段：强制清空防手改文件残留；ai-chat 只进 ai 段不进 translate
+        if (type === 'ai-chat') continue
+        const isTemplate = type === 'http-template'
+        const provider: ApiProviderConfig = {
+          id,
+          type,
+          name,
+          enabled: p.enabled === undefined ? true : p.enabled === true,
+          endpoint: isTemplate ? str(p.endpoint) : '',
+          method: isTemplate && p.method === 'POST' ? 'POST' : 'GET',
+          bodyTemplate: isTemplate ? str(p.bodyTemplate) : '',
+          resultPath: isTemplate ? str(p.resultPath) : ''
+        }
+        const secrets = sanitizeSecrets(type, p)
+        if (secrets !== undefined) provider.secrets = secrets
+        out.services.translate.providers.push(provider)
       }
-      const secrets = sanitizeSecrets(type, p)
-      if (secrets !== undefined) provider.secrets = secrets
-      out.services.translate.providers.push(provider)
     }
+
+    const activeId = typeof src.activeProviderId === 'string' ? src.activeProviderId : ''
+    const active = out.services.translate.providers.find((p) => p.id === activeId)
+    out.services.translate.activeProviderId =
+      active && (active.enabled || opts?.strictActive !== true) ? activeId : ''
   }
 
-  const activeId = typeof src.activeProviderId === 'string' ? src.activeProviderId : ''
-  const active = out.services.translate.providers.find((p) => p.id === activeId)
-  out.services.translate.activeProviderId =
-    active && (active.enabled || opts?.strictActive !== true) ? activeId : ''
+  // ai 段：只收 ai-chat 类型，baseUrl/model 字符串校验
+  const a = typeof root === 'object' && root !== null ? root.services?.ai : null
+  if (typeof a === 'object' && a !== null) {
+    const srcA = a as { activeProviderId?: unknown; providers?: unknown }
+    if (Array.isArray(srcA.providers)) {
+      const seen = new Set<string>()
+      for (const item of srcA.providers) {
+        if (typeof item !== 'object' || item === null) continue
+        const p = item as Record<string, unknown>
+        const id = typeof p.id === 'string' && p.id !== '' ? p.id : ''
+        const name = typeof p.name === 'string' && p.name.trim() !== '' ? p.name : ''
+        const baseUrl = typeof p.baseUrl === 'string' ? p.baseUrl : ''
+        const model = typeof p.model === 'string' ? p.model : ''
+        if (p.type !== 'ai-chat' || id === '' || name === '' || seen.has(id)) continue
+        if (!/^https?:\/\//.test(baseUrl) || model.trim() === '') continue
+        seen.add(id)
+        const provider: ApiProviderConfig = { id, type: 'ai-chat', name, enabled: p.enabled === undefined ? true : p.enabled === true, baseUrl, model }
+        const secrets = sanitizeSecrets('ai-chat', p)
+        if (secrets !== undefined) provider.secrets = secrets
+        out.services.ai.providers.push(provider)
+      }
+    }
+    const activeIdA = typeof srcA.activeProviderId === 'string' ? srcA.activeProviderId : ''
+    const activeA = out.services.ai.providers.find((p) => p.id === activeIdA)
+    out.services.ai.activeProviderId = activeA && (activeA.enabled || opts?.strictActive !== true) ? activeIdA : ''
+  }
   return out
 }

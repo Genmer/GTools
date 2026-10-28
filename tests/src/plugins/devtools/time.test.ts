@@ -3,8 +3,23 @@ import { dateToTs, formatDate, tsToDate } from '../../../../src/plugins/devtools
 
 describe('devtools 时间戳互转', () => {
   it('tsToDate：s 乘 1000，ms 原样', () => {
-    expect(tsToDate(1700000000, 's').getTime()).toBe(1700000000000)
-    expect(tsToDate(1700000000123, 'ms').getTime()).toBe(1700000000123)
+    expect(tsToDate(1700000000, 's')?.getTime()).toBe(1700000000000)
+    expect(tsToDate(1700000000123, 'ms')?.getTime()).toBe(1700000000123)
+  })
+
+  it('tsToDate：超大/非法值返回 null，不再产出 NaN-NaN-NaN 串', () => {
+    expect(tsToDate(1e30, 's')).toBeNull()
+    expect(tsToDate(1e21, 'ms')).toBeNull()
+    expect(tsToDate(-1e30, 's')).toBeNull()
+    expect(tsToDate(Number.NaN, 's')).toBeNull()
+    expect(tsToDate(Number.POSITIVE_INFINITY, 'ms')).toBeNull()
+  })
+
+  it('tsToDate：±8.64e15 ms 为 Date 极限边界，边界内可用、越界为 null', () => {
+    expect(tsToDate(8.64e15, 'ms')?.getTime()).toBe(8.64e15)
+    expect(tsToDate(-8.64e15, 'ms')?.getTime()).toBe(-8.64e15)
+    expect(tsToDate(8.64e15 + 1, 'ms')).toBeNull()
+    expect(formatDate(tsToDate(8.64e15, 'ms')!)).not.toContain('NaN')
   })
 
   it('dateToTs：s 为 ms 整除向下取整', () => {
@@ -20,6 +35,6 @@ describe('devtools 时间戳互转', () => {
 
   it('往返一致', () => {
     const d = new Date(2026, 8, 24, 18, 30, 15)
-    expect(tsToDate(dateToTs(d).ms, 'ms').getTime()).toBe(d.getTime())
+    expect(tsToDate(dateToTs(d).ms, 'ms')?.getTime()).toBe(d.getTime())
   })
 })

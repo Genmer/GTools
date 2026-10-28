@@ -54,7 +54,7 @@ describe('legacyTranslateToProvider（旧插件 storage `settings` 键 → provi
   })
 })
 
-const noopFs = { readFile: async () => { throw new Error('ENOENT') }, writeFile: async () => {}, rename: async () => {}, mkdir: async () => {} } as FsLike
+const noopFs = { readFile: async () => { throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }) }, writeFile: async () => {}, rename: async () => {}, mkdir: async () => {} } as FsLike
 
 describe('adoptMigratedProvider（启动接线行为）', () => {
   it('空配置时采纳：追加 provider 并设为 active（是否执行由 migrateLegacyTranslate 的一次性标记保证）', async () => {

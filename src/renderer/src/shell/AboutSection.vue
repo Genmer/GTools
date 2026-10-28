@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { appInfo } from '../core/app-info'
+import { host } from '../core/host-bridge'
 import type { UpdateDownloadSnapshot } from '../env'
 
 const props = defineProps<{ appVersion: string }>()
 
-const platform = computed(() => (navigator.userAgent.includes('Mac') ? 'darwin' : 'win32'))
+const platform = computed(() => appInfo.platform)
 
 // 更新状态机：不自动检测（进分区不发网络请求，无静默外联）；切分区由 KeepAlive 保住已检测态
 type UpdateState = 'idle' | 'checking' | 'latest' | 'available' | 'downloading' | 'downloaded' | 'download-failed' | 'failed'
@@ -27,7 +29,7 @@ function applySnapshot(snap: UpdateDownloadSnapshot): void {
 
 async function checkUpdate(): Promise<void> {
   state.value = 'checking'
-  const r = await window.gtools.host('update:check')
+  const r = await host('update:check')
   if (!r.ok) {
     updateError.value = r.error ?? '检查更新失败'
     state.value = 'failed'
@@ -40,7 +42,7 @@ async function checkUpdate(): Promise<void> {
 }
 
 async function startDownload(): Promise<void> {
-  const r = await window.gtools.host('update:download')
+  const r = await host('update:download')
   if (r.ok) {
     applySnapshot(r.data as UpdateDownloadSnapshot)
     return
@@ -50,7 +52,7 @@ async function startDownload(): Promise<void> {
 }
 
 async function cancelDownload(): Promise<void> {
-  const r = await window.gtools.host('update:cancel')
+  const r = await host('update:cancel')
   if (r.ok) applySnapshot(r.data as UpdateDownloadSnapshot)
 }
 
@@ -61,7 +63,7 @@ async function installUpdate(): Promise<void> {
   if (installPending.value) return
   installPending.value = true
   try {
-    const r = await window.gtools.host('update:install')
+    const r = await host('update:install')
     if (!r.ok) updateError.value = r.error ?? '安装失败'
   } finally {
     installPending.value = false
@@ -70,11 +72,11 @@ async function installUpdate(): Promise<void> {
 
 // 只传意图不传 URL，目标地址由主进程闭包缓存 + 白名单后交 openExternal
 function openUpdate(target: 'repo' | 'release' | 'download'): void {
-  void window.gtools.host('update:open', { target })
+  void host('update:open', { target })
 }
 
 function relaunchApp(): void {
-  void window.gtools.host('app:relaunch')
+  void host('app:relaunch')
 }
 
 let offProgress: (() => void) | null = null
@@ -85,7 +87,7 @@ onMounted(async () => {
     window.gtools.on('update-download-progress', (payload) => {
       applySnapshot(payload as UpdateDownloadSnapshot)
     }) ?? null
-  const r = await window.gtools.host('update:download-status')
+  const r = await host('update:download-status')
   if (r.ok) {
     const snap = r.data as UpdateDownloadSnapshot
     downloadSnap.value = snap

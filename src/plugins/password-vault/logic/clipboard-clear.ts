@@ -58,3 +58,10 @@ export function scheduleClipboardClear(
   }, delayMs)
   pending.push(p)
 }
+
+/** 两个复制入口（库内密码/生成器密码）共用：写入成功才调度延时清空；写入失败向上抛，由入口提示且不调度 */
+export async function copyWithAutoClear(host: HostApi, text: string): Promise<void> {
+  // writeTextEphemeral：写入同时登记敏感指纹豁免，TTL 内不被剪贴板历史采集
+  await host.clipboard.writeTextEphemeral(text)
+  scheduleClipboardClear(host, text)
+}

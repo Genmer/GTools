@@ -11,6 +11,8 @@ export interface FetchCheckedOpts {
   statusKinds?: Record<number, ApiErrorKind>
   /** true 时非 2xx 不抛，返回响应由调用方读 body 错误文案后自行分类（DeepL/混元等需要 body message 的引擎用） */
   passHttpError?: boolean
+  /** 错误文案品类前缀（如「AI 服务」），缺省用默认文案 */
+  label?: string
 }
 
 /** 所有 executor 共用的请求出口：异常按超时/断网分类，HTTP 非 2xx 按 httpStatusToKind 归类 */
@@ -32,7 +34,10 @@ export async function fetchChecked(
   }
   if (!res.ok && !opts?.passHttpError) {
     const kind = httpStatusToKind(res.status, opts?.statusKinds)
-    throw new TranslateExecutorError(kind, httpStatusMessage(res.status, kind))
+    throw new TranslateExecutorError(
+      kind,
+      opts?.label !== undefined && opts.label !== '' ? `${opts.label}返回 HTTP ${res.status}` : httpStatusMessage(res.status, kind)
+    )
   }
   return res
 }

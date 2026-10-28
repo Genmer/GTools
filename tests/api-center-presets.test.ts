@@ -5,13 +5,14 @@ import { PROVIDER_PRESETS, getPreset } from '../src/main/services/api-center/pre
 import { sanitizeApiServices } from '../src/main/services/api-center/types'
 
 describe('PROVIDER_PRESETS 表驱动数据源', () => {
-  it('八条与八值 type 一一对应；mymemory/http-template 无控制台链接', () => {
-    expect(PROVIDER_PRESETS).toHaveLength(8)
+  it('九条与九值 type 一一对应；mymemory/http-template/ai-chat 无控制台链接', () => {
+    expect(PROVIDER_PRESETS).toHaveLength(9)
     const types = PROVIDER_PRESETS.map((p) => p.type)
-    expect(new Set(types).size).toBe(8)
-    expect(types).toEqual(['mymemory', 'http-template', 'deepl', 'baidu', 'youdao', 'iflytek', 'hunyuan', 'volcano'])
+    expect(new Set(types).size).toBe(9)
+    expect(types).toEqual(['mymemory', 'http-template', 'deepl', 'baidu', 'youdao', 'iflytek', 'hunyuan', 'volcano', 'ai-chat'])
     expect(getPreset('mymemory')?.consoleUrl).toBeNull()
     expect(getPreset('http-template')?.consoleUrl).toBeNull()
+    expect(getPreset('ai-chat')?.consoleUrl).toBeNull()
   })
 
   it('六家厂商：凭证键集合与 consoleUrl 符合定案', () => {

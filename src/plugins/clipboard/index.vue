@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { PluginContext } from '@sdk/api'
 import {
   CLEAR_MARKER_KEY,
@@ -46,6 +46,9 @@ const maxDraft = ref(String(DEFAULT_SETTINGS.maxRecords))
 const exitClearDraft = ref(DEFAULT_SETTINGS.clearOnExit)
 const skipSensitiveDraft = ref(DEFAULT_SETTINGS.skipSensitive)
 const loading = ref(true)
+// 键盘导航高亮（初始首条）：Enter 复制高亮卡，↑↓ 移动（同 file-search 范式）
+const selected = ref(0)
+const cardsEl = ref<HTMLUListElement | null>(null)
 
 // 来源应用只有 demo 才有值（Electron 剪贴板不暴露来源应用，真实条目该槽位显示类型标签）
 let demoApps = new Map<string, string>()
@@ -114,6 +117,43 @@ const counts = computed<Record<EntryTab, number>>(() => {
 const visible = computed(() =>
   orderRecords(filterByTab(filterRecords(baseRecords.value, keyword.value), tab.value), pinnedSet.value)
 )
+
+// 过滤条件变化高亮回首条；列表缩短夹回防越界；高亮移动滚动跟随（file-search 同款）
+watch([keyword, tab], () => {
+  selected.value = 0
+})
+watch(visible, (list) => {
+  if (selected.value >= list.length) selected.value = list.length > 0 ? list.length - 1 : 0
+})
+watch(selected, async () => {
+  await nextTick()
+  cardsEl.value?.querySelector(`[data-i="${selected.value}"]`)?.scrollIntoView({ block: 'nearest' })
+})
+
+function moveSelection(dir: 1 | -1): void {
+  const n = visible.value.length
+  if (n === 0) return
+  selected.value = (selected.value + dir + n) % n
+}
+
+// 插件模式下外壳 SearchBox 不转发方向键/Enter，卡片列表由插件自治监听（同 file-search 范式）；
+// 设置抽屉内控件不劫持（容量 number 框保原生 ↑↓ 步进、Enter 不误复制），其余键一律放行
+function onDocKeydown(e: KeyboardEvent): void {
+  if (e.isComposing) return // 输入法组合态的 Enter/方向键用于选词
+  if (e.target instanceof Element && e.target.closest('.settings') !== null) return
+  if ((e.target as HTMLElement).tagName === 'BUTTON') return // 焦点在按钮上时 Enter 归按钮，防双动作
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    const rec = visible.value[selected.value]
+    if (rec) void onCopy(rec)
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    moveSelection(1)
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    moveSelection(-1)
+  }
+}
 
 function flash(text: string): void {
   statusText.value = text
@@ -270,6 +310,7 @@ if (props.initialCommand === 'demo') {
 }
 
 onMounted(() => {
+  document.addEventListener('keydown', onDocKeydown)
   if (isDemo.value) return
   void load()
   offEvents = props.ctx.host.events.on('history-changed', () => {
@@ -278,6 +319,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  document.removeEventListener('keydown', onDocKeydown)
   offEvents?.()
   if (flashTimer !== null) clearTimeout(flashTimer)
   if (armTimer !== null) clearTimeout(armTimer)
@@ -328,14 +370,16 @@ onUnmounted(() => {
 
     <p v-if="isDemo" class="demo-banner">示例模式：以下为演示数据（2 文本 / 1 链接 / 1 图片 / 1 文件 / 1 置顶）</p>
 
-    <ul v-if="visible.length > 0" class="cards">
+    <ul v-if="visible.length > 0" ref="cardsEl" class="cards">
       <li
-        v-for="rec in visible"
+        v-for="(rec, i) in visible"
         :key="rec.id"
         class="card"
-        :class="{ pinned: pinnedSet.has(rec.id), pasted: pastedId === rec.id }"
+        :class="{ pinned: pinnedSet.has(rec.id), pasted: pastedId === rec.id, active: i === selected }"
+        :data-i="i"
         :title="rec.kind === 'text' ? rec.text : `图片 ${rec.width}×${rec.height}`"
         @click="onCopy(rec)"
+        @mouseenter="selected = i"
       >
         <img v-if="rec.kind === 'image' && rec.dataUrl !== null" class="thumb" :src="rec.dataUrl" alt="" />
         <div v-else-if="rec.kind === 'image'" class="thumb-ph" :class="{ lost: !isDemo }">🖼️</div>
@@ -592,6 +636,10 @@ onUnmounted(() => {
 }
 .card:hover {
   box-shadow: var(--shadow-pop);
+}
+/* 键盘高亮与 hover 并存：底色用主题 active-row，pinned 左accent条不受影响 */
+.card.active {
+  background: var(--active-row);
 }
 .card.pinned {
   box-shadow: inset 3px 0 0 var(--accent);

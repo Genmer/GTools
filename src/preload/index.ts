@@ -9,6 +9,8 @@ const allowedEventChannels = (channel: string): boolean =>
   channel === 'host:open-plugin' ||
   channel === 'command-hotkey' ||
   channel === 'hotkey-captured' ||
+  // 剪贴板历史变更广播（宿主通道专属，不进 sdk HOST_BROADCAST_EVENTS——插件不得订阅）
+  channel === 'clipboard-history-changed' ||
   channel === 'update-download-progress' ||
   channel.startsWith('plugin-event:') ||
   channel.startsWith('detached:')

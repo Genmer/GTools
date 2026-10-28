@@ -8,7 +8,7 @@ import type { FsLike } from '../src/main/settings-store'
 const okBody = (body: string): HostFetchResult => ({ ok: true, status: 200, body })
 const MYMEMORY_OK = okBody('{"responseData":{"translatedText":"内置译文"},"responseStatus":200}')
 
-const noopFs = { readFile: async () => { throw new Error('ENOENT') }, writeFile: async () => {}, rename: async () => {}, mkdir: async () => {} } as FsLike
+const noopFs = { readFile: async () => { throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }) }, writeFile: async () => {}, rename: async () => {}, mkdir: async () => {} } as FsLike
 
 interface Harness {
   svc: ApiCenterService
@@ -172,14 +172,8 @@ describe('熔断器与候选过滤', () => {
     expect(err.kind).toBe('quota')
     expect(h.calls.filter((c) => c.url.includes('baidu'))).toHaveLength(1)
 
-    // 再挂一家可用引擎进候选
-    await h.svc.replaceAll(config('baidu1', {
-      id: 'baidu1',
-      type: 'baidu',
-      name: '百度',
-      enabled: true,
-      secrets: { appId: 'app', secretKey: 'sk' }
-    }, httpProvider('backup')))
+    // 再挂一家可用引擎进候选（upsertProvider 是配置编辑通道，不动熔断；replaceAll 属备份导入语义会复位熔断）
+    await h.svc.upsertProvider({ id: 'backup', type: 'http-template', name: 'backup', endpoint: 'https://backup.example.com/?q={text}' })
     const out = await h.svc.translate({ text: 'hi', from: 'en', to: 'zh-CN' })
     // 熔断生效：百度零额外请求，直接命中 backup；首选百度被跳过仍如实附 fallback（reason 取熔断记录）
     expect(h.calls.filter((c) => c.url.includes('baidu'))).toHaveLength(1)

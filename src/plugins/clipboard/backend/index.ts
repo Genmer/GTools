@@ -24,40 +24,6 @@ export const POLL_INTERVAL_MS = 1000
 export const SYNC_INTERVAL_MS = 5000
 const STATE_KEY = 'state'
 
-/** 主框直推行数上限：最近 ≤3 条文本 */
-export const MAIN_PUSH_MAX_ITEMS = 3
-/** payloadText 必须在 emit 侧截断：单条记录本体上限 200_000，不截会塞爆主输入框（2000 对齐渲染层注入通路） */
-export const MAIN_PUSH_PAYLOAD_CHARS = 2000
-const MAIN_PUSH_TITLE_CHARS = 40
-
-/** 渲染层主框直推行（main-push 事件负载）：走既有 plugin-event 通道，不经 dispatchApi，无 dispatch 校验面 */
-export interface MainPushItem {
-  pluginId: string
-  /** 记录 id：渲染层按此去重多行推送，无它 3 行会被同键去重塌成 1 行 */
-  pushId: string
-  title: string
-  subtitle: string
-  payloadText: string
-}
-
-/** 最近 ≤3 条非敏感文本记录映射为推送行；敏感过滤独立于入库 skipSensitive（推送面更暴露，宁缺勿推） */
-export function mainPushItems(records: readonly ClipboardRecord[]): MainPushItem[] {
-  const items: MainPushItem[] = []
-  for (const r of records) {
-    if (items.length >= MAIN_PUSH_MAX_ITEMS) break
-    if (r.kind !== 'text' || isSensitiveText(r.text)) continue
-    const head = r.text.split('\n', 1)[0] ?? ''
-    items.push({
-      pluginId: 'clipboard',
-      pushId: r.id,
-      title: head.length > MAIN_PUSH_TITLE_CHARS ? head.slice(0, MAIN_PUSH_TITLE_CHARS) : head,
-      subtitle: '剪贴板',
-      payloadText: r.text.length > MAIN_PUSH_PAYLOAD_CHARS ? r.text.slice(0, MAIN_PUSH_PAYLOAD_CHARS) : r.text
-    })
-  }
-  return items
-}
-
 type ContentSig = { kind: 'text'; text: string } | { kind: 'image'; hash: string }
 
 export interface BackendScheduler {
@@ -129,11 +95,6 @@ export class ClipboardHistoryBackend implements PluginBackend {
     return this.records
   }
 
-  /** 历史每次变化随 history-changed 同步重推全量推送行（渲染层按最新一组整组替换，空组即清除） */
-  private emitMainPush(): void {
-    this.ctx?.emit('main-push', mainPushItems(this.records))
-  }
-
   /** 单轮轮询：文本优先，仅文本为空才读图（省解码）；内容指纹未变则跳过 */
   async pollOnce(): Promise<void> {
     const ctx = this.ctx
@@ -148,6 +109,10 @@ export class ClipboardHistoryBackend implements PluginBackend {
         }
         if (this.settings.skipSensitive && isSensitiveText(text)) {
           this.lastSig = { kind: 'text', text } // 记指纹防同内容每秒反复过正则
+          return
+        }
+        if (await ctx.clipboard.isTextExempted(text)) {
+          this.lastSig = { kind: 'text', text } // 宿主自己写入的敏感内容（vault 指纹豁免）：记指纹防每秒反复查询
           return
         }
         await this.syncExternal()
@@ -221,7 +186,6 @@ export class ClipboardHistoryBackend implements PluginBackend {
         this.dirty = true
         void this.flush()
         this.ctx.emit('history-changed', { count: this.records.length })
-        this.emitMainPush()
       }
       // 已采纳的 id 清空：同 ts 不重复采纳 = 幂等，标记自身不随删除次数膨胀
       await this.rewriteRemoveMarker(remove)
@@ -238,15 +202,20 @@ export class ClipboardHistoryBackend implements PluginBackend {
     }
   }
 
-  /** 采纳清空：清内存指纹并落盘空状态（杀掉可能被在途写入复活的历史），再通知渲染层 */
+  /** 采纳清空：消费标记、清内存指纹并落盘空状态（杀掉可能被在途写入复活的历史），再通知渲染层 */
   private async adoptClear(marker: number): Promise<void> {
     this.clearMarker = marker
     this.records = []
     this.lastSig = null
     this.lastImageDataUrl = ''
+    // 采纳即消费标记（重写为 0，键形状是数值；与 remove 标记采纳后重写同款）：不消费则重启后内存 clearMarker 归零，同一标记再次被采纳，清掉重启前新采集的历史
+    try {
+      await this.ctx!.storage.set(CLEAR_MARKER_KEY, 0)
+    } catch {
+      // 消费失败无补救：本会话不会重采，重启后该标记会被再采纳一次
+    }
     await this.ctx!.storage.set(STATE_KEY, toPersisted(this.settings, []))
     this.ctx?.emit('history-changed', { count: 0 })
-    this.emitMainPush()
   }
 
   private applySettings(next: ClipboardSettings): void {
@@ -268,7 +237,6 @@ export class ClipboardHistoryBackend implements PluginBackend {
       this.dirty = true
       void this.flush()
       this.ctx?.emit('history-changed', { count: this.records.length })
-      this.emitMainPush()
     }
   }
 
@@ -278,7 +246,6 @@ export class ClipboardHistoryBackend implements PluginBackend {
     this.dirty = true
     void this.flush()
     this.ctx?.emit('history-changed', { count: this.records.length })
-    this.emitMainPush()
   }
 
   private async reloadFromStorage(): Promise<void> {

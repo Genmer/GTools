@@ -9,8 +9,7 @@ const manifest: PluginManifest = {
   icon: '📋',
   keywords: ['cb', '剪贴板', 'jtb'],
   activation: 'resident',
-  // mainPush：backend 向主框直推最近记录（仅声明面，走既有 plugin-event 通道）
-  permissions: ['clipboard:read', 'clipboard:write', 'storage', 'mainPush'],
+  permissions: ['clipboard:read', 'clipboard:write', 'storage'],
   source: 'builtin',
   entry: './index.vue',
   backend: './backend/index.ts'

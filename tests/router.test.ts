@@ -93,6 +93,7 @@ describe('exitLevel 显式退出（Esc / Tag 胶囊 × / 空参数框 Backspace 
     router.query = '   '
     exitLevel(manifests)
     expect(hostMock).toHaveBeenCalledTimes(1)
-    expect(hostMock).toHaveBeenCalledWith('window:hide')
+    // host-bridge 单点化后无载荷调用固定传 payload: undefined（preload 打包 { api, payload }，IPC 形状不变）
+    expect(hostMock).toHaveBeenCalledWith('window:hide', undefined)
   })
 })

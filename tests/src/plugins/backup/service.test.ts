@@ -7,6 +7,7 @@ import {
   executeImport,
   exportToFile,
   NotDataDirError,
+  SAFETY_KEEP,
   type BackupPort
 } from '../../../../src/plugins/backup/logic/service'
 
@@ -97,7 +98,7 @@ describe('service：collectCurrentState', () => {
   it('api-services.json 存在时读入（原样搬运不解析），坏 JSON 记 warning；导出随备份携带', async () => {
     const port = new MemPort('/')
     await seedMacHome(port)
-    const api = { services: { translate: { activeProviderId: 'u-1', providers: [{ id: 'u-1', apiKey: 'sk' }] } } }
+    const api = { services: { translate: { activeProviderId: 'u-1', providers: [{ id: 'u-1', type: 'deepl', apiKey: 'sk' }] } } }
     await port.write(`${MAC_DIR}/api-services.json`, JSON.stringify(api))
     const state = await collectCurrentState(port, macEnv, MAC_DIR)
     expect(state.apiServices).toEqual(api)
@@ -169,7 +170,7 @@ describe('service：exportToFile', () => {
 describe('service：executeImport（跨 win/mac 迁移）', () => {
   function macBackupContent() {
     return serializeBackup({
-      settings: { ...DEFAULT_SETTINGS, theme: 'dark', transparency: { enabled: true, opacity: 55, blur: false }, hotkey: { darwin: 'Cmd+Shift+P', win32: 'Ctrl+Alt+J' } },
+      settings: { ...DEFAULT_SETTINGS, theme: 'dark', transparency: { enabled: true, opacity: 55, blur: false, glassFrost: 45 }, hotkey: { darwin: 'Cmd+Shift+P', win32: 'Ctrl+Alt+J' } },
       pluginStorage: {
         clipboard: { state: { last: USER_DATA_TOKEN + '/notes/a.md' } },
         translate: { provider: 'new-provider' },
@@ -178,7 +179,7 @@ describe('service：executeImport（跨 win/mac 迁移）', () => {
       platform: 'darwin',
       appVersion: '0.2.0',
       now: new Date('2026-02-03T04:05:06Z'),
-      apiServices: { services: { translate: { activeProviderId: 'u-1', providers: [{ id: 'u-1', apiKey: 'sk' }] } } }
+      apiServices: { services: { translate: { activeProviderId: 'u-1', providers: [{ id: 'u-1', type: 'deepl', apiKey: 'sk' }] } } }
     })
   }
 
@@ -246,5 +247,46 @@ describe('service：executeImport（跨 win/mac 迁移）', () => {
     const result = await executeImport(port, winEnv, WIN_DIR, backup.backup, state)
     expect(result.safetyBackupPath).toBeNull()
     expect(port.files.has(`${WIN_DIR}\\settings.json`)).toBe(true)
+  })
+
+  it('prune：快照超量删旧留新，SAFETY_KEEP≥1 永不删尽', async () => {
+    expect(SAFETY_KEEP).toBeGreaterThanOrEqual(1)
+    // 7 份存量 + 导入新增 1 份 = 8 份 → 只删最旧 3 份，留最新 5 份
+    const port = new MemPort('\\')
+    await port.write(`${WIN_DIR}\\settings.json`, JSON.stringify(DEFAULT_SETTINGS))
+    for (let i = 1; i <= 7; i++) await port.write(`${WIN_DIR}\\backups\\pre-import-2025010${i}-000000.gtools`, '{}')
+    const backup = parseBackup(JSON.stringify(macBackupContent()))
+    if (!backup.ok) throw new Error('测试夹具解析失败')
+    const state = await collectCurrentState(port, winEnv, WIN_DIR)
+    const result = await executeImport(port, winEnv, WIN_DIR, backup.backup, state, { now: new Date(2026, 5, 1, 12, 0, 0) })
+    const kept = [...port.files.keys()].filter((p) => p.includes('pre-import-')).sort()
+    expect(kept).toHaveLength(SAFETY_KEEP)
+    expect(kept[0]).toBe(`${WIN_DIR}\\backups\\pre-import-20250104-000000.gtools`) // 只删最旧的 3 份
+    expect(kept[kept.length - 1]).toBe(result.safetyBackupPath) // 最新（本次导入前快照）永不删
+
+    // 目录里只有 1 份（未达保留上限）：不删任何快照
+    const single = new MemPort('\\')
+    await single.write(`${WIN_DIR}\\settings.json`, JSON.stringify(DEFAULT_SETTINGS))
+    await single.write(`${WIN_DIR}\\backups\\pre-import-20250101-000000.gtools`, '{}')
+    const state2 = await collectCurrentState(single, winEnv, WIN_DIR)
+    await executeImport(single, winEnv, WIN_DIR, backup.backup, state2, { now: new Date(2026, 5, 1, 12, 0, 0) })
+    expect([...single.files.keys()].filter((p) => p.includes('pre-import-'))).toHaveLength(2)
+  })
+
+  it('prune 单份删除失败不阻塞导入链（多留一份无害）', async () => {
+    const port = new MemPort('\\')
+    await port.write(`${WIN_DIR}\\settings.json`, JSON.stringify(DEFAULT_SETTINGS))
+    for (let i = 1; i <= 7; i++) await port.write(`${WIN_DIR}\\backups\\pre-import-2025010${i}-000000.gtools`, '{}')
+    const originalRemove = port.remove.bind(port)
+    port.remove = async (path: string) => {
+      if (path.includes('pre-import-20250101')) throw new Error('EBUSY: locked')
+      await originalRemove(path)
+    }
+    const backup = parseBackup(JSON.stringify(macBackupContent()))
+    if (!backup.ok) throw new Error('测试夹具解析失败')
+    const state = await collectCurrentState(port, winEnv, WIN_DIR)
+    await expect(executeImport(port, winEnv, WIN_DIR, backup.backup, state, { now: new Date(2026, 5, 1, 12, 0, 0) })).resolves.toBeTruthy()
+    // 删失败的最旧份仍在，导入照常完成
+    expect(port.files.has(`${WIN_DIR}\\backups\\pre-import-20250101-000000.gtools`)).toBe(true)
   })
 })

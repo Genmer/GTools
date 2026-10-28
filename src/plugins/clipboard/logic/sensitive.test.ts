@@ -56,3 +56,30 @@ describe('isSensitiveText 无害内容不命中', () => {
     expect(isSensitiveText('前缀 eyJhbGciOiJIUzI1NiJ9.eyJhIjoxf0.abc 后缀')).toBe(false)
   })
 })
+
+describe('isSensitiveText 垫片转发 sdk 单源（厂商清单 / Bearer / JSON 复合键同步生效）', () => {
+  it('九厂商裸 token 各 1 正例', () => {
+    expect(isSensitiveText('ghp_' + 'aB1'.repeat(12))).toBe(true)
+    expect(isSensitiveText('github_pat_' + 'a1B_'.repeat(10))).toBe(true)
+    expect(isSensitiveText('xoxb-' + '123456789012' + '-1234567890123-AbCdEfGhIjKlMnOpQrSt')).toBe(true)
+    expect(isSensitiveText('glpat-' + 'a1B_'.repeat(6))).toBe(true)
+    expect(isSensitiveText('sk-proj-' + 'a1B_'.repeat(10))).toBe(true)
+    expect(isSensitiveText('sk-ant-' + 'a1B_'.repeat(10))).toBe(true)
+    expect(isSensitiveText('sk_live_' + 'a1B'.repeat(8))).toBe(true)
+    expect(isSensitiveText('npm_' + 'a1B'.repeat(12))).toBe(true)
+    expect(isSensitiveText('AIza' + 'a1B-'.repeat(12))).toBe(true)
+    expect(isSensitiveText('pypi-' + 'a1B-'.repeat(10))).toBe(true)
+  })
+
+  it('护栏之下 / 短 Bearer / JSON 值无引号不命中', () => {
+    expect(isSensitiveText('ghp_' + 'a'.repeat(29))).toBe(false)
+    expect(isSensitiveText('npm_' + 'a'.repeat(29))).toBe(false)
+    expect(isSensitiveText('Bearer abc')).toBe(false)
+    expect(isSensitiveText('{"access_token": bare}')).toBe(false)
+  })
+
+  it('Bearer 长值与 JSON 复合键命中', () => {
+    expect(isSensitiveText('Bearer ' + 'a'.repeat(20))).toBe(true)
+    expect(isSensitiveText('{"client_secret":"cs_0123456789"}')).toBe(true)
+  })
+})

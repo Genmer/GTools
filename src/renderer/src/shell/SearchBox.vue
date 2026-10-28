@@ -12,6 +12,8 @@ const emit = defineEmits<{
   exit: []
   settings: []
   detach: []
+  imagePaste: [name?: string]
+  filePaste: [paths: string[], names: string[]]
   clearPaste: []
 }>()
 
@@ -86,6 +88,42 @@ watch(
   }
 )
 
+// 粘贴分诊（路径必须在事件同步上下文里取，webUtils 限制）：
+// 真文件（资源管理器 Ctrl+C，可解析路径）→ 拖拽同构管线 + 文件名进输入框；
+// 无路径伪文件（Windows 位图粘贴在 dt.files 里呈现为 image.png）→ 位图语义，伪文件名照样写进
+// 输入框作可见反应，同时刷新「悬浮/保存成文件」推荐；普通文本不拦，默认进 query
+function onPaste(e: ClipboardEvent): void {
+  const dt = e.clipboardData
+  if (!dt) return
+  const entries = Array.from(dt.files ?? []).map((f) => {
+    let path = ''
+    try {
+      path = window.gtools.pathForFile(f)
+    } catch {
+      path = ''
+    }
+    return { path, name: f.name }
+  })
+  const real = entries.filter((x) => x.path !== '')
+  const items = Array.from(dt.items ?? [])
+  const hasText = items.some((it) => it.kind === 'string' && it.type === 'text/plain')
+  if (real.length > 0) {
+    e.preventDefault()
+    emit('filePaste', real.map((x) => x.path), real.map((x) => x.name))
+    if (real.length < entries.length) emit('imagePaste', entries.find((x) => x.path === '')?.name)
+    return
+  }
+  if (entries.length > 0) {
+    if (!hasText) e.preventDefault()
+    emit('imagePaste', entries[0]?.name)
+    return
+  }
+  const hasImage = items.some((it) => it.kind === 'file' && it.type.startsWith('image/'))
+  if (!hasImage) return
+  if (!hasText) e.preventDefault()
+  emit('imagePaste')
+}
+
 function onKeydown(e: KeyboardEvent): void {
   // 输入法组合态的按键用于选词，不参与导航/选中
   if (e.isComposing) return
@@ -124,7 +162,7 @@ function onKeydown(e: KeyboardEvent): void {
 </script>
 
 <template>
-  <div class="searchbox" @mousedown.prevent="inputRef?.focus()">
+  <div class="searchbox" @mousedown.prevent="inputRef?.focus()" @paste="onPaste">
     <template v-if="router.mode === 'plugin' && activeManifest">
       <div class="plugin-tag" :title="activeManifest.name">
         <span class="tag-icon">{{ activeManifest.icon }}</span>

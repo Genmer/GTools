@@ -84,6 +84,8 @@ async function makeHarness(seed?: Record<string, unknown>): Promise<Harness> {
     clipboard: {
       readText: async () => '',
       writeText: async () => {},
+      writeTextEphemeral: async () => {},
+      isTextExempted: async () => false,
       readImage: async () => null,
       writeImage: async () => {}
     },

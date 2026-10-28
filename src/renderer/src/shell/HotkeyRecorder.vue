@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { normalizeAccelerator, validateAccelerator } from '@sdk/shortcut-rules'
+import { codeToAccelKey, normalizeAccelerator, validateAccelerator } from '@sdk/shortcut-rules'
+import { host } from '../core/host-bridge'
 
 const props = defineProps<{
   platform: 'darwin' | 'win32'
@@ -18,7 +19,7 @@ const probeHint = ref<string | null>(null)
 const canSave = computed(() => pendingAccel.value !== null && error.value === null)
 
 function stop(): void {
-  if (recording.value) void window.gtools.host('hotkey:resume')
+  if (recording.value) void host('hotkey:resume')
   recording.value = false
   pendingAccel.value = null
   error.value = null
@@ -31,7 +32,7 @@ async function start(): Promise<void> {
   error.value = null
   probeHint.value = null
   // 全局热键先于窗口 keydown 截走按键（如 Alt+Space），录入期间挂起全部已注册热键
-  const r = await window.gtools.host('hotkey:suspend')
+  const r = await host('hotkey:suspend')
   if (recording.value && r.ok && (r.data as { probe?: unknown } | undefined)?.probe === false) {
     probeHint.value = 'Alt+Space 疑被其他应用占用，录入该组合可能不稳定'
   }
@@ -41,10 +42,18 @@ async function start(): Promise<void> {
 function onVisibility(): void {
   if (document.hidden && recording.value) stop()
 }
-onMounted(() => document.addEventListener('visibilitychange', onVisibility))
+// hideOnBlur 关闭时点窗外窗口不隐藏、visibilitychange 不触发，blur 是该场景唯一的收尾信号
+function onBlur(): void {
+  if (recording.value) stop()
+}
+onMounted(() => {
+  document.addEventListener('visibilitychange', onVisibility)
+  window.addEventListener('blur', onBlur)
+})
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibility)
-  if (recording.value) void window.gtools.host('hotkey:resume')
+  window.removeEventListener('blur', onBlur)
+  if (recording.value) void host('hotkey:resume')
 })
 
 // 结算一条加速键：录入预览 + 校验 + 撞键检查（keydown 与主进程捕获共用）
@@ -59,6 +68,11 @@ function settle(rawKey: string, mods: { meta: boolean; ctrl: boolean; alt: boole
   pendingAccel.value = accel
   const issue = validateAccelerator(accel, props.platform)
   error.value = issue.ok ? (props.conflictCheck?.(accel) ?? null) : (issue.reason ?? null)
+  // darwin 仅 Option（Alt）修饰的录入多为特殊字符组合（¬/∆），非阻塞建议；其余组合清提示（win32 的探针占用提示不动）
+  if (props.platform === 'darwin') {
+    probeHint.value =
+      mods.alt && !mods.meta && !mods.ctrl ? 'macOS 建议 Cmd/Ctrl 组合（Option 常用于特殊字符）' : null
+  }
 }
 
 // 窗口捕获级监听：焦点在任何控件（含搜索框）都录得到，preventDefault+stopPropagation 同时挡住录入期间的其它按键语义
@@ -72,7 +86,10 @@ function onWindowKey(e: KeyboardEvent): void {
     return
   }
   if (['Cmd', 'Ctrl', 'Alt', 'Shift', 'Meta', 'Control', 'Option'].includes(e.key)) return // 修饰键单独按下不结算
-  settle(e.key, { meta: e.metaKey, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey })
+  // 字符 key 在 Option 组合/非拉丁布局下是死值（Alt+¬/西里尔字母），主键只认物理键 code
+  const main = codeToAccelKey(e.code)
+  if (main === null) return // 白名单外物理键不结算
+  settle(main, { meta: e.metaKey, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey })
 }
 
 // 主进程捕获通道：Alt+Space 等 Windows 系统键组合的 keyDown 被系统吞掉，主进程据 keyUp 重建后转发

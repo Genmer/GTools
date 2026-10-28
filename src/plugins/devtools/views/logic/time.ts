@@ -1,5 +1,11 @@
-export function tsToDate(ts: number, unit: 's' | 'ms'): Date {
-  return new Date(unit === 's' ? ts * 1000 : ts)
+// ECMAScript Date 可表示范围为 epoch 起 ±8.64e15 ms，超界 new Date 得 Invalid Date，
+// formatDate 会产出 'NaN-NaN-NaN …' 串，故 tsToDate 超界返回 null 交调用方提示
+const MAX_DATE_MS = 8.64e15
+
+export function tsToDate(ts: number, unit: 's' | 'ms'): Date | null {
+  const ms = unit === 's' ? ts * 1000 : ts
+  if (!Number.isFinite(ms) || Math.abs(ms) > MAX_DATE_MS) return null
+  return new Date(ms)
 }
 
 export function dateToTs(d: Date): { s: number; ms: number } {

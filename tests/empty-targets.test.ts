@@ -16,7 +16,6 @@ const rec = (pluginId: string, source: RecItem['source'], commandId?: string, pa
   payload,
   title: pluginId,
   subtitle: '',
-  label: pluginId,
   icon: 'x',
   source
 })
@@ -27,7 +26,6 @@ const appsModeInput: EmptyTargetsInput = {
   appsMode: true,
   clipRecs: [rec('jsoner', 'json', undefined, '{}, payload 透传'), rec('filer', 'files'), rec('pusher', 'push')],
   dropFiles,
-  history: ['jsq', 'vue'],
   recentTiles: [
     { key: 'a:wx', kind: 'app', title: '微信', appId: 'wx' },
     { key: 'p:cb', kind: 'plugin', title: '剪贴板', pluginId: 'cb', commandId: 'search' }
@@ -40,7 +38,6 @@ const fallbackInput: EmptyTargetsInput = {
   appsMode: false,
   clipRecs: [rec('jsoner', 'json')],
   dropFiles,
-  history: ['jsq'],
   pluginIds: ['cb', 'fy'],
   recentRows: [
     { pluginId: 'cb', commandId: 'cmd-a' },
@@ -48,16 +45,14 @@ const fallbackInput: EmptyTargetsInput = {
   ]
 }
 
-describe('buildEmptyTargets appsMode 段序锁定（推荐→历史→最近 tiles→应用→抽屉开关）', () => {
+describe('buildEmptyTargets appsMode 段序锁定（推荐→最近 tiles→应用→抽屉开关）', () => {
   const targets = buildEmptyTargets(appsModeInput)
 
-  it('五段依序展开，tiles 段 app/plugin 混排按输入序', () => {
+  it('四段依序展开，tiles 段 app/plugin 混排按输入序', () => {
     expect(targets.map((t) => t.kind)).toEqual([
       'plugin',
       'plugin',
       'plugin',
-      'history',
-      'history',
       'app',
       'plugin',
       'app',
@@ -68,85 +63,36 @@ describe('buildEmptyTargets appsMode 段序锁定（推荐→历史→最近 til
   })
 
   it('tiles 段目标携带成对 id/commandId', () => {
-    expect(targets[5]).toEqual({ kind: 'app', appId: 'wx' })
-    expect(targets[6]).toEqual({ kind: 'plugin', pluginId: 'cb', commandId: 'search' })
+    expect(targets[3]).toEqual({ kind: 'app', appId: 'wx' })
+    expect(targets[4]).toEqual({ kind: 'plugin', pluginId: 'cb', commandId: 'search' })
   })
 
-  it('files/img 源推荐行携带拖入集同一引用；json 源全文走 text 字段、payload 置 undefined', () => {
+  it('files/img 源推荐行携带拖入集同一引用，json/push 源不带', () => {
     const pluginTargets = targets.filter((t): t is PluginTarget => t.kind === 'plugin')
-    expect(pluginTargets[0]).toMatchObject({ pluginId: 'jsoner', text: '{}, payload 透传' })
-    expect(pluginTargets[0].payload).toBeUndefined()
+    expect(pluginTargets[0]).toMatchObject({ pluginId: 'jsoner', payload: '{}, payload 透传' })
     expect(pluginTargets[0].files).toBeUndefined()
     expect(pluginTargets[1].files).toBe(dropFiles)
     expect(pluginTargets[2].files).toBeUndefined()
   })
 
-  it('历史段目标逐词对应', () => {
-    expect(targets[3]).toEqual({ kind: 'history', query: 'jsq' })
-    expect(targets[4]).toEqual({ kind: 'history', query: 'vue' })
+  it('任何输入状态不含输入历史目标（功能已整体移除）', () => {
+    for (const input of [appsModeInput, fallbackInput]) {
+      expect(buildEmptyTargets(input).some((t) => (t as { kind?: string }).kind === 'history')).toBe(false)
+    }
   })
 })
 
-describe('buildEmptyTargets 兜底分支段序锁定（推荐→历史→启用插件→最近行）', () => {
+describe('buildEmptyTargets 兜底分支段序锁定（推荐→启用插件→最近行）', () => {
   const targets = buildEmptyTargets(fallbackInput)
 
-  it('四段依序展开', () => {
-    expect(targets.map((t) => t.kind)).toEqual(['plugin', 'history', 'plugin', 'plugin', 'plugin', 'plugin'])
+  it('三段依序展开', () => {
+    expect(targets.map((t) => t.kind)).toEqual(['plugin', 'plugin', 'plugin', 'plugin', 'plugin'])
   })
 
   it('插件格无 commandId，最近行带 commandId', () => {
-    expect(targets[2]).toEqual({ kind: 'plugin', pluginId: 'cb' })
-    expect(targets[4]).toEqual({ kind: 'plugin', pluginId: 'cb', commandId: 'cmd-a' })
-    expect(targets[5]).toEqual({ kind: 'plugin', pluginId: 'fy', commandId: undefined })
-  })
-})
-
-describe('clipTargets 按源分流 payload/text', () => {
-  it('json 源 text 携带命中文本且 payload 为 undefined；其余源维持 payload 通路、text 不带', () => {
-    const targets = buildEmptyTargets({
-      appsMode: false,
-      clipRecs: [
-        rec('jsoner', 'json', undefined, '{"a":1}'),
-        rec('texter', 'text', undefined, 'hello'),
-        rec('pusher', 'push', 'cmd', '推送文本')
-      ],
-      dropFiles: [],
-      history: [],
-      pluginIds: [],
-      recentRows: []
-    })
-    const [jsonT, textT, pushT] = targets as PluginTarget[]
-    expect(jsonT.text).toBe('{"a":1}')
-    expect(jsonT.payload).toBeUndefined()
-    expect(textT.payload).toBe('hello')
-    expect(textT.text).toBeUndefined()
-    expect(pushT.payload).toBe('推送文本')
-    expect(pushT.text).toBeUndefined()
-  })
-
-  it('img 源携带拖入集同一引用；json 源 payload 已被剥离（敏感 query）时 text 也为 undefined，多源混合保序', () => {
-    const targets = buildEmptyTargets({
-      appsMode: false,
-      clipRecs: [
-        rec('jsoner', 'json', undefined, '{"a":1}'),
-        rec('imger', 'img'),
-        rec('stripped', 'json', undefined, undefined),
-        rec('texter', 'text', undefined, 'hi')
-      ],
-      dropFiles,
-      history: [],
-      pluginIds: [],
-      recentRows: []
-    })
-    const [j1, imgT, strippedT, textT] = targets as PluginTarget[]
-    expect(j1.text).toBe('{"a":1}')
-    expect(imgT.files).toBe(dropFiles)
-    expect(imgT.text).toBeUndefined()
-    // 敏感剥离只进入不注入：text 不复活被 recommend 层剥掉的 payload
-    expect(strippedT.text).toBeUndefined()
-    expect(strippedT.payload).toBeUndefined()
-    expect(textT.payload).toBe('hi')
-    expect(targets.map((t) => (t as PluginTarget).pluginId)).toEqual(['jsoner', 'imger', 'stripped', 'texter'])
+    expect(targets[1]).toEqual({ kind: 'plugin', pluginId: 'cb' })
+    expect(targets[3]).toEqual({ kind: 'plugin', pluginId: 'cb', commandId: 'cmd-a' })
+    expect(targets[4]).toEqual({ kind: 'plugin', pluginId: 'fy', commandId: undefined })
   })
 })
 
@@ -154,23 +100,23 @@ describe('emptySegmentOffsets 与 buildEmptyTargets 同输入同段长', () => {
   it('appsMode 段界与目标序列逐段对齐', () => {
     const targets = buildEmptyTargets(appsModeInput)
     const off = emptySegmentOffsets(appsModeInput)
-    expect(off).toEqual({ clipEnd: 3, histEnd: 5, middleEnd: 7, appsEnd: 10, total: 11 })
+    expect(off).toEqual({ clipEnd: 3, middleEnd: 5, appsEnd: 8, total: 9 })
     expect(targets.length).toBe(off.total)
-    // 中段起点=最近 tiles 首、段4起点=应用网格首、appsEnd=开关格
-    expect(targets[off.histEnd]).toEqual({ kind: 'app', appId: 'wx' })
+    // 中段起点=最近 tiles 首、段3起点=应用网格首、appsEnd=开关格
+    expect(targets[off.clipEnd]).toEqual({ kind: 'app', appId: 'wx' })
     expect(targets[off.middleEnd]).toEqual({ kind: 'app', appId: 'app1' })
     expect(targets[off.appsEnd]).toEqual({ kind: 'apps-toggle' })
   })
 
   it('无抽屉开关时 total 即 appsEnd', () => {
     const off = emptySegmentOffsets({ ...appsModeInput, hasAppsToggle: false })
-    expect(off.appsEnd).toBe(10)
-    expect(off.total).toBe(10)
+    expect(off.appsEnd).toBe(8)
+    expect(off.total).toBe(8)
   })
 
   it('兜底分支无应用段，appsEnd 收敛到 middleEnd', () => {
     const off = emptySegmentOffsets(fallbackInput)
-    expect(off).toEqual({ clipEnd: 1, histEnd: 2, middleEnd: 4, appsEnd: 4, total: 6 })
+    expect(off).toEqual({ clipEnd: 1, middleEnd: 3, appsEnd: 3, total: 5 })
     expect(buildEmptyTargets(fallbackInput).length).toBe(off.total)
   })
 
@@ -179,15 +125,13 @@ describe('emptySegmentOffsets 与 buildEmptyTargets 同输入同段长', () => {
       appsMode: true,
       clipRecs: [],
       dropFiles: [],
-      history: [],
       recentTiles: [],
       appIds: [],
       hasAppsToggle: false
     }
-    expect(emptySegmentOffsets(emptyApps)).toEqual({ clipEnd: 0, histEnd: 0, middleEnd: 0, appsEnd: 0, total: 0 })
-    expect(emptySegmentOffsets({ ...fallbackInput, clipRecs: [], history: [], pluginIds: [], recentRows: [] })).toEqual({
+    expect(emptySegmentOffsets(emptyApps)).toEqual({ clipEnd: 0, middleEnd: 0, appsEnd: 0, total: 0 })
+    expect(emptySegmentOffsets({ ...fallbackInput, clipRecs: [], pluginIds: [], recentRows: [] })).toEqual({
       clipEnd: 0,
-      histEnd: 0,
       middleEnd: 0,
       appsEnd: 0,
       total: 0

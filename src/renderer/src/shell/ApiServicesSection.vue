@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { host } from '../core/host-bridge'
 
 // 与主进程 api-center 脱敏视图/preset 元数据同构的类型（HostInitResult 同款本地镜像模式）
 type ProviderType = 'mymemory' | 'http-template' | 'deepl' | 'baidu' | 'youdao' | 'iflytek' | 'hunyuan' | 'volcano'
@@ -103,10 +104,6 @@ const KIND_LABELS: Record<string, string> = {
 function friendlyError(msg: string): string {
   const m = /^([a-z]+): (.+)$/s.exec(msg)
   return m && KIND_LABELS[m[1]] !== undefined ? `${KIND_LABELS[m[1]]}——${m[2]}` : msg
-}
-
-async function host(api: string, payload?: unknown): Promise<{ ok: boolean; data?: unknown; error?: string }> {
-  return window.gtools.host(api, payload)
 }
 
 function applyView(data: unknown): void {

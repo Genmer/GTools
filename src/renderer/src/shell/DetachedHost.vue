@@ -2,25 +2,34 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { PluginManifest } from '@sdk/manifest'
 import { rimFlowPeriodSeconds, sanitizeOutlineCustomColor } from '@sdk/settings'
+import { appInfo } from '../core/app-info'
+import { host } from '../core/host-bridge'
 import { router } from './router'
 import { RIM_SEGMENTS_GRADIENT, RIM_SEGMENTS_RAINBOW } from './rim-ring-segments'
 import PluginViewHost from './PluginViewHost.vue'
 
 const props = defineProps<{ manifests: PluginManifest[] }>()
 
-// sandbox 渲染层无 process.platform，用 UA 粗判（仅用于交通灯避让的像素级样式）
-const isMac = navigator.userAgent.includes('Mac')
+// 冲刷 ACK 等待上限：等草稿落盘真完成（大草稿压缩耗时远超一拍），到点放行；主进程侧另有 600ms 超时兜底
+const FLUSH_ACK_DELAY_MS = 500
+
+// 交通灯避让样式读 app-info 单例（app:init 真值到达前是 UA 占位）
+const isMac = computed(() => appInfo.platform === 'darwin')
 const pinned = ref(false)
 const name = computed(() => props.manifests.find((m) => m.id === router.activePluginId)?.name ?? '')
 
 function togglePin(): void {
   pinned.value = !pinned.value
-  void window.gtools.host('window:set-always-on-top', { value: pinned.value })
+  void host('window:set-always-on-top', { value: pinned.value })
 }
 
 function closeWindow(): void {
-  void window.gtools.host('window:close-detached')
+  void host('window:close-detached')
 }
+
+// 两阶段关窗：主进程先 hide 并发 detached:flush，这里广播草稿冲刷（插件监听 gtools:flush-drafts
+// 落盘并经 detail.track 上报 promise），等冲刷真完成再 ACK 真关；ACK 命中主进程 flushing 分支直接销毁
+let offFlush: (() => void) | undefined
 
 // 独立窗口只有插件态，Esc 即关窗（主窗的 Esc 逐级退出逻辑不适用）
 function onKeydown(e: KeyboardEvent): void {
@@ -32,23 +41,39 @@ function onKeydown(e: KeyboardEvent): void {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
+  offFlush = window.gtools.on('detached:flush', () => {
+    const tracked: Promise<unknown>[] = []
+    window.dispatchEvent(
+      new CustomEvent<{ track(p: Promise<unknown>): void } | undefined>('gtools:flush-drafts', {
+        detail: { track: (p) => { tracked.push(p) } }
+      })
+    )
+    void Promise.race([
+      Promise.allSettled(tracked),
+      new Promise<void>((r) => setTimeout(r, FLUSH_ACK_DELAY_MS))
+    ]).then(() => host('window:close-detached'))
+  })
   // 主题/透明变化主进程只广播到本窗口（settings-changed 只发主窗），用专用事件同步；
   // transparency/outline 宽松读取保持两侧改动解耦（blur 字段旧载荷缺省视为开）
   window.gtools.on('detached:theme', (p) => {
     const d = p as {
       theme?: string
-      transparency?: { enabled: boolean; opacity: number; blur?: boolean }
+      transparency?: { enabled: boolean; opacity: number; blur?: boolean; glassFrost?: number }
       outline?: { enabled: boolean; width: number; color: string; customColor?: string; flowSpeed?: number }
     }
     if (typeof d?.theme === 'string') document.documentElement.dataset.theme = d.theme
     if (d?.transparency) {
       document.documentElement.dataset.transparency = d.transparency.enabled ? 'on' : 'off'
       document.documentElement.dataset.blur = d.transparency.blur !== false ? 'on' : 'off'
-      // 独立窗不走 App.vue 的 applyVisualSettings，感知曲线 token 需在此对主窗同公式注入
+      // 独立窗不走 App.vue 的 applyVisualSettings，感知曲线 token 需在此对主窗同公式注入；
+      // --frost 旧载荷缺字段宽松回 45（与 App.vue/飞窗四点同公式）
       const t = d.transparency.opacity / 100
       document.documentElement.style.setProperty('--tx', t.toFixed(2))
       document.documentElement.style.setProperty('--txp', Math.pow(1 - t, 3).toFixed(4))
-      document.documentElement.style.setProperty('--txf', Math.pow(1 - t, 0.9).toFixed(4))
+      const frostPct = d.transparency.glassFrost
+      const frost =
+        typeof frostPct === 'number' && Number.isFinite(frostPct) ? Math.min(Math.max(frostPct, 0), 100) : 45
+      document.documentElement.style.setProperty('--frost', Math.pow(frost / 100, 0.9).toFixed(4))
     }
     if (d?.outline) {
       // 同主窗：off 注 0px 内联防回落 CSS 被透明组特异性压过；width 坏值回退 3
@@ -73,6 +98,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  offFlush?.()
 })
 </script>
 
@@ -167,7 +193,22 @@ html[data-wintx='1'] .detached {
   mask-composite: exclude;
   pointer-events: none;
 }
-/* 顶栏扁平化：与窗口根同 tint，无自身材质 */
+/* 圆角分治与主窗 .app 一致（App.vue 同款规则）：透明窗 CSS 透空四角，不透明窗交 OS 裁剪 */
+html[data-wintx='1'] .detached {
+  border-radius: var(--r-window);
+  /* 透明窗吃进 #app padding-box，外投影落进边距环；无边距环时 #app padding=0，height:100% ≡ 100vh */
+  height: 100%;
+}
+/* win32 不透明窗（独立窗不持系统材质，blur 开由主题底色补观感）：feTurbulence 噪点自绘玻璃颗粒，
+   叠 sheen 之上（同主窗 .app 手法） */
+html[data-wintx='0'][data-blur='on'] .detached {
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E")
+      padding-box,
+    linear-gradient(115deg, rgba(255, 255, 255, var(--glass-sheen)), rgba(255, 255, 255, 0) 46%) padding-box,
+    linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
+}
+/* 顶栏去卡片化：与 .plugin-body 同背板连成连续材质平面，hairline 分界，上角交 .detached overflow:hidden 裁剪 */
 .topbar {
   position: relative;
   flex: none;
@@ -175,9 +216,9 @@ html[data-wintx='1'] .detached {
   align-items: center;
   gap: var(--sp-2);
   height: 40px;
-  padding: 0 var(--sp-2) 0 var(--sp-3);
-  border-radius: var(--r-xl);
-  background: var(--bg-shell);
+  padding: 0 var(--sp-2) 0 var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-content);
   -webkit-app-region: drag;
 }
 /* macOS titleBarStyle hidden 的交通灯落在左上角，顶栏左侧让出 70px */

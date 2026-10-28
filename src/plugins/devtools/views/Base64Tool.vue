@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { encode, tryDecode } from './logic/base64'
-import { copyText } from './copy'
+import { useCopyFeedback } from './copy'
 
 const input = ref('')
 const output = ref('')
 const error = ref<string | null>(null)
+const { msg: copyMsg, copy } = useCopyFeedback()
 
 function doEncode(): void {
   error.value = null
@@ -33,7 +34,7 @@ function doDecode(): void {
     <p v-if="error" class="err">✗ {{ error }}</p>
     <div v-else-if="output" class="result">
       <pre>{{ output }}</pre>
-      <button class="btn" @click="copyText(output)">复制</button>
+      <button class="btn" @click="copy(output)">{{ copyMsg === '' ? '复制' : copyMsg }}</button>
     </div>
   </div>
 </template>

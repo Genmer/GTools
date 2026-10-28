@@ -2,11 +2,12 @@
 import { ref } from 'vue'
 import { format, minify, validate } from './logic/json'
 import type { JsonResult } from './logic/json'
-import { copyText } from './copy'
+import { useCopyFeedback } from './copy'
 
 const input = ref('{"name":"GTools","tags":["launcher","electron"]}')
 const indent = ref<2 | 4>(2)
 const result = ref<JsonResult | null>(null)
+const { msg: copyMsg, copy } = useCopyFeedback()
 
 function run(mode: 'format' | 'minify' | 'validate'): void {
   if (mode === 'validate') result.value = validate(input.value)
@@ -27,7 +28,7 @@ function run(mode: 'format' | 'minify' | 'validate'): void {
     <textarea v-model="input" rows="8" spellcheck="false" />
     <div v-if="result?.ok && result.text !== undefined" class="result">
       <pre>{{ result.text }}</pre>
-      <button class="btn" @click="copyText(result.text!)">复制</button>
+      <button class="btn" @click="copy(result.text!)">{{ copyMsg === '' ? '复制' : copyMsg }}</button>
     </div>
     <p v-else-if="result?.ok" class="ok">✓ 合法 JSON</p>
     <p v-else-if="result && !result.ok" class="err">✗ 第 {{ result.line }} 行第 {{ result.column }} 列：{{ result.message }}</p>

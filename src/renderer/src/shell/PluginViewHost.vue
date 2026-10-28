@@ -45,11 +45,15 @@ onErrorCaptured((err) => {
 })
 
 function focusContent(): void {
-  // 焦点交还插件内容，优先其首个输入控件
+  // 焦点交还插件内容，只认文本类输入：select/勾选类控件抢走 ↑↓ 会静默改值；
+  // data-hold-focus = 插件自治焦点（整体跳过）；无文本目标不夺焦点，留在 SearchBox 继续编辑 query
   void nextTick(() => {
-    const el = bodyRef.value?.querySelector<HTMLElement>('input, textarea, select')
+    const root = bodyRef.value
+    if (!root || root.querySelector('[data-hold-focus]') !== null) return
+    const el = root.querySelector<HTMLElement>(
+      'textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="button"]):not([type="submit"])'
+    )
     if (el) el.focus()
-    else bodyRef.value?.focus()
   })
 }
 

@@ -5,7 +5,7 @@ const manifest: PluginManifest = {
   name: 'JSON 编辑器',
   version: '0.1.0',
   protocolVersion: 1,
-  description: 'JSON 编辑器：格式化/压缩/校验/复制/查找，全页树视图切换，错误定位到行列，大 JSON 懒渲染',
+  description: 'JSON 编辑器：粘贴自动格式化，Ctrl+F 搜索高亮跳转，容忍注释/尾逗号，光标处复制 JSONPath，错误定位到行列',
   icon: '{ }',
   keywords: ['json', 'json-editor', 'bianjiqi', '编辑器'],
   activation: 'trigger',

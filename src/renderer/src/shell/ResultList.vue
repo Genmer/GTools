@@ -141,7 +141,7 @@ onBeforeUnmount(() => {
           class="result-cell"
           :class="{ active: items.length + j === activeIndex }"
           :data-idx="items.length + j"
-          :title="`${r.label} · ${r.title}`"
+          :title="r.subtitle ? `${r.title} · ${r.subtitle}` : r.title"
           role="button"
           tabindex="-1"
           @mouseenter="emit('hover', items.length + j)"
@@ -150,7 +150,7 @@ onBeforeUnmount(() => {
           <span v-if="r.icon" class="tile rec-tile emoji">{{ r.icon }}</span>
           <span v-else class="tile rec-tile" :class="tileColorClass(r.key)">{{ letterOf(r.title) }}</span>
           <span class="cell-name">
-            <template v-for="(seg, si) in highlightSegments(r.label, query)" :key="si">
+            <template v-for="(seg, si) in highlightSegments(r.title, query)" :key="si">
               <b v-if="seg.hit" class="hl">{{ seg.text }}</b>
               <template v-else>{{ seg.text }}</template>
             </template>

@@ -3,8 +3,9 @@ import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import * as nodeFs from 'node:fs/promises'
 import { dirname, join, sep as pathSep } from 'node:path'
+import type { ApiCallResult, ApiServiceId } from '@sdk/api'
 import type { PluginManifest } from '@sdk/manifest'
-import type { ApiCallResult } from '@sdk/api'
+import { peekJsonCandidate } from '@sdk/json-detect'
 import type { PluginLoader } from '../plugin-loader'
 import type { SettingsStore, AppSettings, ThemeName, CommandHotkey, OutlineColor, AppLogSkin, AppLogoSkin } from '../settings-store'
 import type { ServiceBag } from './dispatch'
@@ -13,13 +14,17 @@ import { isAppLogLevel, type AppLog } from './app-log'
 import { PROVIDER_PRESETS, getPreset } from './api-center'
 import type { ApiCenterService, ProviderForm, ProviderType } from './api-center'
 import type { NativeAppsService } from './native-apps'
+import type { ClipboardHistoryService } from './clipboard-history'
+import type { BackgroundService } from './background'
 import { assertHttpUrl } from './net-guard'
 import type { DetachedWindowManager } from '../detached-window-manager'
 import {
+  allLiveWindows,
   applyHideOnBlur,
   applyThemeToWindow,
   getSearchWindow,
   hideSearchWindow,
+  isTransparentWindow,
   restoreSearchWindowSize,
   resizeSearchWindowBy,
   setSearchWindowHeight,
@@ -27,6 +32,14 @@ import {
   showSearchWindow,
   suspendBlurHide
 } from '../window'
+import { isAllWindowsBroadcast } from './broadcast-channels'
+import {
+  applyThemeToClipboardFlyout,
+  getClipboardFlyoutWindow,
+  isClipboardFlyoutSender,
+  reanchorClipboardFlyout,
+  setClipboardFlyoutPosition
+} from '../clipboard-flyout-window'
 import { rebindHotkey, suspendHotkeys, resumeHotkeys, armHotkeyProbe, disarmHotkeyProbe, syncCommandHotkeys, type CommandHotkeySyncResult } from '../shortcut'
 import { applyAppLogoSkin } from '../logo-skin'
 import { applyTraySkin } from '../tray'
@@ -46,6 +59,7 @@ import { createPluginServer, scanUtoolsPlugins, type UtoolsPluginServer } from '
 
 export interface HostInitResult {
   version: string
+  platform: string
   settings: AppSettings
   plugins: { manifest: PluginManifest; enabled: boolean }[]
   loadIssues: { pluginId: string; message: string }[]
@@ -73,6 +87,7 @@ function preImportFileName(now: Date): string {
   )
 }
 
+/** 导入前快照按文件名时间降序留最近 SAFETY_KEEP 份（≥1 永不删尽）；单份删除失败不阻塞导入（多留一份无害） */
 async function prunePreImportFiles(dir: string): Promise<void> {
   let names: string[]
   try {
@@ -81,7 +96,7 @@ async function prunePreImportFiles(dir: string): Promise<void> {
     return
   }
   const stale = names.filter((n) => PRE_IMPORT_RE.test(n)).sort((a, b) => b.localeCompare(a)).slice(SAFETY_KEEP)
-  for (const n of stale) await nodeFs.rm(join(dir, n), { force: true })
+  for (const n of stale) await nodeFs.rm(join(dir, n), { force: true }).catch(() => {})
 }
 
 // warnings 只在非空时附带：旧消费方按字段存在性判断，空数组也会被误判为「有警告」
@@ -94,7 +109,12 @@ function pluginsSnapshot(loader: PluginLoader): { manifest: PluginManifest; enab
   return loader.registry.all().map((e) => ({ manifest: e.manifest, enabled: e.enabled }))
 }
 
-function broadcast(channel: string, payload: unknown): void {
+/** 宿主事件广播：登记进 broadcast-channels 的通道投递所有存活窗口，其余（含新通道）fail-closed 只发主窗 */
+export function broadcast(channel: string, payload: unknown): void {
+  if (isAllWindowsBroadcast(channel)) {
+    for (const w of allLiveWindows()) w.webContents.send(channel, payload)
+    return
+  }
   getSearchWindow()?.webContents.send(channel, payload)
 }
 
@@ -115,6 +135,16 @@ function describeCommandHotkeySync(r: CommandHotkeySyncResult): string | null {
 /** 仅主搜索窗口可调用的宿主通道守卫（防其它子窗口/插件页反向操控主窗）；主窗不存在时一律拒绝 */
 function isSearchWindowSender(e: { sender: { id: number } }): boolean {
   return getSearchWindow()?.webContents.id === e.sender.id
+}
+
+/** 剪贴板四通道复合守卫：主窗或剪贴板飞窗（data-wintx 同源、无键盘能力）放行，陌生 id 仍拒 */
+function isClipboardPanelSender(e: { sender: { id: number } }): boolean {
+  return isSearchWindowSender(e) || isClipboardFlyoutSender(e)
+}
+
+/** api-services 通道的品类载荷：缺省/坏值回 'translate'（既有渲染层零改动兼容） */
+function serviceOf(v: unknown): ApiServiceId {
+  return v === 'ai' ? 'ai' : 'translate'
 }
 
 // 录入期按键捕获：Alt+Space 的 keyDown 被 Windows 系统键通道吞掉，主进程 before-input-event 据带修饰标志的 keyUp 重建后转发录入框
@@ -150,11 +180,21 @@ export function setupIpc(deps: {
   services: ServiceBag
   apiCenter: ApiCenterService
   nativeApps: NativeAppsService
+  /** 可选：真实装配（index.ts）恒传入；旧 harness 不带时四个 clipboard-history api 拒绝服务 */
+  clipboardHistory?: ClipboardHistoryService
+  /** 可选：真实装配（index.ts）恒传入；旧 harness 不带时 background:* 拒绝服务 */
+  background?: BackgroundService
   detached: DetachedWindowManager
   appLog: AppLog
   onHotkeyToggle: () => void
 }): void {
   const { loader, settings, services, apiCenter } = deps
+
+  // 剪贴板历史任何变更（轮询新采集/copy/remove/clear）双投：主窗广播 + 飞窗直发（R5），面板据此刷新
+  deps.clipboardHistory?.onChanged(() => {
+    broadcast('clipboard-history-changed', null)
+    getClipboardFlyoutWindow()?.webContents.send('clipboard-history-changed', null)
+  })
 
   // 更新检测：fetch/openExternal/version/platform 全走 ServiceBag 注入面（测试可 fake）；闭包缓存随 setupIpc 生命周期
   const updater = createUpdater({
@@ -247,20 +287,33 @@ export function setupIpc(deps: {
     }
   }
 
-  // 插件能力通道：权限与启用校验在 dispatchApi 内
-  ipcMain.handle('gtools:api', (_e, req: { pluginId: string; api: string; payload: unknown[] }): Promise<ApiCallResult> => {
+  // 插件能力通道：权限与启用校验在 dispatchApi 内；pluginId 另须绑定 sender（主窗或登记独立窗），防跨插件冒用
+  ipcMain.handle('gtools:api', (e, req: { pluginId: string; api: string; payload: unknown[] }): Promise<ApiCallResult> => {
     if (!req || typeof req.pluginId !== 'string' || typeof req.api !== 'string' || !Array.isArray(req.payload)) {
       return Promise.resolve({ ok: false, error: 'BAD_REQUEST', message: '非法调用格式' })
     }
+    // 主窗内跨插件冒用是已知残留：主进程拿不到渲染层路由真值，用 plugin:enter 跟踪会误杀卸载中的异步落盘，故不跟踪
+    if (isSearchWindowSender(e)) return dispatchApi(loader.registry, services, req.pluginId, req.api, req.payload)
+    const boundPluginId = deps.detached.pluginIdForWebContents(e.sender.id)
+    if (boundPluginId === null) return Promise.resolve({ ok: false, error: 'FORBIDDEN_SENDER', message: '非插件宿主窗口' })
+    if (boundPluginId !== req.pluginId) return Promise.resolve({ ok: false, error: 'PLUGIN_MISMATCH', message: '窗口与插件不一致' })
     return dispatchApi(loader.registry, services, req.pluginId, req.api, req.payload)
   })
 
-  // 浮窗页面专用通道：只认 float preload 的 sender，按 webContents 定位，无插件能力面
+  // 浮窗页面专用通道：只认 float preload 的 sender，按 webContents 定位；geometry 是唯一能力窄例外（只够得着自己窗口 bounds）
   ipcMain.handle(
     'gtools:float',
     (
       e,
-      req: { op: 'close' | 'event' | 'info'; event?: string; payload?: unknown }
+      req: {
+        op: 'close' | 'event' | 'info' | 'geometry'
+        event?: string
+        payload?: unknown
+        x?: number
+        y?: number
+        width?: number
+        height?: number
+      }
     ): { ok: boolean; data?: unknown } => {
       const float = services.window.float
       switch (req?.op) {
@@ -274,6 +327,8 @@ export function setupIpc(deps: {
           const info = float.infoByWebContents(e.sender.id)
           return info === null ? { ok: false } : { ok: true, data: info }
         }
+        case 'geometry':
+          return { ok: float.setGeometryByWebContents?.(e.sender.id, req) ?? false }
         default:
           return { ok: false }
       }
@@ -434,8 +489,21 @@ export function setupIpc(deps: {
 
     const warnings = [...parsed.warnings]
     if (commandSkipped) warnings.push(commandSkipped)
-    for (const [pid, kv] of Object.entries(backup.pluginStorage)) {
-      await services.storage.replaceAll(pid, kv)
+
+    // 常驻 backend 重载信令：备份携带其数据且运行中的 backend 先 stop（stop 会把内存旧态 flush 落盘，
+    // 必须让随后的 replaceAll 覆盖之），replaceAll 后再重新 init+start（init 才读 kv，导入数据即生效，无需重启）
+    const reloadIds: string[] = []
+    for (const e of loader.registry.all()) {
+      if (!e.backendStarted || e.backend === null || backup.pluginStorage[e.manifest.id] === undefined) continue
+      if (await loader.suspendBackend(e.manifest.id)) reloadIds.push(e.manifest.id)
+    }
+    // replaceAll 中途抛错（杀软锁文件/盘满）也必须复活被 stop 的 backend，否则常驻插件静默死亡
+    try {
+      for (const [pid, kv] of Object.entries(backup.pluginStorage)) {
+        await services.storage.replaceAll(pid, kv)
+      }
+    } finally {
+      for (const id of reloadIds) await loader.ensureBackendStarted(id).catch(() => {})
     }
 
     // v1 备份无 apiServices 段：保留本机现状不动；有则 sanitize 后整体替换，完成即广播（内存态即时生效）
@@ -451,9 +519,10 @@ export function setupIpc(deps: {
       customColor: nextSettings.outlineCustomColor,
       flowSpeed: nextSettings.outlineFlowSpeed
     })
+    applyThemeToClipboardFlyout(nextSettings.theme, nextSettings.transparency)
     broadcast('settings-changed', nextSettings)
     broadcast('plugin-state-changed', { plugins: pluginsSnapshot(loader) })
-    // 常驻 backend 内存态（如剪贴板历史）不会自动重载导入的数据
+    // 常驻 backend 已随重载信令读到导入数据；restartRecommended 保守保留（备份未携带数据的插件不受影响）
     return { ok: true, data: { restored: true, warnings, restartRecommended: true, safetyBackupPath } }
   }
 
@@ -470,6 +539,8 @@ export function setupIpc(deps: {
         case 'app:init': {
           const data: HostInitResult = {
             version: app.getVersion(),
+            // 与 updater/downloader 同走 services.app 注入面（ipc.ts 内同族取值保持一致）
+            platform: services.app.platform,
             settings: settings.settings,
             plugins: pluginsSnapshot(loader),
             loadIssues: loader.issues.map((i) => ({ pluginId: i.pluginId, message: `${i.field}: ${i.message}` })),
@@ -478,6 +549,7 @@ export function setupIpc(deps: {
           return { ok: true, data }
         }
         case 'settings:set': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
           const p = (req.payload ?? {}) as {
             theme?: ThemeName
             transparency?: Partial<AppSettings['transparency']>
@@ -490,7 +562,8 @@ export function setupIpc(deps: {
             appLogSkin?: AppLogSkin
             appLogoSkin?: AppLogoSkin
             launchAtLogin?: boolean
-            clipboardSuggest?: boolean
+            clipboardPanel?: Partial<AppSettings['clipboardPanel']>
+            background?: Partial<AppSettings['background']>
             hideOnBlur?: boolean
             commandHotkeys?: CommandHotkey[]
           }
@@ -518,6 +591,7 @@ export function setupIpc(deps: {
               syncLoginItem(app, p.launchAtLogin)
             } catch (err) {
               // login-item 头注释契约：OS 写入异常上抛由调用方呈现；此处接住转 ok:false 且不落盘（settings.update 在后）
+              deps.appLog.push('error', 'main', `开机启动设置失败 v${app.getVersion()}：${err instanceof Error ? err.message : String(err)}`)
               if (reboundFrom !== null) {
                 rebindHotkey(reboundFrom, deps.onHotkeyToggle)
                 syncCommandHotkeys(currentBindings(), reboundFrom, fireCommandHotkey, undefined, hotkeySyncOpts())
@@ -536,6 +610,7 @@ export function setupIpc(deps: {
               customColor: next.outlineCustomColor,
               flowSpeed: next.outlineFlowSpeed
             })
+            applyThemeToClipboardFlyout(next.theme, next.transparency)
           }
           if (p.appLogoSkin) {
             applyAppLogoSkin(next.appLogoSkin)
@@ -543,6 +618,12 @@ export function setupIpc(deps: {
           }
           if (typeof p.hideOnBlur === 'boolean') {
             applyHideOnBlur(next.hideOnBlur)
+          }
+          if (p.clipboardPanel) {
+            deps.clipboardHistory?.setEnabled(next.clipboardPanel.position !== 'off')
+            // 飞窗语义换挡（F6）：非 off 且主窗可见 → 惰性显示；off → 关窗；可见时再锚定一次吃方位切换
+            setClipboardFlyoutPosition(next.clipboardPanel.position)
+            if (next.clipboardPanel.position !== 'off' && getSearchWindow()?.isVisible()) reanchorClipboardFlyout()
           }
           // 指令热键持久化后重注册（sanitize 在 store 内）；已落盘即 ok:true，部分未生效以 warnings 附带
           let hotkeyNotice: string | null = null
@@ -599,6 +680,12 @@ export function setupIpc(deps: {
           if (typeof p.resizable !== 'boolean') return { ok: false, error: 'resizable 必须是布尔值' }
           const mw = typeof p.minWidth === 'number' ? p.minWidth : undefined
           const mh = typeof p.minHeight === 'number' ? p.minHeight : undefined
+          // win32 透明窗放开 OS 拖缘拉伸会使透明失效（Electron 约束，macOS 无此限制）：拒开且不动拉伸态，
+          // 大画布走自绘手柄（window:resize-by）或 Detach 独立窗；关拉伸恒放行
+          const mainWin = getSearchWindow()
+          if (p.resizable && mainWin && process.platform === 'win32' && isTransparentWindow(mainWin)) {
+            return { ok: false, error: 'win32 透明窗不支持系统拉伸，请使用窗口内自绘手柄' }
+          }
           setSearchWindowResizable(p.resizable, mw, mh)
           if (!p.resizable) restoreSearchWindowSize()
           return { ok: true, data: null }
@@ -663,11 +750,17 @@ export function setupIpc(deps: {
           return { ok: true, data: null }
         }
         case 'plugin:enter': {
+          // detached 窗只许自报本窗插件（深链进入/插件视图自报均满足），防跨窗拉起他人 backend；主窗放行
           const id = (req.payload as { id: string })?.id
+          if (!isSearchWindowSender(e)) {
+            const owner = deps.detached.pluginIdForWebContents(e.sender.id)
+            if (owner === null || id !== owner) return { ok: false, error: '仅插件宿主窗口可调用' }
+          }
           if (typeof id === 'string') await loader.ensureBackendStarted(id)
           return { ok: true, data: null }
         }
         case 'plugins:set-enabled': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
           const { id, enabled } = req.payload as { id: string; enabled: boolean }
           if (enabled) {
             const r = await loader.setEnabled(id, true)
@@ -683,13 +776,17 @@ export function setupIpc(deps: {
           return { ok: true, data: null }
         }
         case 'backup:export':
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
           return await suspendBlurHide(() => exportBackup())
         case 'backup:import':
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
           return await suspendBlurHide(() => importBackup())
         case 'api-services:get':
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
           // presets 供设置页表驱动下拉与凭证框渲染；广播 api-services-changed 仍是裸视图形状
           return { ok: true, data: { services: apiCenter.sanitized(), presets: PROVIDER_PRESETS } }
         case 'api-services:open-console': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
           // 渲染层只传 type 意图，URL 由主进程 preset 表决定后交 openExternal（assertHttpUrl 双保险）
           const type = (req.payload as { type?: unknown } | null)?.type
           const preset = typeof type === 'string' ? getPreset(type as ProviderType) : undefined
@@ -701,24 +798,32 @@ export function setupIpc(deps: {
           return { ok: true, data: null }
         }
         case 'api-services:upsert-provider': {
-          const form = (req.payload ?? {}) as ProviderForm
-          return { ok: true, data: await apiCenter.upsertProvider(form) }
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const p = (req.payload ?? {}) as ProviderForm & { service?: unknown }
+          return { ok: true, data: await apiCenter.upsertProvider(p, serviceOf(p.service)) }
         }
         case 'api-services:remove-provider': {
-          const id = (req.payload as { id?: unknown })?.id
-          if (typeof id !== 'string' || id === '') return { ok: false, error: '缺少服务商 id' }
-          return { ok: true, data: await apiCenter.removeProvider(id) }
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const p = (req.payload ?? {}) as { id?: unknown; service?: unknown }
+          if (typeof p.id !== 'string' || p.id === '') return { ok: false, error: '缺少服务商 id' }
+          return { ok: true, data: await apiCenter.removeProvider(p.id, serviceOf(p.service)) }
         }
         case 'api-services:set-active': {
-          const id = (req.payload as { id?: unknown })?.id
-          if (typeof id !== 'string') return { ok: false, error: 'id 必须是字符串（空串 = 回退默认）' }
-          return { ok: true, data: await apiCenter.setActive(id) }
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const p = (req.payload ?? {}) as { id?: unknown; service?: unknown }
+          if (typeof p.id !== 'string') return { ok: false, error: 'id 必须是字符串（空串 = 回退默认）' }
+          return { ok: true, data: await apiCenter.setActive(p.id, serviceOf(p.service)) }
         }
         case 'api-services:test': {
-          const p = (req.payload ?? {}) as { id?: unknown; draft?: ProviderForm }
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const p = (req.payload ?? {}) as { id?: unknown; draft?: ProviderForm; service?: unknown }
           return {
             ok: true,
-            data: await apiCenter.testProvider(typeof p.id === 'string' && p.id !== '' ? p.id : undefined, p.draft)
+            data: await apiCenter.testProvider(
+              typeof p.id === 'string' && p.id !== '' ? p.id : undefined,
+              p.draft,
+              serviceOf(p.service)
+            )
           }
         }
         // 宿主空态应用栏（ui-style-guide §1.5）：枚举/打开/置顶，与插件能力面无关
@@ -750,16 +855,90 @@ export function setupIpc(deps: {
           const pinned = req.api === 'apps:pin' ? await deps.nativeApps.pin(id) : await deps.nativeApps.unpin(id)
           return { ok: true, data: pinned }
         }
-        // 剪贴板推荐（宿主 UI 单次读取）：读完即返回，不落盘不缓存；剪贴板敏感故只认主搜索窗口
+        // 剪贴板文本预检（64K 截断防渲染层逐键全量扫描卡 UI）：设置开=主窗可读
         case 'clipboard:peek': {
           if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          if (!settings.settings.clipboardSuggest) return { ok: false, error: '剪贴板推荐已关闭' }
           const text = await services.clipboard.readText()
           return { ok: true, data: text.length > CLIPBOARD_PEEK_MAX_CHARS ? text.slice(0, CLIPBOARD_PEEK_MAX_CHARS) : text }
         }
-        // 粘贴图片芯片缩略图：主进程 nativeImage 降采样出 48px dataUrl（无图返回 null）
+        // 剪贴板图片探测（主窗呼出即推「悬浮/保存成文件」推荐行）：只回尺寸，dataUrl 不进壳层；设置关=主进程拒读
         case 'clipboard:peek-image': {
           if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          if (!settings.settings.clipboardSuggest) return { ok: false, error: '剪贴板推荐已关闭' }
           return { ok: true, data: await services.clipboard.readImageThumb() }
+        }
+        // 剪贴板 JSON 预检（主窗空态推「JSON 编辑器」行）：非 JSON/敏感文本不出主进程；设置关同上拒读
+        case 'clipboard:peek-json': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          if (!settings.settings.clipboardSuggest) return { ok: false, error: '剪贴板推荐已关闭' }
+          return { ok: true, data: peekJsonCandidate(await services.clipboard.readText()) }
+        }
+        // 剪贴板记录面板（宿主 Win+V 式）：只下发 preview 不下发全文；剪贴板敏感故只认主窗 + 剪贴板飞窗（复合守卫）
+        case 'clipboard-history:list': {
+          if (!isClipboardPanelSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          if (!deps.clipboardHistory) return { ok: false, error: '剪贴板历史服务不可用' }
+          return { ok: true, data: deps.clipboardHistory.items() }
+        }
+        case 'clipboard-history:copy': {
+          if (!isClipboardPanelSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          if (!deps.clipboardHistory) return { ok: false, error: '剪贴板历史服务不可用' }
+          const id = (req.payload as { id?: unknown } | null)?.id
+          if (typeof id !== 'string' || id === '') return { ok: false, error: '缺少条目 id' }
+          const hit = await deps.clipboardHistory.copy(id)
+          return hit ? { ok: true, data: null } : { ok: false, error: '条目不存在' }
+        }
+        case 'clipboard-history:remove': {
+          if (!isClipboardPanelSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          if (!deps.clipboardHistory) return { ok: false, error: '剪贴板历史服务不可用' }
+          const id = (req.payload as { id?: unknown } | null)?.id
+          if (typeof id !== 'string' || id === '') return { ok: false, error: '缺少条目 id' }
+          deps.clipboardHistory.remove(id)
+          return { ok: true, data: null }
+        }
+        case 'clipboard-history:clear': {
+          if (!isClipboardPanelSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          if (!deps.clipboardHistory) return { ok: false, error: '剪贴板历史服务不可用' }
+          deps.clipboardHistory.clear()
+          return { ok: true, data: null }
+        }
+        // 自定义背景（题5）：选图走 suspendBlurHide 防对话框触发失焦藏窗；choose/clear 内部 update 后必须
+        // 显式广播 settings-changed（F3，广播只在 settings:set 分支自动发生），渲染层不自行补发
+        case 'background:choose': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const svc = deps.background
+          if (!svc) return { ok: false, error: '背景服务不可用' }
+          const parent = getSearchWindow()
+          const openOpts = {
+            title: '选择背景图片',
+            filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg'] }],
+            properties: ['openFile' as const]
+          }
+          return await suspendBlurHide(async () => {
+            const r = parent ? await electronDialog.showOpenDialog(parent, openOpts) : await electronDialog.showOpenDialog(openOpts)
+            if (r.canceled || r.filePaths.length === 0) return { ok: true, data: null }
+            const file = await svc.chooseAndStore(r.filePaths[0])
+            const next = await settings.update({ background: { file, enabled: true } })
+            broadcast('settings-changed', next)
+            return { ok: true, data: { file } }
+          })
+        }
+        case 'background:clear': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const svc = deps.background
+          if (!svc) return { ok: false, error: '背景服务不可用' }
+          await svc.clear()
+          const next = await settings.update({ background: { enabled: false, file: '' } })
+          broadcast('settings-changed', next)
+          return { ok: true, data: null }
+        }
+        case 'background:get': {
+          if (!isSearchWindowSender(e)) return { ok: false, error: '仅主搜索窗口可调用' }
+          const svc = deps.background
+          if (!svc) return { ok: false, error: '背景服务不可用' }
+          const b = settings.settings.background
+          const dataUrl = b.enabled && b.file !== '' ? await svc.resolveDataUrl(b.file) : null
+          return { ok: true, data: { dataUrl, file: b.file, dim: b.dim } }
         }
         // 手动检查更新：不自动外联，只在用户点击时请求 GitHub releases/latest
         case 'update:check': {

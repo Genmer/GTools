@@ -29,4 +29,9 @@ export class ProviderBreaker {
   clear(id: string): void {
     this.tripped.delete(id)
   }
+
+  /** 备份导入整体换配置后清空：熔断记录按 provider id 存，同 id 新配置（已换 endpoint/key）不该继承旧冷却 */
+  reset(): void {
+    this.tripped.clear()
+  }
 }

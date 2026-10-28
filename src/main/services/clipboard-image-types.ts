@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url'
+
 // 剪贴板图片候选类型排序（纯逻辑，供 electron-services 取图用）。
 // 微信等应用复制图片时 furl 抢占 W3C 类型，clipboard.read() 里没有任何 image/*，
 // 图片数据只剩 electron application/osclipboard;format="..." 原始格式可取（如 NeXT TIFF）。
@@ -43,6 +45,8 @@ export function gifScreenSize(bytes: Uint8Array): { width: number; height: numbe
 
 // text/uri-list 单一 file:// 条目 → 本地路径；多条或非 file 协议返回 null。
 // QQ/Finder 复制图片文件时粘贴板只有 uri 引用，图像数据要去文件里读
+// 解码必须走 fileURLToPath：手写 decodeURIComponent(pathname) 会丢 UNC authority、
+// win32 下还出前导斜杠；无盘符的 POSIX 形态在 win32 按标准抛错归 null
 export function parseFileUriList(text: string): string | null {
   const lines = text
     .split(/\r?\n/)
@@ -50,7 +54,7 @@ export function parseFileUriList(text: string): string | null {
     .filter((l) => l !== '' && !l.startsWith('#'))
   if (lines.length !== 1 || !lines[0].startsWith('file://')) return null
   try {
-    return decodeURIComponent(new URL(lines[0]).pathname)
+    return fileURLToPath(lines[0])
   } catch {
     return null
   }

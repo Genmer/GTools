@@ -30,8 +30,8 @@ describe('JSON 工具', () => {
 
 describe('时间戳工具', () => {
   it('秒/毫秒时间戳转日期', () => {
-    expect(tsToDate(1_700_000_000, 's').getTime()).toBe(1_700_000_000_000)
-    expect(tsToDate(1_700_000_000_000, 'ms').getTime()).toBe(1_700_000_000_000)
+    expect(tsToDate(1_700_000_000, 's')?.getTime()).toBe(1_700_000_000_000)
+    expect(tsToDate(1_700_000_000_000, 'ms')?.getTime()).toBe(1_700_000_000_000)
   })
 
   it('日期转时间戳返回秒/毫秒双值', () => {

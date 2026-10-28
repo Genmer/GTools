@@ -20,8 +20,6 @@ const props = defineProps<{
   recentTiles: RecentTile[]
   /** 剪贴板 JSON 推荐（C2）：占扁平导航序最前 K 位，两分支顶部各渲染一行 */
   clipboardRecs: RecItem[]
-  /** 搜索历史词（新→旧）：剪贴板行之后第二段 chips 行 */
-  queryHistory: string[]
   apps: NativeAppItem[]
   /** 应用全量数（apps 为折叠切片），超过折叠容量才显示展开/收起格 */
   appsTotal: number
@@ -44,17 +42,12 @@ const emit = defineEmits<{
   refreshApps: []
   retryOpen: []
   resize: [height: number]
-  historySelect: [query: string]
-  historyRemove: [query: string]
-  historyClear: []
 }>()
 
 const rootEl = ref<HTMLElement | null>(null)
 const pinnedSet = computed(() => new Set(props.pinnedIds))
 /** 剪贴板推荐行占用的扁平序前缀长度（后续行/格 data-idx 整体 +K） */
 const clipCount = computed(() => props.clipboardRecs.length)
-/** 历史 chips 段长度（其后所有行/格 data-idx 再整体 +H，与 App.vue emptyTargets 同序） */
-const histCount = computed(() => props.queryHistory.length)
 /** 应用总数超过折叠容量才有抽屉开关格（展开态显示「收起」） */
 const hasAppsToggle = computed(() => props.appsTotal > APPS_FOLD_COUNT)
 
@@ -114,7 +107,7 @@ onBeforeUnmount(() => {
   sizeRo = null
 })
 watch(
-  () => [props.apps, props.appsExpanded, props.appsMode, props.appsLoading, props.recentTiles, props.plugins, props.recents, props.clipboardRecs, props.queryHistory],
+  () => [props.apps, props.appsExpanded, props.appsMode, props.appsLoading, props.recentTiles, props.plugins, props.recents, props.clipboardRecs],
   () => void remeasure()
 )
 
@@ -139,10 +132,10 @@ function letterOf(name: string): string {
     </div>
 
     <div v-if="appsMode" class="panel">
-      <!-- 剪贴板推荐行：扁平序最前 K 位，唤起后首格高亮、Enter 直接激活 -->
+      <!-- 推荐行（拖入/推送）：扁平序最前 K 位，唤起后首格高亮、Enter 直接激活 -->
       <section v-if="clipboardRecs.length > 0" class="section">
         <div class="sec-title">
-          <span>剪贴板推荐</span>
+          <span>推荐</span>
         </div>
         <div class="app-grid">
           <div
@@ -151,7 +144,7 @@ function letterOf(name: string): string {
             class="app-cell"
             :class="{ active: j === activeIndex }"
             :data-idx="j"
-            :title="r.label"
+            :title="r.title"
             role="button"
             tabindex="-1"
             @mouseenter="emit('hover', j)"
@@ -161,30 +154,6 @@ function letterOf(name: string): string {
             <span v-else class="tile" :class="tileColorClass(r.key)">{{ letterOf(r.title) }}</span>
             <span class="app-name">{{ r.title }}</span>
           </div>
-        </div>
-      </section>
-
-      <!-- 搜索历史 chips：剪贴板行之后第二段，扁平序 [clipCount, clipCount+H)，与 App.vue emptyTargets 同序 -->
-      <section v-if="queryHistory.length > 0" class="section">
-        <div class="sec-title">
-          <span>搜索历史</span>
-          <button class="title-btn history-clear" title="清空搜索历史" @click="emit('historyClear')">清空</button>
-        </div>
-        <div class="history-row">
-          <span
-            v-for="(q, i) in queryHistory"
-            :key="q"
-            class="history-chip"
-            :class="{ active: clipCount + i === activeIndex }"
-            :data-idx="clipCount + i"
-            role="button"
-            tabindex="-1"
-            @mouseenter="emit('hover', clipCount + i)"
-            @click="emit('historySelect', q)"
-          >
-            <span class="chip-text">{{ q }}</span>
-            <span class="chip-x" title="删除该条" @click.stop="emit('historyRemove', q)" @mousedown.prevent>×</span>
-          </span>
         </div>
       </section>
 
@@ -198,13 +167,13 @@ function letterOf(name: string): string {
             v-for="(t, i) in recentTiles"
             :key="t.key"
             class="app-cell"
-            :class="{ active: clipCount + histCount + i === activeIndex }"
-            :data-idx="clipCount + histCount + i"
+            :class="{ active: clipCount + i === activeIndex }"
+            :data-idx="clipCount + i"
             :title="t.title"
             role="button"
             tabindex="-1"
-            @mouseenter="emit('hover', clipCount + histCount + i)"
-            @click="emit('select', clipCount + histCount + i)"
+            @mouseenter="emit('hover', clipCount + i)"
+            @click="emit('select', clipCount + i)"
           >
             <span v-if="isImg(t.icon)" class="tile"><img :src="t.icon" alt="" /></span>
             <span v-else-if="t.icon" class="tile emoji">{{ t.icon }}</span>
@@ -236,12 +205,12 @@ function letterOf(name: string): string {
             v-for="(a, i) in apps"
             :key="a.id"
             class="app-cell"
-            :class="{ active: clipCount + histCount + recentTiles.length + i === activeIndex }"
-            :data-idx="clipCount + histCount + recentTiles.length + i"
+            :class="{ active: clipCount + recentTiles.length + i === activeIndex }"
+            :data-idx="clipCount + recentTiles.length + i"
             role="button"
             tabindex="-1"
-            @mouseenter="emit('hover', clipCount + histCount + recentTiles.length + i)"
-            @click="emit('select', clipCount + histCount + recentTiles.length + i)"
+            @mouseenter="emit('hover', clipCount + recentTiles.length + i)"
+            @click="emit('select', clipCount + recentTiles.length + i)"
           >
             <span v-if="pinnedSet.has(a.id)" class="pin-badge" title="已置顶">
               <svg viewBox="0 0 24 24" width="8" height="8" aria-hidden="true">
@@ -269,12 +238,12 @@ function letterOf(name: string): string {
           <div
             v-if="hasAppsToggle"
             class="app-cell apps-toggle"
-            :class="{ active: clipCount + histCount + recentTiles.length + apps.length === activeIndex }"
-            :data-idx="clipCount + histCount + recentTiles.length + apps.length"
+            :class="{ active: clipCount + recentTiles.length + apps.length === activeIndex }"
+            :data-idx="clipCount + recentTiles.length + apps.length"
             role="button"
             tabindex="-1"
             :title="appsExpanded ? '收起应用列表' : '展开全部应用'"
-            @mouseenter="emit('hover', clipCount + histCount + recentTiles.length + apps.length)"
+            @mouseenter="emit('hover', clipCount + recentTiles.length + apps.length)"
             @click="emit('toggleApps')"
           >
             <span class="tile toggle-icon">
@@ -298,7 +267,7 @@ function letterOf(name: string): string {
     <!-- 兜底：应用枚举为空（win32/扫描失败）回退旧 4 列插件网格（ui-style-guide §1.5） -->
     <div v-else class="panel">
       <div v-if="clipboardRecs.length > 0" class="clip-recs">
-        <div class="sec-title"><span>剪贴板推荐</span></div>
+        <div class="sec-title"><span>推荐</span></div>
         <div class="app-grid">
           <div
             v-for="(r, j) in clipboardRecs"
@@ -306,7 +275,7 @@ function letterOf(name: string): string {
             class="app-cell"
             :class="{ active: j === activeIndex }"
             :data-idx="j"
-            :title="r.label"
+            :title="r.title"
             role="button"
             tabindex="-1"
             @mouseenter="emit('hover', j)"
@@ -318,39 +287,16 @@ function letterOf(name: string): string {
           </div>
         </div>
       </div>
-      <!-- 搜索历史 chips：与 appsMode 分支同款，同在剪贴板行之后 -->
-      <div v-if="queryHistory.length > 0" class="section history-fallback">
-        <div class="sec-title">
-          <span>搜索历史</span>
-          <button class="title-btn history-clear" title="清空搜索历史" @click="emit('historyClear')">清空</button>
-        </div>
-        <div class="history-row">
-          <span
-            v-for="(q, i) in queryHistory"
-            :key="q"
-            class="history-chip"
-            :class="{ active: clipCount + i === activeIndex }"
-            :data-idx="clipCount + i"
-            role="button"
-            tabindex="-1"
-            @mouseenter="emit('hover', clipCount + i)"
-            @click="emit('historySelect', q)"
-          >
-            <span class="chip-text">{{ q }}</span>
-            <span class="chip-x" title="删除该条" @click.stop="emit('historyRemove', q)" @mousedown.prevent>×</span>
-          </span>
-        </div>
-      </div>
       <div class="grid">
         <button
           v-for="(m, i) in plugins"
           :key="m.id"
           class="cell"
-          :class="{ active: clipCount + histCount + i === activeIndex }"
-          :data-idx="clipCount + histCount + i"
+          :class="{ active: clipCount + i === activeIndex }"
+          :data-idx="clipCount + i"
           :title="m.description"
-          @mouseenter="emit('hover', clipCount + histCount + i)"
-          @click="emit('select', clipCount + histCount + i)"
+          @mouseenter="emit('hover', clipCount + i)"
+          @click="emit('select', clipCount + i)"
         >
           <span class="tile emoji">{{ m.icon }}</span>
           <span class="name">{{ m.name }}</span>
@@ -363,10 +309,10 @@ function letterOf(name: string): string {
         v-for="(r, j) in recents"
         :key="r.key"
         class="row"
-        :class="{ active: clipCount + histCount + plugins.length + j === activeIndex }"
-        :data-idx="clipCount + histCount + plugins.length + j"
-        @mouseenter="emit('hover', clipCount + histCount + plugins.length + j)"
-        @click="emit('select', clipCount + histCount + plugins.length + j)"
+        :class="{ active: clipCount + plugins.length + j === activeIndex }"
+        :data-idx="clipCount + plugins.length + j"
+        @mouseenter="emit('hover', clipCount + plugins.length + j)"
+        @click="emit('select', clipCount + plugins.length + j)"
       >
         <span class="row-icon">{{ r.icon }}</span>
         <span class="row-title">{{ r.title }}</span>
@@ -597,60 +543,6 @@ function letterOf(name: string): string {
 /* 兜底分支的剪贴板推荐行与插件网格间距 */
 .clip-recs {
   margin-bottom: var(--sp-3);
-}
-.history-fallback {
-  margin-bottom: var(--sp-3);
-}
-
-/* 搜索历史 chips（两分支共用）：弱色词块，选中/悬停换 accent-dim 底（本功能色值只用这三变量） */
-.history-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-}
-.history-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
-  max-width: 100%;
-  padding: 2px 4px 2px 10px;
-  border-radius: var(--r-md);
-  background: var(--hover);
-  color: var(--fg-dim);
-  font-size: var(--fs-sub);
-  line-height: 1.6;
-  cursor: pointer;
-  user-select: none;
-}
-.history-chip:hover,
-.history-chip.active {
-  background: var(--accent-dim);
-}
-.chip-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.chip-x {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  font-size: 12px;
-  line-height: 1;
-}
-.chip-x:hover {
-  background: var(--hover);
-}
-/* 行尾「清空」：复用 title-btn 弱化态，放宽为文字按钮 */
-.history-clear {
-  width: auto;
-  padding: 0 var(--sp-1);
-  font-size: var(--fs-foot);
 }
 
 /* 行内错误条：加载/打开/置顶失败可重试 */

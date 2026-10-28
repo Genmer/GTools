@@ -92,6 +92,8 @@ export interface FloatWindowApi {
   closeByWebContents(webContentsId: number): boolean
   emitFromWebContents(webContentsId: number, event: string, payload: unknown): boolean
   infoByWebContents(webContentsId: number): { id: string; pluginId: string } | null
+  /** 浮窗页面自管几何（拖动/本地缩放直落，不经插件渲染层往返）；可选：部分测试 fake 不关心此能力 */
+  setGeometryByWebContents?(webContentsId: number, g: unknown): boolean
 }
 
 /**
@@ -153,7 +155,8 @@ export class FloatWindowManager implements FloatWindowApi {
     this.byId.set(id, rec)
     this.byWebContents.set(win.webContentsId, rec)
     win.on('closed', () => {
-      // close/destroy 都会触发，重复删除无害
+      // close/destroy 都会触发，重复删除无害；转发 closed 让插件清 live 态（Esc/外部关闭没有页内 closing 前置）
+      this.deps.onFloatEvent(pluginId, { id, event: 'closed', payload: null })
       this.byId.delete(id)
       this.byWebContents.delete(win.webContentsId)
     })
@@ -222,6 +225,29 @@ export class FloatWindowManager implements FloatWindowApi {
   infoByWebContents(webContentsId: number): { id: string; pluginId: string } | null {
     const rec = this.byWebContents.get(webContentsId)
     return rec ? { id: rec.id, pluginId: rec.pluginId } : null
+  }
+
+  /** 只改自己那扇窗：任何字段非法整体拒绝（不半套用），宽高经 clamp 收口、坐标取整（±30000 与 persist 同界） */
+  setGeometryByWebContents(webContentsId: number, g: unknown): boolean {
+    const rec = this.byWebContents.get(webContentsId)
+    if (!rec || typeof g !== 'object' || g === null) return false
+    const src = g as Record<string, unknown>
+    const bounds: { x?: number; y?: number; width?: number; height?: number } = {}
+    for (const key of ['x', 'y'] as const) {
+      const v = src[key]
+      if (v === undefined) continue
+      if (typeof v !== 'number' || !Number.isFinite(v) || Math.abs(v) > 30_000) return false
+      bounds[key] = Math.round(v)
+    }
+    for (const key of ['width', 'height'] as const) {
+      const v = src[key]
+      if (v === undefined) continue
+      if (typeof v !== 'number' || !Number.isFinite(v)) return false
+      bounds[key] = clampFloatSize(v)
+    }
+    if (Object.keys(bounds).length === 0) return false
+    rec.win.setBounds(bounds)
+    return true
   }
 
   private own(pluginId: string, id: string): FloatRecord {

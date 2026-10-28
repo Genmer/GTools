@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { PluginManifest, PluginMatcher } from '../sdk/manifest'
 import type { SearchEntry } from '../src/renderer/src/core/matcher'
-import type { MatchFile } from '../src/renderer/src/core/recommend'
-import { buildRecommendations, fileMatcherHits, keywordSideHits, looksLikeJson, matcherHits } from '../src/renderer/src/core/recommend'
+import type { MatchFile, RecItem } from '../src/renderer/src/core/recommend'
+import { buildRecommendations, dedupeRecs, fileMatcherHits, keywordSideHits, looksLikeJson, matcherHits, mergeQueryRecommendations } from '../src/renderer/src/core/recommend'
 import { isSensitiveText } from '../src/renderer/src/core/sensitive'
 
 const entry = (over: Partial<SearchEntry> & { key: string }): SearchEntry => ({ title: over.key, icon: '', ...over })
@@ -46,24 +46,6 @@ describe('looksLikeJson', () => {
     const big = '{"a":"' + 'x'.repeat(100_001) + '"}'
     expect(big.length).toBeGreaterThan(100_000)
     expect(looksLikeJson(big)).toBe(false)
-  })
-
-  it('多段拼接为真：两段直拼、换行/多空白分隔，每段皆合法顶层 object/array', () => {
-    expect(looksLikeJson('{"a":1}{"b":2}')).toBe(true)
-    expect(looksLikeJson('{"a":1}\n{"b":2}')).toBe(true)
-    expect(looksLikeJson('  [1,2]\r\n\t{"a":{"c":3}}  ')).toBe(true)
-    // 引号内的括号不切段、转义引号不提前闭串
-    expect(looksLikeJson('{"k":"a]{b"}[2]')).toBe(true)
-    expect(looksLikeJson('{"k":"a\\"b"}[1]')).toBe(true)
-  })
-
-  it('多段拼接任一段非法即假：段间垃圾、未闭合、段内残缺', () => {
-    expect(looksLikeJson('{"a":1}notjson')).toBe(false)
-    expect(looksLikeJson('{"a":1}notjson{"b":2}')).toBe(false)
-    expect(looksLikeJson('{"a":1}{"b":2')).toBe(false)
-    expect(looksLikeJson('{"a":1}{bad}')).toBe(false)
-    // 段是合法 JSON 但顶层非 object/array（多段里混入顶层字符串）
-    expect(looksLikeJson('{"a":1}"str"')).toBe(false)
   })
 })
 
@@ -110,8 +92,8 @@ describe('matcherHits', () => {
     const hit = matcherHits(' hello world ', [m])
     expect(hit).toHaveLength(1)
     expect(hit[0].payload).toBe('hello world')
-    expect(hit[0].label).toBe('用聚合翻译翻译')
     expect(hit[0].title).toBe('translate')
+    expect(hit[0].subtitle).toBe('翻译')
     const capped = manifest('t2', { matchers: [{ type: 'text', label: 'x', maxLength: 2 }] })
     expect(matcherHits('abcd', [capped])[0].payload).toBe('ab')
   })
@@ -135,27 +117,34 @@ describe('matcherHits', () => {
     expect(matcherHits('banana', [excluded])).toHaveLength(1)
   })
 
-  it('json 型双源：剪贴板优先、fallback 到 query', () => {
+  it('json 型只测 query 自身（剪贴板源已拆除）', () => {
     const j = manifest('json-editor', { matchers: [{ type: 'json', label: '打开 JSON 编辑器' }] })
-    // query 是 JSON 时也命中（P0 改动）
     const queryHit = matcherHits('{"a":1}', [j])
     expect(queryHit).toHaveLength(1)
     expect(queryHit[0].pluginId).toBe('json-editor')
     expect(queryHit[0].payload).toBe('{"a":1}')
-    // 剪贴板有 JSON 时优先用剪贴板
-    const hits = matcherHits('other', [j], '{"b":2}')
-    expect(hits).toHaveLength(1)
-    expect(hits[0].payload).toBe('{"b":2}')
-    // 剪贴板非 JSON、query 是 JSON 时 fallback
-    const fb = matcherHits('{"c":3}', [j], 'not json')
-    expect(fb).toHaveLength(1)
-    expect(fb[0].payload).toBe('{"c":3}')
-    // 两者都不是 JSON 时不命中
-    expect(matcherHits('hello', [j], 'world')).toEqual([])
+    // query 非 JSON 不命中；空 query 恒空
+    expect(matcherHits('hello', [j])).toEqual([])
     expect(matcherHits('', [j])).toEqual([])
 
     const t = manifest('translate', { matchers: [{ type: 'text', label: 'x' }] })
-    expect(matcherHits('', [t], '{"a":1}')).toEqual([]) // 空 query 下 text 不产出
+    expect(matcherHits('', [t])).toEqual([]) // 空 query 下 text 不产出
+  })
+
+  it('json 型 payload 阈值：≤100k（解析上限）全量携带，text/regex 仍 2000 剥离', () => {
+    const j = manifest('json-editor', { matchers: [{ type: 'json', label: '打开 JSON 编辑器' }] })
+    const ok = `{"a":"${'x'.repeat(1980)}"}`
+    expect(ok.length).toBeLessThanOrEqual(2000)
+    const [okHit] = matcherHits(ok, [j])
+    expect(okHit.payload).toBe(ok)
+    expect(okHit.title).toBe('json-editor')
+    const big = `{"a":"${'x'.repeat(2100)}"}` // 2000 < len ≤ 100k：json 源全注入（json-editor 消费全文）
+    expect(big.length).toBeGreaterThan(2000)
+    const [bigHit] = matcherHits(big, [j])
+    expect(bigHit.payload).toBe(big)
+    const t = manifest('translate', { matchers: [{ type: 'text', label: 'x' }] })
+    const bigText = 'x'.repeat(2100)
+    expect(matcherHits(bigText, [t])[0].payload).toBeUndefined()
   })
 
   it('按源组配额：text 上限 4、json 属于 content 组不被挤占', () => {
@@ -183,71 +172,13 @@ describe('matcherHits', () => {
     expect(matcherHits('hello', many)).toHaveLength(4)
   })
 
-  it('超 2000 字符的命中文本剥离 payload（只进入不注入）：text/regex 型走 query 通道维持剥离', () => {
+  it('超 2000 字符的命中文本剥离 payload（只进入不注入）', () => {
     const m = manifest('translate', { matchers: [{ type: 'text', label: 'x' }] })
     const big = 'x'.repeat(2001)
     const [hit] = matcherHits(big, [m])
     expect(hit.payload).toBeUndefined()
     const ok = 'x'.repeat(2000)
     expect(matcherHits(ok, [m])[0].payload).toBe(ok)
-
-    const re = manifest('re-p', { matchers: [{ type: 'regex', match: '.', label: 'x' }] })
-    expect(matcherHits(big, [re])[0].payload).toBeUndefined()
-  })
-
-  it('json 型超 2000 字符不剥离 payload（走 initialText 通道，looksLikeJson 已限 ≤100k）', () => {
-    const j = manifest('json-editor', { matchers: [{ type: 'json', label: '打开 JSON 编辑器' }] })
-    const bigJson = '{"k":"' + 'x'.repeat(2500) + '"}'
-    expect(bigJson.length).toBeGreaterThan(2000)
-    const [hit] = matcherHits(bigJson, [j])
-    expect(hit.payload).toBe(bigJson)
-    // 剪贴板源同样不剥离
-    const clipBig = '{"c":"' + 'y'.repeat(2500) + '"}'
-    expect(matcherHits('hello', [j], clipBig)[0].payload).toBe(clipBig)
-  })
-
-  it('json 型通道上限由 looksLikeJson 锁定：恰 100k 保留全文，超 100k 双源都不产出', () => {
-    const j = manifest('json-editor', { matchers: [{ type: 'json', label: 'J' }] })
-    // 前缀 {"k":" 6 字符 + 后缀 "} 2 字符 = 8 字符壳
-    const exact = '{"k":"' + 'x'.repeat(100_000 - 8) + '"}'
-    expect(exact.length).toBe(100_000)
-    expect(matcherHits(exact, [j])[0].payload).toBe(exact)
-    const over = '{"k":"' + 'x'.repeat(100_000 - 6) + '"}'
-    expect(over.length).toBe(100_002)
-    expect(matcherHits(over, [j])).toEqual([])
-    expect(matcherHits('hello', [j], over)).toEqual([])
-  })
-
-  it('同调用混型分流：json 超 2000 保留全文，text 同文本剥离', () => {
-    const j = manifest('json-editor', { matchers: [{ type: 'json', label: 'J' }] })
-    const t = manifest('translate', { matchers: [{ type: 'text', label: 'T' }] })
-    const bigJson = '{"k":"' + 'x'.repeat(2500) + '"}'
-    const hits = matcherHits(bigJson, [j, t])
-    expect(hits.find((h) => h.source === 'json')?.payload).toBe(bigJson)
-    expect(hits.find((h) => h.source === 'text')?.payload).toBeUndefined()
-  })
-
-  it('多段拼接产出 json 推荐，payload 为全文（initialText 注入源）', () => {
-    const j = manifest('json-editor', { matchers: [{ type: 'json', label: '打开 JSON 编辑器' }] })
-    // 空态：剪贴板两段直拼
-    const clip = '{"a":1}\n{"b":2}'
-    const r = buildRecommendations({ query: '', manifests: [j], clipboardText: clip })
-    expect(r).toHaveLength(1)
-    expect(r[0]).toMatchObject({ source: 'json', payload: clip })
-    // query 态：两段直拼输入同样命中且 payload 全文
-    const q = matcherHits('{"a":1}{"b":2}', [j])
-    expect(q).toHaveLength(1)
-    expect(q[0].payload).toBe('{"a":1}{"b":2}')
-    // 两段之一非法不产出
-    expect(matcherHits('hello', [j], '{"a":1}notjson')).toEqual([])
-  })
-
-  it('超 100k 的拼接多段同样不产出（长度门先于切段）', () => {
-    const j = manifest('json-editor', { matchers: [{ type: 'json', label: 'J' }] })
-    const big = '{"a":"' + 'x'.repeat(50_000) + '"}{"b":"' + 'y'.repeat(50_000) + '"}'
-    expect(big.length).toBeGreaterThan(100_000)
-    expect(looksLikeJson(big)).toBe(false)
-    expect(matcherHits('hello', [j], big)).toEqual([])
   })
 })
 
@@ -259,7 +190,7 @@ describe('fileMatcherHits（拖入文件/图片推荐源）', () => {
     const m = withMatchers(manifest('pdf-tools', { name: 'PDF 工具' }), [filesMatcher({ extensions: ['pdf'] })])
     const hit = fileMatcherHits([file('报告.PDF')], [m], false)
     expect(hit).toHaveLength(1)
-    expect(hit[0]).toMatchObject({ pluginId: 'pdf-tools', source: 'files', label: '用 PDF 工具打开', title: 'PDF 工具' })
+    expect(hit[0]).toMatchObject({ pluginId: 'pdf-tools', source: 'files', title: 'PDF 工具' })
     expect(hit[0].payload).toBeUndefined()
     // 混入多个文件，任一后缀命中即中
     expect(fileMatcherHits([file('a.txt'), file('b.pdf')], [m], false)).toHaveLength(1)
@@ -311,19 +242,18 @@ describe('fileMatcherHits（拖入文件/图片推荐源）', () => {
 })
 
 describe('buildRecommendations 合并序与拖入源', () => {
-  it('合并序 json > files > img > keyword > regex > text，同插件 files/img 同键去重保 files', () => {
+  it('合并序 json > files > img > keyword > regex > text（json 源=query 自身检测），同插件 files/img 同键去重保 files', () => {
     const jsonEditor = manifest('json-editor', { matchers: [{ type: 'json', label: 'J' }] })
     const filePlugin = withMatchers(manifest('pdf-tools'), [{ type: 'files', label: 'F', extensions: ['pdf'] }])
     const imgPlugin = withMatchers(manifest('img-tool'), [{ type: 'img', label: 'I' }])
-    const regexPlugin = manifest('regex-p', { matchers: [{ type: 'regex', match: 'a+', label: 'R' }] })
+    const regexPlugin = manifest('regex-p', { matchers: [{ type: 'regex', match: '[0-9]+', label: 'R' }] })
     const textPlugin = manifest('text-p', { matchers: [{ type: 'text', label: 'T' }] })
     const entries: SearchEntry[] = [entry({ key: 'kw-p:_main', title: 'kw 沾边', icon: '', pluginId: 'kw-p', keywords: ['abc'] })]
     const r = buildRecommendations({
-      query: 'abc',
+      query: '{"abc": 1}',
       entries,
       resultKeys: new Set(),
       manifests: [jsonEditor, filePlugin, imgPlugin, regexPlugin, textPlugin],
-      clipboardText: '{"a":1}',
       files: [file('x.pdf')],
       hasImage: true
     })
@@ -355,11 +285,10 @@ describe('buildRecommendations', () => {
 
   it('排序 json > keyword > regex > text，pluginId+commandId 去重先到先得', () => {
     const r = buildRecommendations({
-      query: '翻译 {"a":1}',
+      query: '{"翻译":1}',
       entries,
       resultKeys: new Set(),
-      manifests: [jsonEditor, translate],
-      clipboardText: '{"a":1}'
+      manifests: [jsonEditor, translate]
     })
     // translate 的 text 推荐与 keyword 推荐同指 translate:_main，去重保留优先级更高的 keyword
     expect(r.map((x) => x.source)).toEqual(['json', 'keyword'])
@@ -367,7 +296,7 @@ describe('buildRecommendations', () => {
     expect(r[1].source).toBe('keyword')
   })
 
-  it('excludeKeys 挡住主结果已有词条；enabled=false 恒空', () => {
+  it('excludeKeys 挡住主结果已有词条', () => {
     // 无 matchers 的插件：excludeKeys 排除后推荐恒空
     const r = buildRecommendations({
       query: '翻译',
@@ -376,14 +305,11 @@ describe('buildRecommendations', () => {
       manifests: []
     })
     expect(r).toEqual([])
-    expect(
-      buildRecommendations({ query: '翻译', entries, resultKeys: new Set(), manifests: [], enabled: false })
-    ).toEqual([])
   })
 
-  it('空态契约：query 为空仅剪贴板 json 可产出，无剪贴板恒空', () => {
+  it('空态契约：query 为空各源恒不产出（json 只来自 query 自身）', () => {
     expect(buildRecommendations({ query: '', manifests: [translate, jsonEditor] })).toEqual([])
-    const r = buildRecommendations({ query: '', manifests: [translate, jsonEditor], clipboardText: '{"a":1}' })
+    const r = buildRecommendations({ query: '{"a":1}', manifests: [jsonEditor] })
     expect(r).toHaveLength(1)
     expect(r[0]).toMatchObject({ pluginId: 'json-editor', source: 'json', payload: '{"a":1}' })
   })
@@ -406,25 +332,63 @@ describe('buildRecommendations', () => {
       expect(it.payload).toBeUndefined()
     }
   })
+})
 
-  it('敏感 clipboardText：不传入 matcherHits 且不产出 json 推荐', () => {
-    const secretClip = '{"password":"super-secret-123"}'
-    expect(isSensitiveText(secretClip)).toBe(true)
-    const r = buildRecommendations({
-      query: 'hello',
+describe('mergeQueryRecommendations（query 态推荐与常驻推送行合并）', () => {
+  const jsonEditor = manifest('json-editor', { name: 'JSON 编辑器', matchers: [{ type: 'json', label: '打开 JSON 编辑器' }] })
+  const push = (key: string): RecItem => ({
+    key,
+    pluginId: key.split(':')[0],
+    title: key,
+    subtitle: '',
+    icon: 'x',
+    source: 'push'
+  })
+
+  it('json 源置顶到推送行之前：纯 JSON 输入的第一条推荐必须是 json 编辑器', () => {
+    const recs = buildRecommendations({
+      query: '{\n  "a": 1,\n  "b": [2, 3]\n}',
       entries: [],
-      manifests: [jsonEditor],
-      clipboardText: secretClip
+      resultKeys: new Set(),
+      manifests: [jsonEditor]
     })
-    expect(r.filter((it) => it.source === 'json')).toHaveLength(0)
-    expect(
-      buildRecommendations({
-        query: '',
-        entries: [],
-        manifests: [jsonEditor],
-        clipboardText: secretClip
-      })
-    ).toEqual([])
+    const r = mergeQueryRecommendations([push('clipboard:r1'), push('clipboard:r2')], recs)
+    expect(r).toHaveLength(3)
+    expect(r[0]).toMatchObject({ pluginId: 'json-editor', commandId: undefined, source: 'json' })
+    expect(r[0].payload).toBe('{\n  "a": 1,\n  "b": [2, 3]\n}')
+    expect(r.slice(1).map((x) => x.source)).toEqual(['push', 'push'])
+  })
+
+  it('无 json 源时保持 推送行→其它推荐 原序；同 key 去重先到先得', () => {
+    const recs = buildRecommendations({
+      query: '翻译一下',
+      entries: [entry({ key: 'translate:_main', title: '聚合翻译', icon: '', pluginId: 'translate', keywords: ['翻译'] })],
+      resultKeys: new Set(),
+      manifests: [manifest('translate', { name: '聚合翻译', matchers: [{ type: 'text', label: '用聚合翻译翻译' }] })]
+    })
+    const r = mergeQueryRecommendations([push('clipboard:r1'), { ...recs[0] }], recs)
+    expect(r.map((x) => x.source)).toEqual(['push', 'keyword'])
+  })
+
+  it('与 dedupeRecs 语义一致：纯去重不重排', () => {
+    const items = [push('a:_main'), push('b:_main'), push('a:_main')]
+    expect(dedupeRecs(items)).toEqual([push('a:_main'), push('b:_main')])
+  })
+})
+
+describe('非 JSON 输入不产出 json 源推荐', () => {
+  const jsonEditor = manifest('json-editor', { matchers: [{ type: 'json', label: '打开 JSON 编辑器' }] })
+
+  it('普通词、URL、Windows 路径、算式、普通多行文本均不命中', () => {
+    const cases = ['hello world', 'https://example.com/a?b=1', 'C:\\Users\\foo\\bar.json', '1+2*3', '第一行\n第二行', 'resp: {"a":1}']
+    for (const q of cases) {
+      expect(looksLikeJson(q)).toBe(false)
+      expect(
+        buildRecommendations({ query: q, entries: [], resultKeys: new Set(), manifests: [jsonEditor] }).filter(
+          (x) => x.source === 'json'
+        )
+      ).toEqual([])
+    }
   })
 })
 
@@ -435,7 +399,7 @@ describe('剪贴板分析 memo（同文本零重算）', () => {
     const spy = vi.spyOn(JSON, 'parse')
     const clip = '{"order":"A-1001","items":[{"sku":"x","qty":2}]}'
     const run = (): number => {
-      buildRecommendations({ query: '', manifests: [jsonTool], clipboardText: clip })
+      buildRecommendations({ query: clip, manifests: [jsonTool] })
       return spy.mock.calls.length
     }
     const first = run()
@@ -449,9 +413,9 @@ describe('剪贴板分析 memo（同文本零重算）', () => {
     const plain = '{"note":"hello"}'
     const secret = '{"password":"super-secret-123"}'
     for (let i = 0; i < 3; i++) {
-      expect(buildRecommendations({ query: '', manifests: [jsonTool], clipboardText: plain })).toHaveLength(1)
+      expect(buildRecommendations({ query: plain, manifests: [jsonTool] })).toHaveLength(1)
       expect(
-        buildRecommendations({ query: '', manifests: [jsonTool], clipboardText: secret }).filter(
+        buildRecommendations({ query: secret, manifests: [jsonTool] }).filter(
           (it) => it.source === 'json'
         )
       ).toHaveLength(0)

@@ -3,11 +3,18 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi, type Mock } 
 // shortcut.ts 顶层的 globalShortcut 来自同一份 electron mock；failAccels 可按测试切换占用键
 const state = vi.hoisted(() => ({ failAccels: [] as string[] }))
 
+// 飞窗模块在 vi.mock('../src/main/window') 环境下本就 no-op（F15 契约）；此处改为可控 mock 以测四通道复合守卫与双投
+const flyout = vi.hoisted(() => ({
+  senderIds: new Set<number>(),
+  window: null as { webContents: { id: number; send: ReturnType<typeof vi.fn> } } | null
+}))
+
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
   dialog: { showSaveDialog: vi.fn(), showOpenDialog: vi.fn(), showMessageBox: vi.fn() },
   app: {
     getPath: vi.fn(() => 'C:\\tmp\\gtools-test'),
+    getVersion: vi.fn(() => '0.0.0-test'),
     isPackaged: true,
     getLoginItemSettings: vi.fn(() => ({ openAtLogin: false })),
     setLoginItemSettings: vi.fn()
@@ -22,6 +29,7 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../src/main/window', () => ({
+  allLiveWindows: vi.fn(() => []),
   applyHideOnBlur: vi.fn(),
   applyThemeToWindow: vi.fn(),
   getSearchWindow: vi.fn(() => null),
@@ -35,11 +43,25 @@ vi.mock('../src/main/window', () => ({
 vi.mock('../src/main/logo-skin', () => ({ applyAppLogoSkin: vi.fn(), logoIconPath: vi.fn(() => null) }))
 vi.mock('../src/main/tray', () => ({ createTray: vi.fn(), applyTraySkin: vi.fn(), destroyTray: vi.fn() }))
 
-import { app, globalShortcut, ipcMain } from 'electron'
+vi.mock('../src/main/clipboard-flyout-window', () => ({
+  isClipboardFlyoutSender: vi.fn((e: { sender: { id: number } }) => flyout.senderIds.has(e.sender.id)),
+  getClipboardFlyoutWindow: vi.fn(() => flyout.window),
+  setClipboardFlyoutPosition: vi.fn(),
+  reanchorClipboardFlyout: vi.fn(),
+  applyThemeToClipboardFlyout: vi.fn(),
+  createClipboardFlyoutWindow: vi.fn(() => null),
+  showClipboardFlyout: vi.fn(),
+  hideClipboardFlyout: vi.fn(),
+  closeClipboardFlyout: vi.fn()
+}))
+
+import { app, dialog as electronDialog, globalShortcut, ipcMain } from 'electron'
 import { setupIpc } from '../src/main/services/ipc'
 import { AppLog } from '../src/main/services/app-log'
 import { getSearchWindow } from '../src/main/window'
+import { setClipboardFlyoutPosition } from '../src/main/clipboard-flyout-window'
 import { SettingsStore, type FsLike } from '../src/main/settings-store'
+import { ClipboardHistoryService } from '../src/main/services/clipboard-history'
 import { registerHotkey, unregisterAllHotkeys, disarmHotkeyProbe } from '../src/main/shortcut'
 import type { AppSettings, CommandHotkey } from '@sdk/settings'
 
@@ -51,7 +73,7 @@ const hk = (pluginId: string, commandId: string, accel: string): CommandHotkey =
 
 const noopFs: FsLike = {
   readFile: vi.fn(async () => {
-    throw new Error('no file')
+    throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' })
   }),
   writeFile: vi.fn(async () => {}),
   rename: vi.fn(async () => {}),
@@ -82,7 +104,8 @@ function makeLoader() {
 /** 每 test 独立一套 store/loader，setupIpc 后从 ipcMain.handle 取 gtools:host 处理器 */
 async function boot(
   seed: Partial<AppSettings> = {},
-  pluginIds: string[] = []
+  pluginIds: string[] = [],
+  extra: { clipboardHistory?: unknown; background?: unknown; apiCenter?: unknown; appLog?: AppLog } = {}
 ): Promise<{ store: SettingsStore; host: Host; detached: { applyThemeToAll: Mock } }> {
   const store = new SettingsStore('C:\\tmp\\gtools-test', noopFs, 1)
   if (Object.keys(seed).length > 0) await store.update(seed)
@@ -97,7 +120,7 @@ async function boot(
     services: {
       window: { float: { closeAllForPlugin: vi.fn() } },
       storage: { dumpAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) },
-      app: { version: '0.0.0' },
+      app: { platform: 'win32', version: '0.0.0' },
       clipboard: { readText: vi.fn(async () => '') },
       // setupIpc 顶层构造 updater 会读 net.fetch（本文件不调 update:*，仅防 undefined）
       net: { fetch: vi.fn() }
@@ -105,7 +128,8 @@ async function boot(
     apiCenter: { config: {}, sanitized: () => ({}), replaceAll: vi.fn(async () => {}) },
     nativeApps: {},
     detached,
-    onHotkeyToggle: vi.fn()
+    onHotkeyToggle: vi.fn(),
+    ...extra
   } as unknown as Parameters<typeof setupIpc>[0])
   const call = (ipcMain.handle as unknown as Mock).mock.calls.find(([ch]) => ch === 'gtools:host')
   if (!call) throw new Error('gtools:host 未注册')
@@ -113,10 +137,14 @@ async function boot(
 }
 
 beforeEach(() => {
-  // clearAllMocks 只清调用记录不清实现：假窗 mockReturnValue 会跨用例泄漏，这里统一还原为 null
+  // clearAllMocks 只清调用记录不清实现：假窗 mockReturnValue 会跨用例泄漏，统一还原为 id=1 假窗
+  // （settings:set/plugins:set-enabled/api-services 加主窗 sender 守卫后，sender() 的 id 1 需默认匹配主窗；
+  // 拒绝路径用例用陌生 id 断言，不受默认假窗影响）
   vi.clearAllMocks()
-  vi.mocked(getSearchWindow).mockReturnValue(null)
+  withFakeWindow()
   state.failAccels = []
+  flyout.senderIds.clear()
+  flyout.window = null
 })
 
 // 本文件用例按 win32 主机行为建模（撞键/让位/回滚都发生在 hotkey.win32 侧，darwin 上 hotkeyPlatform 取另一份键必炸）；
@@ -198,6 +226,23 @@ describe('gtools:host settings:set', () => {
     expect(vi.mocked(globalShortcut.register).mock.calls.some(([accel]) => accel === 'Ctrl+Alt+Space')).toBe(true)
   })
 
+  it('F5: 登录项失败 catch 显式入 appLog：error/main 条目带版本号与错误信息', async () => {
+    const appLog = new AppLog()
+    const { host, store } = await boot({}, [], { appLog })
+    ;(app.setLoginItemSettings as unknown as Mock).mockImplementationOnce(() => {
+      throw new Error('registry denied')
+    })
+    const r = await host(sender(), { api: 'settings:set', payload: { launchAtLogin: true } })
+    expect(r.ok).toBe(false)
+    const hit = appLog.entries(0).items.find((e) => e.text.includes('开机启动设置失败'))
+    expect(hit).toBeDefined()
+    expect(hit).toMatchObject({ level: 'error', source: 'main' })
+    expect(hit?.text).toContain('v0.0.0-test')
+    expect(hit?.text).toContain('registry denied')
+    // 不落盘契约不回归：内存设置原样
+    expect(store.settings.launchAtLogin).toBe(false)
+  })
+
   it('F6: 禁用插件的指令热键不注册，skipped 计入 warnings', async () => {
     const { host } = await boot({
       hotkey: { darwin: 'Alt+Space', win32: 'Ctrl+Alt+Space' },
@@ -233,7 +278,7 @@ describe('gtools:host settings:set', () => {
     expect((r.data as AppSettings).outlineColor).toBe('custom')
     expect((r.data as AppSettings).outlineCustomColor).toBe('#aabbcc')
     expect(store.settings.outlineColor).toBe('custom')
-    expect(detached.applyThemeToAll).toHaveBeenCalledWith('light', { enabled: true, opacity: 55, blur: true }, {
+    expect(detached.applyThemeToAll).toHaveBeenCalledWith('light', { enabled: true, opacity: 55, blur: true, glassFrost: 45 }, {
       enabled: true,
       width: 3,
       color: 'custom',
@@ -425,5 +470,146 @@ describe.skipIf(process.platform !== 'win32')('gtools:host hotkey 录入探针�
     expect(regs[2].order).toBeGreaterThan(loginOrder)
     await host(sender(), { api: 'hotkey:resume' }) // 清 ipc 模块态：handler/suspendedState 不跨用例泄漏
     unregisterAllHotkeys()
+  })
+})
+
+// ---------- 题1/题3/题5：剪贴板四通道复合守卫、双投广播、background choose/clear 显式广播、api-services service 路由 ----------
+
+describe('gtools:host 剪贴板四通道复合守卫与双投（题1 R4/R5）', () => {
+  const makeHistory = (): ClipboardHistoryService =>
+    new ClipboardHistoryService({ readText: async () => '', writeText: async () => {} })
+
+  it('飞窗 sender 经复合守卫放行（非主窗 id 也 ok）', async () => {
+    flyout.senderIds.add(7)
+    const { host } = await boot({}, [], { clipboardHistory: makeHistory() })
+    const r = await host({ sender: { id: 7 } }, { api: 'clipboard-history:list' })
+    expect(r.ok).toBe(true)
+  })
+
+  it('陌生 id（既非主窗也非飞窗）仍拒', async () => {
+    const { host } = await boot({}, [], { clipboardHistory: makeHistory() })
+    for (const api of ['clipboard-history:list', 'clipboard-history:copy', 'clipboard-history:remove', 'clipboard-history:clear']) {
+      expect(await host({ sender: { id: 9 } }, { api, payload: { id: 'x' } }), api).toMatchObject({ ok: false })
+    }
+  })
+
+  it('变更双投：主窗 broadcast + 飞窗 webContents.send（载荷 null）', async () => {
+    const main = withFakeWindow()
+    flyout.window = { webContents: { id: 7, send: vi.fn() } }
+    const history = new ClipboardHistoryService({ readText: async () => 'a', writeText: async () => {} })
+    const { host } = await boot({}, [], { clipboardHistory: history })
+    void host
+    await history.pollOnce() // 采集触发 onChanged → 双投
+    expect(main.webContents.send).toHaveBeenCalledWith('clipboard-history-changed', null)
+    expect(flyout.window.webContents.send).toHaveBeenCalledWith('clipboard-history-changed', null)
+  })
+
+  it('settings:set clipboardPanel → setClipboardFlyoutPosition 同步（F6 语义入口）', async () => {
+    const { host } = await boot()
+    await host(sender(), { api: 'settings:set', payload: { clipboardPanel: { position: 'below' } } })
+    expect(vi.mocked(setClipboardFlyoutPosition)).toHaveBeenCalledWith('below')
+    await host(sender(), { api: 'settings:set', payload: { clipboardPanel: { position: 'off' } } })
+    expect(vi.mocked(setClipboardFlyoutPosition)).toHaveBeenCalledWith('off')
+  })
+})
+
+describe('gtools:host background:choose/clear/get（题5 F3）', () => {
+  const fakeBackground = (): { chooseAndStore: Mock; resolveDataUrl: Mock; clear: Mock } => ({
+    chooseAndStore: vi.fn(async () => 'current.jpg'),
+    resolveDataUrl: vi.fn(async () => 'data:image/jpeg;base64,zzz'),
+    clear: vi.fn(async () => {})
+  })
+
+  it('choose 成功：chooseAndStore → update → 显式广播 settings-changed（F3）', async () => {
+    const main = withFakeWindow()
+    const bg = fakeBackground()
+    const { host, store } = await boot({}, [], { background: bg })
+    ;(electronDialog.showOpenDialog as unknown as Mock).mockResolvedValueOnce({ canceled: false, filePaths: ['/pic/a.png'] })
+    const r = await host(sender(), { api: 'background:choose' })
+    expect(r).toEqual({ ok: true, data: { file: 'current.jpg' } })
+    expect(bg.chooseAndStore).toHaveBeenCalledWith('/pic/a.png')
+    expect(store.settings.background).toEqual({ enabled: true, file: 'current.jpg', dim: 40 })
+    const sent = (main.webContents.send as Mock).mock.calls.find(([ch]) => ch === 'settings-changed')
+    expect((sent?.[1] as AppSettings).background).toEqual({ enabled: true, file: 'current.jpg', dim: 40 })
+  })
+
+  it('choose 取消：data:null 不改设置不广播', async () => {
+    const main = withFakeWindow()
+    const bg = fakeBackground()
+    const { host, store } = await boot({}, [], { background: bg })
+    ;(electronDialog.showOpenDialog as unknown as Mock).mockResolvedValueOnce({ canceled: true, filePaths: [] })
+    expect(await host(sender(), { api: 'background:choose' })).toEqual({ ok: true, data: null })
+    expect(bg.chooseAndStore).not.toHaveBeenCalled()
+    expect(store.settings.background.enabled).toBe(false)
+    expect((main.webContents.send as Mock).mock.calls.some(([ch]) => ch === 'settings-changed')).toBe(false)
+  })
+
+  it('clear：删文件 + 设置回退 + 广播；get 返回 dataUrl/file/dim', async () => {
+    const main = withFakeWindow()
+    const bg = fakeBackground()
+    const { host, store } = await boot({ background: { enabled: true, file: 'current.jpg', dim: 60 } }, [], { background: bg })
+    expect(await host(sender(), { api: 'background:clear' })).toEqual({ ok: true, data: null })
+    expect(bg.clear).toHaveBeenCalled()
+    expect(store.settings.background).toEqual({ enabled: false, file: '', dim: 60 })
+    expect((main.webContents.send as Mock).mock.calls.some(([ch]) => ch === 'settings-changed')).toBe(true)
+    const g = await host(sender(), { api: 'background:get' })
+    expect(g).toEqual({ ok: true, data: { dataUrl: null, file: '', dim: 60 } })
+  })
+
+  it('坏图 throw → ok:false 且零副作用（settings 不动）', async () => {
+    withFakeWindow()
+    const bg = fakeBackground()
+    bg.chooseAndStore.mockRejectedValueOnce(new Error('无法读取所选图片'))
+    const { host, store } = await boot({}, [], { background: bg })
+    ;(electronDialog.showOpenDialog as unknown as Mock).mockResolvedValueOnce({ canceled: false, filePaths: ['/pic/bad.png'] })
+    const r = await host(sender(), { api: 'background:choose' })
+    expect(r.ok).toBe(false)
+    expect(r.error).toContain('无法读取所选图片')
+    expect(store.settings.background.enabled).toBe(false)
+  })
+
+  it('背景服务缺位（旧 harness）→ ok:false', async () => {
+    const { host } = await boot()
+    for (const api of ['background:choose', 'background:clear', 'background:get']) {
+      expect(await host(sender(), { api }), api).toMatchObject({ ok: false })
+    }
+  })
+})
+
+describe('gtools:host api-services 通道 service 路由（题3，缺省 translate）', () => {
+  it('载荷 service=ai 透传到对应品类；坏值/缺省回 translate', async () => {
+    const apiCenter = {
+      config: {},
+      sanitized: () => ({}),
+      replaceAll: vi.fn(async () => {}),
+      upsertProvider: vi.fn(async () => ({})),
+      removeProvider: vi.fn(async () => ({})),
+      setActive: vi.fn(async () => ({})),
+      testProvider: vi.fn(async () => ({}))
+    }
+    const { host } = await boot({}, [], { apiCenter })
+    await host(sender(), { api: 'api-services:upsert-provider', payload: { type: 'ai-chat', name: 'GLM', service: 'ai' } })
+    expect(apiCenter.upsertProvider).toHaveBeenCalledWith(expect.objectContaining({ type: 'ai-chat' }), 'ai')
+    await host(sender(), { api: 'api-services:upsert-provider', payload: { type: 'http-template', name: 'DeepL' } })
+    expect(apiCenter.upsertProvider).toHaveBeenLastCalledWith(expect.objectContaining({ name: 'DeepL' }), 'translate')
+    await host(sender(), { api: 'api-services:remove-provider', payload: { id: 'a', service: 'ai' } })
+    expect(apiCenter.removeProvider).toHaveBeenCalledWith('a', 'ai')
+    await host(sender(), { api: 'api-services:set-active', payload: { id: 'b', service: 'ai' } })
+    expect(apiCenter.setActive).toHaveBeenCalledWith('b', 'ai')
+    await host(sender(), { api: 'api-services:test', payload: { id: 'c', service: 'ai' } })
+    expect(apiCenter.testProvider).toHaveBeenCalledWith('c', undefined, 'ai')
+    await host(sender(), { api: 'api-services:set-active', payload: { id: 'b', service: 'weird' } })
+    expect(apiCenter.setActive).toHaveBeenLastCalledWith('b', 'translate')
+  })
+})
+
+describe('gtools:host app:init', () => {
+  it('载荷带 platform/version 真值（渲染层真值单一源的数据面）', async () => {
+    const { host } = await boot()
+    const r = await host(sender(), { api: 'app:init' })
+    expect(r.ok).toBe(true)
+    const d = r.data as { version: string; platform: string }
+    expect(d.version).toBe('0.0.0-test')
+    expect(d.platform).toBe('win32')
   })
 })

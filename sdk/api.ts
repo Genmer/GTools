@@ -141,7 +141,7 @@ export interface ScreenshotResult {
 }
 
 /** 全局 API 中心的服务品类（封闭枚举：扩服务 = 协议发版时在此加一行） */
-export type ApiServiceId = 'translate'
+export type ApiServiceId = 'translate' | 'ai'
 
 export interface TranslateRequest {
   text: string
@@ -167,6 +167,18 @@ export interface TranslateResult {
   fallback?: TranslateFallbackInfo
 }
 
+/** AI 对话请求（OpenAI 兼容 /chat/completions；ai-translator 等插件经宿主代理调用） */
+export interface AiChatRequest {
+  text: string
+  /** 指定 provider；省略或空串 = 走全局 activeProvider（ai 品类无内置免 Key 默认） */
+  providerId?: string
+}
+
+export interface AiChatResult {
+  resultText: string
+  providerId: string
+}
+
 /** status 附带的 provider 概要（插件引擎 tab 数据源）；密钥等凭证永不出现 */
 export interface ApiProviderSummary {
   id: string
@@ -176,9 +188,9 @@ export interface ApiProviderSummary {
 
 export interface ApiServiceStatus {
   service: ApiServiceId
-  /** false = 未配置任何 provider，宿主回退内置默认（翻译 = MyMemory 免 key） */
+  /** false = 未配置任何 provider；翻译回退内置默认（MyMemory 免 key），ai 无内置默认、false 即 SERVICE_UNCONFIGURED */
   configured: boolean
-  /** '' = 内置默认 */
+  /** '' = 内置默认（ai 品类 '' = 未配置） */
   activeProviderId: string
   activeProviderName: string
   /** 全部已配置 provider（含禁用，插件自行过滤 enabled 渲染引擎 tab） */
@@ -207,6 +219,10 @@ export interface HostApi {
   clipboard: {
     readText(): Promise<string>
     writeText(t: string): Promise<void>
+    /** 写剪贴板并登记敏感指纹豁免：TTL 内宿主采集器不采集该文本（vault 密码/用户名专用出口） */
+    writeTextEphemeral(t: string, opts?: { ttlMs?: number }): Promise<void>
+    /** 该文本是否在豁免有效期内（宿主自己写入的敏感内容）；采集器出口前查询 */
+    isTextExempted(t: string): Promise<boolean>
     readImage(): Promise<{ width: number; height: number; dataUrl: string } | null>
     writeImage(dataUrl: string): Promise<void>
   }
@@ -259,10 +275,11 @@ export interface HostApi {
     list(dir: string, opts?: FsListOptions): Promise<FsEntry[]>
     mkdir(path: string): Promise<void>
   }
-  app: { platform: string; version: string }
+  app: { readonly platform: string; readonly version: string }
   /** 全局 API 中心：主进程代理调用（密钥不下发渲染层），见 DESIGN 附录 B */
   apis: {
-    invoke(service: ApiServiceId, payload: TranslateRequest): Promise<TranslateResult>
+    invoke(service: 'translate', payload: TranslateRequest): Promise<TranslateResult>
+    invoke(service: 'ai', payload: AiChatRequest): Promise<AiChatResult>
     status(service: ApiServiceId): Promise<ApiServiceStatus>
   }
   events: { on(event: string, cb: (p: unknown) => void): () => void }
@@ -300,7 +317,9 @@ export interface PluginBackend {
 export const API_PERMISSIONS: Readonly<Record<string, Permission | undefined>> = {
   'clipboard.readText': 'clipboard:read',
   'clipboard.readImage': 'clipboard:read',
+  'clipboard.isTextExempted': 'clipboard:read',
   'clipboard.writeText': 'clipboard:write',
+  'clipboard.writeTextEphemeral': 'clipboard:write',
   'clipboard.writeImage': 'clipboard:write',
   'storage.get': 'storage',
   'storage.set': 'storage',
@@ -331,6 +350,8 @@ export const API_PERMISSIONS: Readonly<Record<string, Permission | undefined>> =
   'fs.mkdir': 'fs',
   'apis.translate': 'apis:translate',
   'apis.translate.status': 'apis:translate',
+  'apis.ai': 'apis:ai',
+  'apis.ai.status': 'apis:ai',
   'app.platform': undefined,
   'app.version': undefined
 }
@@ -347,6 +368,10 @@ export type ApiCallError =
   | 'SERVICE_UNCONFIGURED'
   /** API 中心：provider 执行失败（message 前缀分类 timeout/network/http/quota/auth/parse/config，auth=凭证无效或未授权） */
   | 'SERVICE_ERROR'
+  /** IPC sender 绑定：调用方不是插件视图宿主窗（主窗/独立窗） */
+  | 'FORBIDDEN_SENDER'
+  /** IPC sender 绑定：独立窗与所报 pluginId 不一致 */
+  | 'PLUGIN_MISMATCH'
 
 /** host-client / backend ctx 抛出的调用错误：code 保留 IPC 错误码（插件可据此区分 SERVICE_*） */
 export class HostApiError extends Error {

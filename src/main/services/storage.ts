@@ -7,6 +7,9 @@ function corruptStamp(now = new Date()): string {
   return `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
 }
 
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY'])
+const RENAME_RETRY_DELAYS_MS = [50, 100]
+
 /**
  * 插件 KV 存储：userData/storage/<pluginId>/kv.json，物理目录按插件隔离。
  * 内存缓存首读建立（get/keys 免盘读）；per-plugin 写操作经 Promise 链串行（读-改-写互不覆盖）；
@@ -43,7 +46,10 @@ export class PluginStorageService {
     let raw: string
     try {
       raw = await readFile(file, { encoding: 'utf-8' })
-    } catch {
+    } catch (err) {
+      // 仅 ENOENT 视为无数据；其余（杀软/备份软件瞬时锁文件的 EBUSY/EACCES）上抛且不进缓存——
+      // 空态一旦被缓存，后续 set 会以空底整文件覆盖，静默清掉该插件全部数据
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
       const empty: Record<string, unknown> = {}
       this.cache.set(pluginId, empty)
       return empty // 文件不存在按空数据
@@ -73,7 +79,19 @@ export class PluginStorageService {
     await mkdir(dir, { recursive: true })
     const tmp = join(dir, 'kv.json.tmp')
     await writeFile(tmp, JSON.stringify(data), { encoding: 'utf-8' })
-    await rename(tmp, this.fileFor(pluginId))
+    const target = this.fileFor(pluginId)
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await rename(tmp, target)
+        return
+      } catch (err) {
+        // 目标文件被杀软/备份软件瞬时锁住时 rename 报 EPERM/EACCES/EBUSY（win32 常见，darwin 空转无害）：
+        // 50/100ms 退避共三试，仍失败按原错误上抛；重试发生在写队列 op 内，串行语义不变
+        const code = (err as NodeJS.ErrnoException).code
+        if (attempt >= RENAME_RETRY_DELAYS_MS.length || code === undefined || !RENAME_RETRY_CODES.has(code)) throw err
+        await new Promise((r) => setTimeout(r, RENAME_RETRY_DELAYS_MS[attempt]))
+      }
+    }
   }
 
   /** 同插件写操作排队执行，读-改-写不并发互踩 */
@@ -120,8 +138,13 @@ export class PluginStorageService {
     }
     for (const ent of dirs) {
       if (!ent.isDirectory()) continue
-      const kv = await this.readAll(ent.name)
-      if (Object.keys(kv).length > 0) out[ent.name] = kv
+      try {
+        const kv = await this.readAll(ent.name)
+        if (Object.keys(kv).length > 0) out[ent.name] = kv
+      } catch (err) {
+        // 单插件读失败只跳过该插件留痕，不炸整包备份（readAll 只对非 ENOENT 抛错）
+        console.warn(`GTools 备份跳过插件存储（${ent.name}）：${err instanceof Error ? err.message : String(err)}`)
+      }
     }
     return out
   }

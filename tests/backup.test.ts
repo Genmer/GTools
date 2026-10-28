@@ -53,7 +53,8 @@ describe('backup 序列化与文件名', () => {
           translate: {
             activeProviderId: 'u-abcd1234',
             providers: [{ id: 'u-abcd1234', type: 'http-template', name: 'DeepL', enabled: true, endpoint: 'https://x/?key={key}', secrets: { apiKey: 'sk-1' }, method: 'GET' }]
-          }
+          },
+          ai: { activeProviderId: '', providers: [] }
         }
       }
     })
@@ -161,21 +162,29 @@ describe('parseBackup 导入校验', () => {
     if (!r.ok) expect(r.error).toContain('更高版本')
   })
 
-  it('缺 settings / pluginStorage 拒绝；pluginStorage 内非对象条目跳过并告警', () => {
+  it('缺 settings / pluginStorage 拒绝；段内坏结构带段名报错', () => {
     expect(
       parseBackup(wrap({ format: 'gtools-backup', version: 1, pluginStorage: {} }), { knownPluginIds: known })
     ).toMatchObject({ ok: false })
     expect(
       parseBackup(wrap({ format: 'gtools-backup', version: 1, settings: {} }), { knownPluginIds: known })
     ).toMatchObject({ ok: false })
-    const r = parseBackup(
+    // settings 段为数组等非对象形态：拒绝且错误信息带段名
+    const badSettings = parseBackup(
+      wrap({ format: 'gtools-backup', version: 1, settings: [1], pluginStorage: {} }),
+      { knownPluginIds: known }
+    )
+    expect(badSettings.ok).toBe(false)
+    if (!badSettings.ok) expect(badSettings.error).toContain('settings')
+
+    const badKv = parseBackup(
       wrap({ format: 'gtools-backup', version: 1, settings: {}, pluginStorage: { clipboard: [1, 2] } }),
       { knownPluginIds: known }
     )
-    expect(r.ok).toBe(true)
-    if (r.ok) {
-      expect(r.backup.pluginStorage).toEqual({})
-      expect(r.warnings.join()).toContain('clipboard')
+    expect(badKv.ok).toBe(false)
+    if (!badKv.ok) {
+      expect(badKv.error).toContain('pluginStorage')
+      expect(badKv.error).toContain('clipboard')
     }
   })
 
@@ -197,7 +206,7 @@ describe('parseBackup 导入校验', () => {
     }
   })
 
-  it('v2 备份的 apiServices 段原样透传（sanitize 由 api-center.replaceAll 兜底）；结构异常丢弃并告警', () => {
+  it('v2 备份的 apiServices 段原样透传（sanitize 由 api-center.replaceAll 兜底）；坏段带段名拒绝', () => {
     const good = parseBackup(
       wrap({
         format: 'gtools-backup',
@@ -211,15 +220,39 @@ describe('parseBackup 导入校验', () => {
     expect(good.ok).toBe(true)
     if (good.ok) expect(good.backup.apiServices?.services.translate.activeProviderId).toBe('x')
 
+    // 段整体非对象 / providers 非数组 / 元素缺 id/type：一律拒绝（防 replaceAll 覆盖后静默清掉本机配置）
     const bad = parseBackup(
       wrap({ format: 'gtools-backup', version: 2, settings: {}, pluginStorage: {}, apiServices: 'oops' }),
       { knownPluginIds: known }
     )
-    expect(bad.ok).toBe(true)
-    if (bad.ok) {
-      expect(bad.backup.apiServices).toBeUndefined()
-      expect(bad.warnings.join()).toContain('API 服务')
-    }
+    expect(bad.ok).toBe(false)
+    if (!bad.ok) expect(bad.error).toContain('apiServices')
+
+    const badProviders = parseBackup(
+      wrap({
+        format: 'gtools-backup',
+        version: 2,
+        settings: {},
+        pluginStorage: {},
+        apiServices: { services: { translate: { activeProviderId: 'x', providers: 'nope' } } }
+      }),
+      { knownPluginIds: known }
+    )
+    expect(badProviders.ok).toBe(false)
+    if (!badProviders.ok) expect(badProviders.error).toContain('providers')
+
+    const badItem = parseBackup(
+      wrap({
+        format: 'gtools-backup',
+        version: 2,
+        settings: {},
+        pluginStorage: {},
+        apiServices: { services: { ai: { activeProviderId: 'z', providers: [{ id: 'z', name: 'n' }] } } }
+      }),
+      { knownPluginIds: known }
+    )
+    expect(badItem.ok).toBe(false)
+    if (!badItem.ok) expect(badItem.error).toContain('id/type')
   })
 })
 
@@ -246,7 +279,8 @@ describe('stringifyBackupChunked 分块序列化（黄金值 = 整体 JSON.strin
                 providers: [
                   { id: 'u-1', type: 'http-template', name: 'DeepL', enabled: true, endpoint: 'https://x/?key={key}', secrets: { apiKey: 'sk-1' }, method: 'GET' }
                 ]
-              }
+              },
+              ai: { activeProviderId: '', providers: [] }
             }
           }
         : undefined

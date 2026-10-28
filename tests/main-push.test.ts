@@ -71,7 +71,7 @@ describe('mergePushedItems', () => {
 })
 
 describe('pushedItemsToRecItems', () => {
-  it('映射为 source push 的 RecItem：key/label=title/payload 透传', () => {
+  it('映射为 source push 的 RecItem：key/title/payload 透传', () => {
     const [rec] = pushedItemsToRecItems([item({ pluginId: 'clip', commandId: 'c1', title: '剪贴板', subtitle: '子题', icon: '📋', payloadText: 'text' })])
     expect(rec).toMatchObject({
       key: 'clip:c1',
@@ -79,7 +79,6 @@ describe('pushedItemsToRecItems', () => {
       commandId: 'c1',
       title: '剪贴板',
       subtitle: '子题',
-      label: '剪贴板',
       icon: '📋',
       payload: 'text',
       source: 'push'
@@ -165,5 +164,36 @@ describe('normalizePushedItem', () => {
     ).toEqual({ pluginId: 'clip', commandId: undefined, pushId: undefined, title: '剪贴板', subtitle: '', icon: '📋', payloadText: undefined })
     expect(normalizePushedItem('oops', 'clip', { name: 'n', icon: 'i' })).toBeNull()
     expect(normalizePushedItem(null, 'clip', { name: 'n', icon: 'i' })).toBeNull()
+  })
+
+  it('payloadText 敏感兜底：Bearer/厂商裸 token 命中即剥离（title/subtitle 不动，行只留图标+名称）', () => {
+    const fb = { name: '推送方', icon: '📮' }
+    for (const leak of [
+      'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abc123def456ghi789',
+      'ghp_' + 'a'.repeat(36),
+      '{"password": "hunter2"}'
+    ]) {
+      const it = normalizePushedItem({ title: '行名', subtitle: '', payloadText: leak }, 'pusher', fb)
+      expect(it?.payloadText).toBeUndefined()
+      expect(it?.title).toBe('行名')
+      expect(it?.subtitle).toBe('')
+    }
+  })
+
+  it('payloadText 正常文本不受敏感兜底影响', () => {
+    const it = normalizePushedItem({ payloadText: '普通推送内容 https://example.com/a?x=1' }, 'pusher', { name: 'n', icon: 'i' })
+    expect(it?.payloadText).toBe('普通推送内容 https://example.com/a?x=1')
+  })
+
+  it('payloadText 误杀面反例：普通 JSON / 含「密码」字样的中文长句 / 纯 URL 路径形态均不剥离', () => {
+    const fb = { name: '推送方', icon: '📮' }
+    const normals = [
+      '{"name":"项目周会","items":["评审","发布"],"ok":true,"count":3}', // 普通 JSON：无凭证键
+      '本周纪要：密码学基础分享推迟到下周三，与会人请提前阅读第三章，会后同步纪要到群文件，逾期未反馈视为已读。',
+      'https://example.com/docs/getting-started#section-2'
+    ]
+    for (const text of normals) {
+      expect(normalizePushedItem({ title: '行名', payloadText: text }, 'pusher', fb)?.payloadText).toBe(text)
+    }
   })
 })

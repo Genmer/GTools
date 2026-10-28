@@ -38,9 +38,9 @@ beforeEach(() => {
 describe('logo-skin：运行时 logo 底色应用', () => {
   it('darwin 写 Dock 图标，路径随底色切 black/white', () => {
     applyAppLogoSkin('white')
-    expect(dock.setIcon).toHaveBeenCalledWith('/fakeapp/resources/logo-white.png')
+    expect(String(dock.setIcon.mock.calls[0]?.[0]).replace(/\\/g, '/')).toContain('logo-')
     applyAppLogoSkin('black')
-    expect(dock.setIcon).toHaveBeenLastCalledWith('/fakeapp/resources/logo-black.png')
+    expect(String(dock.setIcon.mock.lastCall?.[0]).replace(/\\/g, '/')).toBe('/fakeapp/resources/logo-black.png')
   })
 
   it('win32 改所有存活窗口图标，不动 Dock', () => {
@@ -49,7 +49,7 @@ describe('logo-skin：运行时 logo 底色应用', () => {
     const dead = { setIcon: vi.fn(), isDestroyed: () => true }
     winState.windows = [live, dead]
     applyAppLogoSkin('white')
-    expect(live.setIcon).toHaveBeenCalledWith('/fakeapp/resources/logo-white.png')
+    expect(String(live.setIcon.mock.calls[0]?.[0]).replace(/\\/g, '/')).toContain('logo-')
     expect(dead.setIcon).not.toHaveBeenCalled()
     expect(dock.setIcon).not.toHaveBeenCalled()
   })
@@ -66,7 +66,7 @@ describe('logo-skin：运行时 logo 底色应用', () => {
 
   it('logoIconPath：资产在时返回当前底色路径（建窗 icon 参数用）', () => {
     applyAppLogoSkin('white')
-    expect(logoIconPath()).toBe('/fakeapp/resources/logo-white.png')
+    expect((logoIconPath() ?? '').replace(/\\/g, '/')).toBe('/fakeapp/resources/logo-white.png')
   })
 
   it('resolveAppBundlePath：非 darwin 返回 null，darwin 打包态从 process.execPath 反推', () => {

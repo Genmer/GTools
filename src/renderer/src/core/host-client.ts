@@ -1,5 +1,8 @@
 import type { HostApi } from '@sdk/api'
 import { HOST_BROADCAST_EVENTS, HostApiError } from '@sdk/api'
+import { readonly } from 'vue'
+import { appInfo } from './app-info'
+import { deepToPlain } from './deep-to-plain'
 import { setSubInputValue, subInputBlur, subInputFocus, subInputSelect, type SubInputApi } from './subinput'
 
 /**
@@ -8,27 +11,19 @@ import { setSubInputValue, subInputBlur, subInputFocus, subInputSelect, type Sub
  */
 export function createHostClient(pluginId: string): HostApi & { subInput: SubInputApi } {
   const call = async <T>(api: string, ...args: unknown[]): Promise<T> => {
-    const r = await window.gtools.invoke(pluginId, api, args)
+    // reactive 代理过 contextBridge 即抛 "could not be cloned"：十余插件 storage.set 直传 .value 代理曾致持久化静默全灭
+    const r = await window.gtools.invoke(pluginId, api, args.map(deepToPlain))
     if (!r.ok) throw new HostApiError(r.error ?? 'BAD_REQUEST', r.message || r.error || `api 调用失败：${api}`)
     return r.data as T
   }
-  // app.platform/version 经 IPC 取主进程真实值（navigator.platform 已废弃且 Win32 大小写不符契约），
-  // 到达前为空串；IPC 失败时按 UA 猜测兜底
-  const appInfo: { platform: string; version: string } = { platform: '', version: '' }
-  void Promise.all([call<string>('app.platform'), call<string>('app.version')])
-    .then(([platform, version]) => {
-      appInfo.platform = platform
-      appInfo.version = version
-    })
-    .catch(() => {
-      const ua = navigator.userAgent
-      appInfo.platform = ua.includes('Windows') ? 'win32' : ua.includes('Mac') ? 'darwin' : ua.includes('Linux') ? 'linux' : 'unknown'
-    })
+  // app.platform/version 共享 core/app-info 单例：app:init 真值回填前是 UA 占位（主窗 app:init 早于任何插件挂载）
   return {
     apiVersion: 1,
     clipboard: {
       readText: () => call('clipboard.readText'),
       writeText: (t) => call('clipboard.writeText', t),
+      writeTextEphemeral: (t, opts) => call('clipboard.writeTextEphemeral', t, opts),
+      isTextExempted: (t) => call<boolean>('clipboard.isTextExempted', t),
       readImage: () => call('clipboard.readImage'),
       writeImage: (d) => call('clipboard.writeImage', d)
     },
@@ -73,7 +68,8 @@ export function createHostClient(pluginId: string): HostApi & { subInput: SubInp
       list: (dir, opts) => call('fs.list', dir, opts),
       mkdir: (path) => call('fs.mkdir', path)
     },
-    app: appInfo,
+    // readonly 包装：单例被全部插件与壳层共享，插件侧写入须被类型与运行时双双拦下
+    app: readonly(appInfo),
     // 主输入框操纵：纯本地状态（core/subinput），不经 IPC、不走 call()
     subInput: {
       setValue: (v) => {

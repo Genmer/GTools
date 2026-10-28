@@ -1,12 +1,24 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { PluginManifest } from '@sdk/manifest'
-import type { AppSettings, CommandHotkey, OutlineColor, ThemeName, TransparencySettings } from '@sdk/settings'
+import type {
+  AppSettings,
+  BackgroundSettings,
+  ClipboardPanelPosition,
+  CommandHotkey,
+  OutlineColor,
+  ThemeName,
+  TransparencySettings
+} from '@sdk/settings'
 import { OUTLINE_CUSTOM_COLOR_DEFAULT } from '@sdk/settings'
 import { validateAccelerator } from '@sdk/shortcut-rules'
+import { appInfo } from '../core/app-info'
+import { host } from '../core/host-bridge'
 import type { HostInitResult } from '../env'
 import AboutSection from './AboutSection.vue'
+import AiServicesSection from './AiServicesSection.vue'
 import ApiServicesSection from './ApiServicesSection.vue'
+import BackgroundPreview from './BackgroundPreview.vue'
 import HotkeyRecorder from './HotkeyRecorder.vue'
 import { warningsOf } from './settings-warnings'
 
@@ -45,7 +57,8 @@ watch(sectionId, (v) => {
   }
 })
 
-const platform = computed(() => (navigator.userAgent.includes('Mac') ? 'darwin' : 'win32'))
+// 快捷键设置域只有双平台槽（与主进程 hotkeyPlatform 同映射：darwin 之外一律 win32）
+const platform = computed<'darwin' | 'win32'>(() => (appInfo.platform === 'darwin' ? 'darwin' : 'win32'))
 const currentHotkey = computed(() => props.settings?.hotkey[platform.value] ?? '')
 const themes: { id: ThemeName; label: string }[] = [
   { id: 'light', label: '白色' },
@@ -53,23 +66,85 @@ const themes: { id: ThemeName; label: string }[] = [
   { id: 'glass', label: '玻璃' }
 ]
 
+const panelPositions: { id: ClipboardPanelPosition; label: string }[] = [
+  { id: 'off', label: '关闭' },
+  { id: 'left', label: '窗口左侧' },
+  { id: 'right', label: '窗口右侧' },
+  { id: 'below', label: '输入框下方' }
+]
+
+async function setClipboardPanel(position: ClipboardPanelPosition): Promise<void> {
+  const r = await host('settings:set', { clipboardPanel: { position } })
+  if (!r.ok) opError.value = r.error ?? '保存失败'
+}
+
 async function setTheme(theme: ThemeName): Promise<void> {
-  const r = await window.gtools.host('settings:set', { theme })
+  const r = await host('settings:set', { theme })
   if (!r.ok) opError.value = r.error ?? '保存失败'
 }
 
 async function setTransparency(patch: Partial<TransparencySettings>): Promise<void> {
-  const r = await window.gtools.host('settings:set', { transparency: patch })
+  const r = await host('settings:set', { transparency: patch })
   if (!r.ok) opError.value = r.error ?? '保存失败'
 }
 
+// 生效矩阵：磨砂度仅 darwin glass+blur-on 真实可调（.app backdrop-filter 采样）；win32 blur-on 走
+// DWM 亚克力、无强度参数（window.ts setBackgroundMaterial），滑杆置灰交系统决定；非玻璃主题无消费点
+const frostDisabled = computed(() => {
+  if (props.settings?.theme !== 'glass') return true
+  if (!(props.settings?.transparency?.blur ?? true)) return true
+  return platform.value === 'win32'
+})
+const frostDesc = computed(() => {
+  if (props.settings?.theme !== 'glass') return '仅玻璃主题消费磨砂度'
+  if (!(props.settings?.transparency?.blur ?? true)) return '清透档无模糊'
+  return platform.value === 'win32' ? 'Windows 桌面霜面强度由系统决定' : '玻璃材质的霜面模糊强度'
+})
+
+// ---- 自定义背景 ----
+const bgImage = ref<string | null>(null)
+const bgBusy = ref(false)
+
+async function refreshBackground(): Promise<void> {
+  const r = await host('background:get')
+  if (r.ok) bgImage.value = (r.data as { dataUrl: string | null } | null)?.dataUrl ?? null
+}
+
+// 选图/清除由主进程广播 settings-changed 回流 props，按 file/enabled 变化重拉 dataUrl
+watch(
+  () => `${props.settings?.background?.file ?? ''}:${props.settings?.background?.enabled ?? false}`,
+  () => void refreshBackground(),
+  { immediate: true }
+)
+
+async function setBackground(patch: Partial<BackgroundSettings>): Promise<void> {
+  const r = await host('settings:set', { background: patch })
+  if (!r.ok) opError.value = r.error ?? '保存失败'
+}
+
+async function chooseBackground(): Promise<void> {
+  if (bgBusy.value) return
+  bgBusy.value = true
+  try {
+    const r = await host('background:choose')
+    if (!r.ok) opError.value = r.error ?? '选图失败'
+  } finally {
+    bgBusy.value = false
+  }
+}
+
+async function clearBackground(): Promise<void> {
+  const r = await host('background:clear')
+  if (!r.ok) opError.value = r.error ?? '清除失败'
+}
+
 async function setLaunchAtLogin(enabled: boolean): Promise<void> {
-  const r = await window.gtools.host('settings:set', { launchAtLogin: enabled })
+  const r = await host('settings:set', { launchAtLogin: enabled })
   if (!r.ok) opError.value = r.error ?? '保存失败'
 }
 
 async function setBehavior(field: 'clipboardSuggest' | 'hideOnBlur' | 'outlineEnabled', enabled: boolean): Promise<void> {
-  const r = await window.gtools.host('settings:set', { [field]: enabled })
+  const r = await host('settings:set', { [field]: enabled })
   if (!r.ok) opError.value = r.error ?? '保存失败'
 }
 
@@ -90,7 +165,7 @@ async function setOutline(patch: {
   outlineCustomColor?: string
   outlineFlowSpeed?: number
 }): Promise<void> {
-  const r = await window.gtools.host('settings:set', patch)
+  const r = await host('settings:set', patch)
   if (!r.ok) opError.value = r.error ?? '保存失败'
 }
 
@@ -113,7 +188,7 @@ const externalDetected = ref<{ id: string; name: string }[]>([])
 const appVersion = ref('')
 
 onMounted(async () => {
-  const r = await window.gtools.host('app:init')
+  const r = await host('app:init')
   if (!r.ok) return
   const d = r.data as HostInitResult
   appVersion.value = d.version
@@ -126,7 +201,7 @@ const commandHotkeyWarnings = ref<string[]>([])
 
 async function saveGlobalHotkey(accel: string): Promise<string | null> {
   globalHotkeyWarnings.value = []
-  const r = await window.gtools.host('settings:set', { hotkey: { [platform.value]: accel } })
+  const r = await host('settings:set', { hotkey: { [platform.value]: accel } })
   if (!r.ok) return r.error ?? '注册失败'
   globalHotkeyWarnings.value = warningsOf(r)
   return null
@@ -189,7 +264,7 @@ async function saveCommandHotkey(accel: string): Promise<string | null> {
     return `组合 ${accel} 无法构成双平台合法绑定，请换一个快捷键`
   }
   const list = [...prev.filter((h) => h.pluginId !== item.pluginId || h.commandId !== item.commandId), item]
-  const r = await window.gtools.host('settings:set', { commandHotkeys: list })
+  const r = await host('settings:set', { commandHotkeys: list })
   if (!r.ok) return r.error ?? '保存失败'
   commandHotkeyWarnings.value = warningsOf(r)
   return null
@@ -199,14 +274,14 @@ async function removeCommandHotkey(h: CommandHotkey): Promise<void> {
   const list = (props.settings?.commandHotkeys ?? []).filter(
     (x) => x.pluginId !== h.pluginId || x.commandId !== h.commandId
   )
-  const r = await window.gtools.host('settings:set', { commandHotkeys: list })
+  const r = await host('settings:set', { commandHotkeys: list })
   if (!r.ok) opError.value = r.error ?? '操作失败'
   else commandHotkeyWarnings.value = warningsOf(r)
 }
 
 // ---- 插件分区 ----
 async function togglePlugin(id: string, enabled: boolean): Promise<void> {
-  const r = await window.gtools.host('plugins:set-enabled', { id, enabled })
+  const r = await host('plugins:set-enabled', { id, enabled })
   if (!r.ok) opError.value = r.error ?? '操作失败'
 }
 
@@ -226,7 +301,7 @@ const backupBusy = ref(false)
 const restartNeeded = ref(false)
 
 async function relaunchApp(): Promise<void> {
-  const r = await window.gtools.host('app:relaunch')
+  const r = await host('app:relaunch')
   if (!r.ok) opError.value = r.error ?? '重启失败'
 }
 
@@ -234,7 +309,7 @@ async function exportBackup(): Promise<void> {
   backupBusy.value = true
   backupMsg.value = null
   try {
-    const r = await window.gtools.host('backup:export')
+    const r = await host('backup:export')
     if (!r.ok) {
       backupIsError.value = true
       backupMsg.value = r.error ?? '导出失败'
@@ -253,7 +328,7 @@ async function importBackup(): Promise<void> {
   backupMsg.value = null
   restartNeeded.value = false
   try {
-    const r = await window.gtools.host('backup:import')
+    const r = await host('backup:import')
     if (!r.ok) {
       backupIsError.value = true
       backupMsg.value = r.error ?? '导入失败'
@@ -294,7 +369,7 @@ const logConsoleEl = ref<HTMLElement | null>(null)
 const logSkin = computed(() => props.settings?.appLogSkin ?? 'black')
 
 async function loadLogs(): Promise<void> {
-  const r = await window.gtools.host('app-log:list', { since: logSeq.value })
+  const r = await host('app-log:list', { since: logSeq.value })
   if (!r.ok) return
   const d = r.data as { seq: number; items: LogEntry[] }
   if (d.items.length > 0) logItems.value = logItems.value.concat(d.items).slice(-500)
@@ -303,7 +378,7 @@ async function loadLogs(): Promise<void> {
 }
 
 async function clearLogs(): Promise<void> {
-  const r = await window.gtools.host('app-log:clear')
+  const r = await host('app-log:clear')
   if (!r.ok) {
     opError.value = r.error ?? '清空失败'
     return
@@ -312,14 +387,14 @@ async function clearLogs(): Promise<void> {
 }
 
 async function setLogSkin(skin: 'black' | 'white'): Promise<void> {
-  const r = await window.gtools.host('settings:set', { appLogSkin: skin })
+  const r = await host('settings:set', { appLogSkin: skin })
   if (!r.ok) opError.value = r.error ?? '保存失败'
 }
 
 const logoSkin = computed(() => props.settings?.appLogoSkin ?? 'black')
 
 async function setLogoSkin(skin: 'black' | 'white'): Promise<void> {
-  const r = await window.gtools.host('settings:set', { appLogoSkin: skin })
+  const r = await host('settings:set', { appLogoSkin: skin })
   if (!r.ok) opError.value = r.error ?? '保存失败'
 }
 
@@ -391,20 +466,6 @@ onBeforeUnmount(() => {
             </div>
             <div class="row">
               <div class="row-main">
-                <span class="name">唤起时剪贴板推荐</span>
-                <span class="desc">唤起后读取剪贴板内容，在空态前置推荐可处理它的插件</span>
-              </div>
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  :checked="settings?.clipboardSuggest ?? true"
-                  @change="setBehavior('clipboardSuggest', ($event.target as HTMLInputElement).checked)"
-                />
-                <span>{{ settings?.clipboardSuggest ? '已开启' : '已关闭' }}</span>
-              </label>
-            </div>
-            <div class="row">
-              <div class="row-main">
                 <span class="name">失焦自动隐藏</span>
                 <span class="desc">点击其它窗口时自动隐藏主窗口</span>
               </div>
@@ -415,6 +476,42 @@ onBeforeUnmount(() => {
                   @change="setBehavior('hideOnBlur', ($event.target as HTMLInputElement).checked)"
                 />
                 <span>{{ settings?.hideOnBlur ? '已开启' : '已关闭' }}</span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="group">
+          <div class="group-title">剪贴板</div>
+          <div class="stack">
+            <div class="row">
+              <div class="row-main">
+                <span class="name">记录面板位置</span>
+                <span class="desc">左侧/右侧/下方均在主窗外侧飞出（Win+V 式），下方贴主窗底缘、空间不足自动翻转到上方；主窗隐藏时面板随之隐藏；关闭即停止采集</span>
+              </div>
+              <div class="seg">
+                <button
+                  v-for="p in panelPositions"
+                  :key="p.id"
+                  class="seg-item"
+                  :class="{ active: (settings?.clipboardPanel?.position ?? 'right') === p.id }"
+                  @click="setClipboardPanel(p.id)"
+                >
+                  {{ p.label }}
+                </button>
+              </div>
+            </div>
+            <div class="row">
+              <div class="row-main">
+                <span class="name">剪贴板推荐</span>
+                <span class="desc">主窗可见期间读取剪贴板图片尺寸与非敏感 JSON 文本，生成「悬浮图片 / JSON 编辑器」推荐行；关闭后主窗不再读取剪贴板</span>
+              </div>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="settings?.clipboardSuggest ?? true"
+                  @change="setBehavior('clipboardSuggest', ($event.target as HTMLInputElement).checked)"
+                />
+                <span>{{ (settings?.clipboardSuggest ?? true) ? '已开启' : '已关闭' }}</span>
               </label>
             </div>
           </div>
@@ -555,8 +652,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="row">
               <div class="row-main">
-                <!-- 玻璃主题下滑杆语义 = 磨砂度：0 厚磨砂、100 清玻璃 -->
-                <span class="name">{{ settings?.theme === 'glass' ? '磨砂度' : '透明度' }}</span>
+                <span class="name">透明度</span>
               </div>
               <input
                 class="slider"
@@ -568,6 +664,23 @@ onBeforeUnmount(() => {
                 @change="setTransparency({ opacity: Number(($event.target as HTMLInputElement).value) })"
               />
               <span class="accel">{{ settings?.transparency?.opacity ?? 55 }}%</span>
+            </div>
+            <div class="row">
+              <div class="row-main">
+                <span class="name">磨砂度</span>
+                <span class="desc">{{ frostDesc }}</span>
+              </div>
+              <input
+                class="slider"
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                :disabled="frostDisabled"
+                :value="settings?.transparency?.glassFrost ?? 45"
+                @change="setTransparency({ glassFrost: Number(($event.target as HTMLInputElement).value) })"
+              />
+              <span class="accel">{{ settings?.transparency?.glassFrost ?? 45 }}%</span>
             </div>
             <div class="row">
               <div class="row-main">
@@ -583,6 +696,55 @@ onBeforeUnmount(() => {
                 <span>{{ settings?.transparency?.blur ? '已开启' : '已关闭' }}</span>
               </label>
             </div>
+          </div>
+        </div>
+        <div class="group">
+          <div class="group-title">自定义背景</div>
+          <div class="stack">
+            <div class="row">
+              <div class="row-main">
+                <span class="name">启用自定义背景</span>
+                <span class="desc">仅白色/黑色主题生效，玻璃主题使用自身材质；含透明通道的 PNG 透明区呈深底，建议照片类不透明图片</span>
+              </div>
+              <label class="switch">
+                <input
+                  type="checkbox"
+                  :checked="settings?.background?.enabled ?? false"
+                  @change="setBackground({ enabled: ($event.target as HTMLInputElement).checked })"
+                />
+                <span>{{ settings?.background?.enabled ? '已开启' : '已关闭' }}</span>
+              </label>
+            </div>
+            <div class="row">
+              <div class="row-main">
+                <span class="name">背景图片</span>
+                <span class="desc">
+                  {{ settings?.background?.file ? `当前：${settings?.background?.file}` : '未选择图片' }}；选图后自动压缩重编码存本机
+                </span>
+              </div>
+              <button class="btn" :disabled="bgBusy" @click="chooseBackground">选择图片…</button>
+              <button class="btn" :disabled="bgBusy || (settings?.background?.file ?? '') === ''" @click="clearBackground">清除</button>
+            </div>
+            <div class="row">
+              <div class="row-main">
+                <span class="name">纱罩浓度</span>
+                <span class="desc">图片上的纱罩不透明度，越高文字越可读</span>
+              </div>
+              <input
+                class="slider"
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                :value="settings?.background?.dim ?? 40"
+                @change="setBackground({ dim: Number(($event.target as HTMLInputElement).value) })"
+              />
+              <span class="accel">{{ settings?.background?.dim ?? 40 }}%</span>
+            </div>
+          </div>
+          <div class="bg-previews">
+            <BackgroundPreview :image="bgImage" :dim="settings?.background?.dim ?? 40" variant="search" />
+            <BackgroundPreview :image="bgImage" :dim="settings?.background?.dim ?? 40" variant="settings" />
           </div>
         </div>
       </template>
@@ -661,6 +823,7 @@ onBeforeUnmount(() => {
       <template v-else-if="sectionId === 'data'">
         <h2 class="page-title">数据与服务</h2>
         <ApiServicesSection />
+        <AiServicesSection />
         <div class="group">
           <div class="group-title">备份与恢复</div>
           <div class="row">
@@ -957,6 +1120,16 @@ onBeforeUnmount(() => {
   flex: none;
   width: 180px;
   accent-color: var(--accent);
+}
+.slider:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.bg-previews {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
 }
 .btn {
   background: var(--bg);

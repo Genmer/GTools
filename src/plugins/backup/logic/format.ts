@@ -139,6 +139,13 @@ export function normalizeSettings(raw: unknown): AppSettings {
       out.transparency.opacity = Math.min(100, Math.max(0, Math.round(t.opacity)))
     }
     if (typeof t.blur === 'boolean') out.transparency.blur = t.blur
+    // 与宿主 SettingsStore.load 同语义：缺 glassFrost 字段按 opacity 派生（g=100−o），已带字段不派生
+    if (typeof t.glassFrost === 'number' && Number.isFinite(t.glassFrost)) {
+      out.transparency.glassFrost = Math.min(100, Math.max(0, Math.round(t.glassFrost)))
+    } else if (t.glassFrost === undefined && typeof t.opacity === 'number' && Number.isFinite(t.opacity)) {
+      const o = Math.min(100, Math.max(0, Math.round(t.opacity)))
+      out.transparency.glassFrost = Math.min(100, Math.max(0, Math.round(100 - o)))
+    }
   }
   if (typeof r.outlineEnabled === 'boolean') out.outlineEnabled = r.outlineEnabled
   // 轮廓环宽/色的合法判定与宿主同源 @sdk/settings 单点
@@ -163,9 +170,38 @@ export type ParsedBackup =
   | { ok: true; backup: BackupFile; warnings: string[] }
   | { ok: false; error: string }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
+/** apiServices 段结构校验（与宿主 src/main/services/backup.ts 同构复制）：providers 逐元素须含
+ *  id/type 非空字符串，坏段直接拒绝——replaceAll 会整体覆盖 api-services.json，静默丢段等于清掉本机配置 */
+function apiServicesShapeError(v: unknown): string | null {
+  if (!isPlainObject(v)) return 'apiServices 段必须是对象'
+  const services = v.services
+  if (services === undefined) return null
+  if (!isPlainObject(services)) return 'apiServices.services 必须是对象'
+  for (const seg of ['translate', 'ai'] as const) {
+    const s = services[seg]
+    if (s === undefined) continue
+    if (!isPlainObject(s)) return `apiServices.services.${seg} 必须是对象`
+    const providers = s.providers
+    if (providers === undefined) continue
+    if (!Array.isArray(providers)) return `apiServices.services.${seg}.providers 必须是数组`
+    for (let i = 0; i < providers.length; i++) {
+      const p = providers[i]
+      if (!isPlainObject(p) || typeof p.id !== 'string' || p.id === '' || typeof p.type !== 'string' || p.type === '') {
+        return `apiServices.services.${seg}.providers 第 ${i + 1} 项必须是含 id/type 字符串的对象`
+      }
+    }
+  }
+  return null
+}
+
 /**
  * 与宿主 parseBackup 的差异：插件层拿不到插件注册表，未知插件的数据不丢弃而是原样保留
  * （落盘为休眠数据目录，装上该插件后即可用），仅在 warnings 里提示。
+ * 结构级损坏（settings/pluginStorage/apiServices 段形状不对）双端一致直接拒绝，不带病导入。
  */
 export function parseBackup(raw: string, opts?: { maxBytes?: number }): ParsedBackup {
   const maxBytes = opts?.maxBytes ?? MAX_BACKUP_BYTES
@@ -188,30 +224,25 @@ export function parseBackup(raw: string, opts?: { maxBytes?: number }): ParsedBa
   if (b.version > BACKUP_VERSION) {
     return { ok: false, error: `备份来自更高版本（v${b.version}），当前应用仅支持 v${BACKUP_VERSION}，请先升级应用` }
   }
-  if (typeof b.settings !== 'object' || b.settings === null) return { ok: false, error: '备份缺少 settings' }
-  if (typeof b.pluginStorage !== 'object' || b.pluginStorage === null || Array.isArray(b.pluginStorage)) {
-    return { ok: false, error: '备份缺少 pluginStorage' }
-  }
+  if (!isPlainObject(b.settings)) return { ok: false, error: '备份 settings 段损坏：必须是对象' }
+  if (!isPlainObject(b.pluginStorage)) return { ok: false, error: '备份 pluginStorage 段损坏：必须是对象' }
 
   const warnings: string[] = []
   const storage: Record<string, Record<string, unknown>> = {}
-  for (const [pid, kv] of Object.entries(b.pluginStorage as Record<string, unknown>)) {
-    if (typeof kv !== 'object' || kv === null || Array.isArray(kv)) {
-      warnings.push(`插件 ${pid} 的数据结构异常，已跳过`)
-      continue
+  for (const [pid, kv] of Object.entries(b.pluginStorage)) {
+    if (!isPlainObject(kv)) {
+      return { ok: false, error: `备份 pluginStorage 段损坏：插件 ${pid} 的数据必须是对象` }
     }
     if (Object.keys(kv).length === 0) continue
-    storage[pid] = kv as Record<string, unknown>
+    storage[pid] = kv
   }
 
-  // v2 段：v1 备份无 apiServices（导入时不写该文件，保留本机现状）；结构异常丢弃并告警
+  // v2 段：v1 备份无 apiServices（导入时不写该文件，保留本机现状）；坏段拒绝导入
   let apiServices: Record<string, unknown> | undefined
   if (b.apiServices !== undefined) {
-    if (typeof b.apiServices !== 'object' || b.apiServices === null || Array.isArray(b.apiServices)) {
-      warnings.push('API 服务配置结构异常，已跳过')
-    } else {
-      apiServices = b.apiServices as Record<string, unknown>
-    }
+    const shapeErr = apiServicesShapeError(b.apiServices)
+    if (shapeErr !== null) return { ok: false, error: `备份 ${shapeErr}` }
+    apiServices = b.apiServices as Record<string, unknown>
   }
 
   return {

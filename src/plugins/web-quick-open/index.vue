@@ -122,11 +122,14 @@ function move(dir: 1 | -1): void {
   selected.value = (selected.value + dir + n) % n
 }
 
-// 插件模式下外壳 SearchBox 不转发 Enter/方向键（仅 global 模式），列表导航由插件自治监听
+// 插件模式下外壳 SearchBox 不转发 Enter/方向键（仅 global 模式），列表导航由插件自治监听。
+// 添加站点表单（.form）内的 Enter 只走各 input 的 onFormEnter 保存（.prevent 不阻冒泡，
+// 若此处不排除会保存后继续打开高亮行的双动作）；表单外输入框（含宿主 SearchBox）照常导航
 function onKeydown(e: KeyboardEvent): void {
   if (e.isComposing) return // 输入法组合态的 Enter/方向键用于选词
+  if (e.target instanceof Element && e.target.closest('.form') !== null) return
   const tag = (e.target as HTMLElement).tagName
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON') return // 表单聚焦时不劫持
+  if (tag === 'TEXTAREA' || tag === 'BUTTON') return
   if (e.key === 'Enter') {
     e.preventDefault()
     const row = visible.value[selected.value]

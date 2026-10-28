@@ -165,9 +165,38 @@ export type ParsedBackup =
   | { ok: true; backup: BackupFile; warnings: string[] }
   | { ok: false; error: string }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
+/** apiServices 段结构校验（与插件层 backup/logic/format.ts 同构复制）：providers 逐元素须含
+ *  id/type 非空字符串，坏段直接拒绝——replaceAll 会整体覆盖 api-services.json，静默丢段等于清掉本机配置 */
+function apiServicesShapeError(v: unknown): string | null {
+  if (!isPlainObject(v)) return 'apiServices 段必须是对象'
+  const services = v.services
+  if (services === undefined) return null
+  if (!isPlainObject(services)) return 'apiServices.services 必须是对象'
+  for (const seg of ['translate', 'ai'] as const) {
+    const s = services[seg]
+    if (s === undefined) continue
+    if (!isPlainObject(s)) return `apiServices.services.${seg} 必须是对象`
+    const providers = s.providers
+    if (providers === undefined) continue
+    if (!Array.isArray(providers)) return `apiServices.services.${seg}.providers 必须是数组`
+    for (let i = 0; i < providers.length; i++) {
+      const p = providers[i]
+      if (!isPlainObject(p) || typeof p.id !== 'string' || p.id === '' || typeof p.type !== 'string' || p.type === '') {
+        return `apiServices.services.${seg}.providers 第 ${i + 1} 项必须是含 id/type 字符串的对象`
+      }
+    }
+  }
+  return null
+}
+
 /**
  * 导入校验：格式/版本/结构逐层把关，宁可拒绝也不猜。unknown 插件的数据保留在
  * backup 中但记入 warnings，由调用方决定跳过（备份可能来自装了更多插件的机器）。
+ * 结构级损坏（settings/pluginStorage/apiServices 段形状不对）双端一致直接拒绝，不带病导入。
  */
 export function parseBackup(raw: string, opts: { knownPluginIds: ReadonlySet<string> }): ParsedBackup {
   if (typeof raw !== 'string' || raw.length === 0) return { ok: false, error: '备份文件为空' }
@@ -189,33 +218,28 @@ export function parseBackup(raw: string, opts: { knownPluginIds: ReadonlySet<str
   if (b.version > BACKUP_VERSION) {
     return { ok: false, error: `备份来自更高版本（v${b.version}），当前应用仅支持 v${BACKUP_VERSION}，请先升级应用` }
   }
-  if (typeof b.settings !== 'object' || b.settings === null) return { ok: false, error: '备份缺少 settings' }
-  if (typeof b.pluginStorage !== 'object' || b.pluginStorage === null || Array.isArray(b.pluginStorage)) {
-    return { ok: false, error: '备份缺少 pluginStorage' }
-  }
+  if (!isPlainObject(b.settings)) return { ok: false, error: '备份 settings 段损坏：必须是对象' }
+  if (!isPlainObject(b.pluginStorage)) return { ok: false, error: '备份 pluginStorage 段损坏：必须是对象' }
 
   const warnings: string[] = []
   const storage: Record<string, Record<string, unknown>> = {}
-  for (const [pid, kv] of Object.entries(b.pluginStorage as Record<string, unknown>)) {
-    if (typeof kv !== 'object' || kv === null || Array.isArray(kv)) {
-      warnings.push(`插件 ${pid} 的数据结构异常，已跳过`)
-      continue
+  for (const [pid, kv] of Object.entries(b.pluginStorage)) {
+    if (!isPlainObject(kv)) {
+      return { ok: false, error: `备份 pluginStorage 段损坏：插件 ${pid} 的数据必须是对象` }
     }
     if (!opts.knownPluginIds.has(pid)) {
       warnings.push(`本机没有插件 ${pid}，其数据已跳过`)
       continue
     }
-    storage[pid] = kv as Record<string, unknown>
+    storage[pid] = kv
   }
 
-  // v2 段：v1 备份无 apiServices（导入时保留本机现状）；结构异常丢弃并告警，合法则交由 api-center sanitize
+  // v2 段：v1 备份无 apiServices（导入时保留本机现状）；坏段拒绝导入，合法则交由 api-center sanitize
   let apiServices: ApiServicesConfig | undefined
   if (b.apiServices !== undefined) {
-    if (typeof b.apiServices !== 'object' || b.apiServices === null || Array.isArray(b.apiServices)) {
-      warnings.push('API 服务配置结构异常，已跳过')
-    } else {
-      apiServices = b.apiServices as ApiServicesConfig
-    }
+    const shapeErr = apiServicesShapeError(b.apiServices)
+    if (shapeErr !== null) return { ok: false, error: `备份 ${shapeErr}` }
+    apiServices = b.apiServices as ApiServicesConfig
   }
 
   return {
@@ -227,7 +251,7 @@ export function parseBackup(raw: string, opts: { knownPluginIds: ReadonlySet<str
       sourcePlatform: typeof b.sourcePlatform === 'string' ? b.sourcePlatform : 'unknown',
       appVersion: typeof b.appVersion === 'string' ? b.appVersion : 'unknown',
       // settings 的字段级合法性由 SettingsStore.update 的 sanitize 兜底
-      settings: b.settings as AppSettings,
+      settings: b.settings as unknown as AppSettings,
       pluginStorage: storage,
       apiServices
     },

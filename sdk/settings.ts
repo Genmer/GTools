@@ -4,14 +4,23 @@ export type ThemeName = 'light' | 'dark' | 'glass'
 export type OutlineColor = 'auto' | 'white' | 'black' | 'rainbow' | 'rainbow-gradient' | 'custom'
 
 /** 透明效果：所有主题可开。opacity 为透明度 0-100（越大越透），blur 为实时模糊（Win11 亚克力 / macOS vibrancy）；
- *  glass 主题的磨砂/清透也由 blur 决定（磨霜=系统实时材质，清透=透明窗直透桌面） */
+ *  glass 主题的磨砂/清透也由 blur 决定，磨砂强度由 glassFrost 单独调节（--frost = (glassFrost/100)^0.9） */
 export interface TransparencySettings {
   enabled: boolean
   opacity: number
   blur: boolean
+  /** 玻璃主题磨砂度 0-100（默认 45）；仅旧档缺字段时迁移为 clamp(round(100-opacity)) */
+  glassFrost: number
 }
 
-export const DEFAULT_TRANSPARENCY: TransparencySettings = { enabled: true, opacity: 55, blur: true }
+export const DEFAULT_TRANSPARENCY: TransparencySettings = { enabled: true, opacity: 55, blur: true, glassFrost: 45 }
+
+/** 剪贴板记录面板（Win+V 式）：position 即开与位置，'off' 关闭（关闭态不采集） */
+export type ClipboardPanelPosition = 'off' | 'left' | 'right' | 'below'
+export interface ClipboardPanelSettings {
+  position: ClipboardPanelPosition
+}
+export const DEFAULT_CLIPBOARD_PANEL: ClipboardPanelSettings = { position: 'right' }
 
 /** 自定义环色默认值（与七彩源色 c3 同族蓝，浅深色/玻璃下均可读） */
 export const OUTLINE_CUSTOM_COLOR_DEFAULT = '#42a5f5'
@@ -27,6 +36,15 @@ export interface CommandHotkey {
   darwin: string
   win32: string
 }
+
+/** 自定义背景（仅 light/dark 主题消费，glass 用自身材质）：file 只存 userData/backgrounds/ 下相对名
+ *  （白名单 /^[a-zA-Z0-9._-]+$/，''=未选图）；dim 为纱罩浓度 0-100 */
+export interface BackgroundSettings {
+  enabled: boolean
+  file: string
+  dim: number
+}
+export const DEFAULT_BACKGROUND: BackgroundSettings = { enabled: false, file: '', dim: 40 }
 
 export interface AppSettings {
   hotkey: { darwin: string; win32: string }
@@ -50,7 +68,11 @@ export interface AppSettings {
   /** 机器相关设置：随备份迁移无意义，导入恢复不覆盖（见 ipc.ts 备份恢复的显式字段枚举） */
   launchAtLogin: boolean
   /** 行为偏好，备份导入不恢复（ipc.ts 备份恢复显式字段枚举不含，同 launchAtLogin） */
+  clipboardPanel: ClipboardPanelSettings
+  /** 行为偏好，同上不随备份恢复；主窗剪贴板推荐（悬浮图片/JSON 编辑器行）的读取总开关，主进程 peek 接口同闸执行 */
   clipboardSuggest: boolean
+  /** 行为偏好，同上不随备份恢复（恢复枚举在 ipc.ts）；图片本体不入备份包 */
+  background: BackgroundSettings
   hideOnBlur: boolean
   /** 行为偏好，同上不随备份恢复（恢复枚举在 ipc.ts，归 P7）；热键注册生效也归 P7，本字段先只做存取 */
   commandHotkeys: CommandHotkey[]
@@ -72,7 +94,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   appLogoSkin: 'black',
   disabledPlugins: [],
   launchAtLogin: false,
+  clipboardPanel: { ...DEFAULT_CLIPBOARD_PANEL },
   clipboardSuggest: true,
+  background: { ...DEFAULT_BACKGROUND },
   hideOnBlur: true,
   commandHotkeys: [],
   windowPos: null

@@ -1,5 +1,5 @@
 // 应用扫描单测：fs/exec 全部注入内存 fixture，不触真实磁盘与注册表。
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { DirentLike, FsLike, ScanDeps } from './types'
 import { defaultDarwinRoots, defaultWin32Roots, parseRegAppPaths, scanApps, scanDarwin, scanWin32 } from './scan'
 
@@ -92,6 +92,7 @@ describe('win32 扫描', () => {
   })
 
   it('.lnk 递归收集（大小写扩展名、深度上限 4）+ 注册表 App Paths 合并去重', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const apps = await scanWin32(
       deps({
         execFile: async (cmd, args) => {
@@ -107,11 +108,52 @@ describe('win32 扫描', () => {
     expect(code?.path).toBe('C:\\Users\\u\\App\\Code.exe')
     const b = apps.find((a) => a.name === 'b')
     expect(b?.path).toBe('/programs/Sub/b.LNK') // 保留首个（.lnk 原始大小写）
+    expect(warn).toHaveBeenCalledOnce() // HKCU 失败留痕一次
+    warn.mockRestore()
   })
 
   it('无 exec 时只扫开始菜单 .lnk', async () => {
     const apps = await scanWin32(deps())
     expect(apps.map((a) => a.name).sort()).toEqual(['a', 'b', 'x'])
+  })
+
+  it('reg query 传 timeout/maxBuffer（防挂起与超缓冲），HKLM/HKCU 同款 opts', async () => {
+    const optsSeen: Array<{ timeout: number; maxBuffer: number }> = []
+    const apps = await scanWin32(
+      deps({
+        execFile: async (cmd, args, opts) => {
+          expect(cmd).toBe('reg')
+          expect(args).toContain('/s')
+          optsSeen.push(opts)
+          return { stdout: regStdout, stderr: '' }
+        }
+      })
+    )
+    expect(apps.map((a) => a.name).sort()).toEqual(['a', 'b', 'code', 'old', 'x'])
+    expect(optsSeen).toEqual([
+      { timeout: 5000, maxBuffer: 8 * 1024 * 1024 },
+      { timeout: 5000, maxBuffer: 8 * 1024 * 1024 }
+    ])
+  })
+
+  it('reg 失败（超时/超缓冲）只保留 .lnk 结果，console.warn 留痕', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const apps = await scanWin32(
+        deps({
+          execFile: async () => {
+            throw new Error('reg query 超时')
+          }
+        })
+      )
+      expect(apps.map((a) => a.name).sort()).toEqual(['a', 'b', 'x']) // 注册表条目全部缺失
+      expect(warn).toHaveBeenCalledTimes(2) // HKLM/HKCU 各一条
+      expect(String(warn.mock.calls[0]?.[0])).toContain('HKLM')
+      expect(String(warn.mock.calls[0]?.[0])).toContain('reg query 超时')
+      expect(String(warn.mock.calls[1]?.[0])).toContain('HKCU')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('defaultWin32Roots 依赖 APPDATA/PROGRAMDATA，缺失则少根', () => {

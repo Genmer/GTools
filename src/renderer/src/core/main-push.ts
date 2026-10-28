@@ -1,4 +1,5 @@
 import type { PluginManifest } from '@sdk/manifest'
+import { isSensitiveText } from '@sdk/sensitive'
 import type { RecItem } from './recommend'
 
 /** 常驻插件向主窗推送的条目（经 plugin-event:<id> 的 { event:'main-push', payload }） */
@@ -80,6 +81,7 @@ export function replacePushedItems(
 /**
  * 数组推送的单条规整：pluginId 一律以通道归属为准（不信任 payload 自带值），
  * 字段坏值回退插件名/图标；非对象条目返回 null 由调用方丢弃。
+ * payloadText 过敏感检测兜底：推送载荷不经剪贴板采集链，指纹豁免管不到这里，命中即剥离（行只留图标+名称）。
  */
 export function normalizePushedItem(
   raw: unknown,
@@ -88,6 +90,7 @@ export function normalizePushedItem(
 ): PushedItem | null {
   if (typeof raw !== 'object' || raw === null) return null
   const r = raw as Record<string, unknown>
+  const payloadText = typeof r.payloadText === 'string' ? r.payloadText : undefined
   return {
     pluginId: channelId,
     commandId: typeof r.commandId === 'string' && r.commandId !== '' ? r.commandId : undefined,
@@ -95,7 +98,7 @@ export function normalizePushedItem(
     title: typeof r.title === 'string' ? r.title : fallback.name,
     subtitle: typeof r.subtitle === 'string' ? r.subtitle : '',
     icon: typeof r.icon === 'string' && r.icon !== '' ? r.icon : fallback.icon,
-    payloadText: typeof r.payloadText === 'string' ? r.payloadText : undefined
+    payloadText: payloadText !== undefined && isSensitiveText(payloadText) ? undefined : payloadText
   }
 }
 
@@ -108,7 +111,6 @@ export function pushedItemsToRecItems(items: readonly PushedItem[]): RecItem[] {
     payload: it.payloadText !== undefined && it.payloadText.length > PAYLOAD_MAX_LENGTH ? undefined : it.payloadText,
     title: it.title,
     subtitle: it.subtitle,
-    label: it.title,
     icon: it.icon,
     source: 'push'
   }))

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   gifScreenSize,
   parseFileUriList,
@@ -96,9 +96,27 @@ describe('gifScreenSize', () => {
 })
 
 describe('parseFileUriList', () => {
-  it('单条 file:// uri 解出本地路径（含 %20 转义）', () => {
-    expect(parseFileUriList('file:///Users/a/b%20c/d.gif\r\n')).toBe('/Users/a/b c/d.gif')
-    expect(parseFileUriList('#注释\r\nfile:///tmp/x.png')).toBe('/tmp/x.png')
+  const isWin = process.platform === 'win32'
+
+  it('单条 file:// uri 解出本地路径（含 %20 转义）；无盘符 POSIX 形态在 win32 按标准归 null', () => {
+    expect(parseFileUriList('file:///Users/a/b%20c/d.gif\r\n')).toBe(isWin ? null : '/Users/a/b c/d.gif')
+    expect(parseFileUriList('#注释\r\nfile:///tmp/x.png')).toBe(isWin ? null : '/tmp/x.png')
+  })
+
+  it('win32 盘符形态还原空格/中文路径（盘符大小写保留，fileURLToPath 不做归一）', () => {
+    if (!isWin) return
+    expect(parseFileUriList('file:///C:/Users/my%20name/图%20片.png')).toBe('C:\\Users\\my name\\图 片.png')
+    expect(parseFileUriList('file:///c:/x.png')).toBe('c:\\x.png')
+    // 未转义的原始空格/中文（部分 win 应用直接放明文）也能还原
+    expect(parseFileUriList('file:///C:/my name/图片.png')).toBe('C:\\my name\\图片.png')
+  })
+
+  it('UNC 形态按 fileURLToPath 标准语义：win32 还原 \\\\server\\share\\；POSIX 无 UNC 归 null', () => {
+    expect(parseFileUriList('file://server/share/a.png')).toBe(isWin ? '\\\\server\\share\\a.png' : null)
+  })
+
+  it('非法 URI 返 null 不抛出（调用方 if (!path) continue 兜底）', () => {
+    expect(parseFileUriList('file:///a%zz.png')).toBeNull()
   })
 
   it('多条 / 非 file 协议 / 空文本返 null', () => {
@@ -106,5 +124,26 @@ describe('parseFileUriList', () => {
     expect(parseFileUriList('https://example.com/a.gif')).toBeNull()
     expect(parseFileUriList('')).toBeNull()
     expect(parseFileUriList('#只有注释')).toBeNull()
+  })
+})
+
+// win32 专属断言在 darwin/linux 宿主全部被 if(!isWin) return 跳过，且旧实现
+// decodeURIComponent(pathname) 在 posix 上恰好等价——注入 mock 锁定"委托 fileURLToPath"
+// 这一事实，使换回手写解码在任何宿主都变红；真实平台行为由上面各宿主条件断言锁定
+describe('parseFileUriList 委托 fileURLToPath（平台无关锁定）', () => {
+  it('解码经 node:url fileURLToPath 委托，异常归 null', async () => {
+    vi.resetModules()
+    vi.doMock('node:url', () => ({
+      fileURLToPath: (u: string) => {
+        if (u.includes('%zz')) throw new TypeError('ERR_INVALID_URL')
+        if (u === 'file://server/share/a.png') return '\\\\server\\share\\a.png'
+        return decodeURIComponent(u.replace('file:///', '').replace(/\//g, '\\'))
+      }
+    }))
+    const mod = await import('../src/main/services/clipboard-image-types')
+    expect(mod.parseFileUriList('file:///C:/Users/my%20name/%E5%9B%BE.png')).toBe('C:\\Users\\my name\\图.png')
+    expect(mod.parseFileUriList('file://server/share/a.png')).toBe('\\\\server\\share\\a.png')
+    expect(mod.parseFileUriList('file:///a%zz.png')).toBeNull()
+    vi.doUnmock('node:url')
   })
 })

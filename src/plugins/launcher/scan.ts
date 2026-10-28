@@ -1,6 +1,10 @@
 import { appNameFromPlist } from './plist-name'
 import { joinPath, type AppEntry, type FsLike, type ScanDeps } from './types'
 
+// 对齐 file-search mdfind 的取值：reg query 挂起（注册表锁竞争）5s 放弃；App Paths 递归输出可超默认 1MB
+const REG_TIMEOUT_MS = 5000
+const REG_MAX_BUFFER = 8 * 1024 * 1024
+
 export function defaultDarwinRoots(homeDir: string): string[] {
   return ['/Applications', joinPath(homeDir, 'Applications'), '/System/Applications']
 }
@@ -120,19 +124,20 @@ export async function scanWin32(deps: ScanDeps): Promise<AppEntry[]> {
   if (deps.exec) {
     for (const hive of ['HKLM', 'HKCU']) {
       try {
-        const r = await deps.exec.execFile('reg', [
-          'query',
-          `${hive}\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths`,
-          '/s'
-        ])
+        const r = await deps.exec.execFile(
+          'reg',
+          ['query', `${hive}\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths`, '/s'],
+          { timeout: REG_TIMEOUT_MS, maxBuffer: REG_MAX_BUFFER }
+        )
         for (const e of parseRegAppPaths(r.stdout)) {
           const key = e.name.toLowerCase()
           if (out.has(key) || knownPaths.has(e.path.toLowerCase())) continue
           knownPaths.add(e.path.toLowerCase())
           out.set(key, e)
         }
-      } catch {
-        // 注册表查询失败（权限/键不存在）→ 只保留 .lnk 结果
+      } catch (err) {
+        // 注册表查询失败（权限/键不存在/超时/超缓冲）→ 只保留 .lnk 结果；warn 留痕便于归因
+        console.warn(`launcher reg query 失败（${hive}）：${err instanceof Error ? err.message : String(err)}`)
       }
     }
   }

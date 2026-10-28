@@ -5,7 +5,7 @@ import { VaultError } from './logic/crypto'
 import type { VaultKey } from './logic/crypto'
 import { generatePassword, normalizeGeneratorOptions } from './logic/generator'
 import type { GeneratorOptions } from './logic/generator'
-import { scheduleClipboardClear } from './logic/clipboard-clear'
+import { CLEAR_DELAY_MS, copyWithAutoClear } from './logic/clipboard-clear'
 import { AUTO_LOCK_CHOICES, IdleLockTimer } from './logic/idle-lock'
 import { DEFAULT_PREFS, PREFS_STORAGE_KEY, normalizePrefs } from './logic/prefs'
 import type { VaultPrefs } from './logic/prefs'
@@ -257,9 +257,8 @@ async function copyPassword(e: VaultEntry): Promise<void> {
     return
   }
   try {
-    await host.clipboard.writeText(e.password)
-    scheduleClipboardClear(host, e.password)
-    say(`已复制${e.site || e.username}的密码，30 秒后自动清空剪贴板`)
+    await copyWithAutoClear(host, e.password)
+    say(`已复制${e.site || e.username}的密码，${CLEAR_DELAY_MS / 1000} 秒后自动清空剪贴板`)
   } catch (err) {
     say(err instanceof Error ? err.message : '复制失败', 'err')
   }
@@ -268,7 +267,8 @@ async function copyPassword(e: VaultEntry): Promise<void> {
 async function copyUsername(e: VaultEntry): Promise<void> {
   if (e.username === '') return
   try {
-    await host.clipboard.writeText(e.username)
+    // 用户名也走指纹豁免写入，不进剪贴板历史
+    await host.clipboard.writeTextEphemeral(e.username)
     say(`已复制用户名 ${e.username}`)
   } catch (err) {
     say(err instanceof Error ? err.message : '复制失败', 'err')
@@ -302,8 +302,8 @@ function applyGenToForm(): void {
 async function copyGen(): Promise<void> {
   if (genOut.value === '') return
   try {
-    await host.clipboard.writeText(genOut.value)
-    say('已复制生成的密码（尚未入库）')
+    await copyWithAutoClear(host, genOut.value)
+    say(`已复制生成的密码（尚未入库），${CLEAR_DELAY_MS / 1000} 秒后自动清空剪贴板`)
   } catch (err) {
     say(err instanceof Error ? err.message : '复制失败', 'err')
   }

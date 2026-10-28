@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Notification, screen, shell } from 'electron'
+import { app, BrowserWindow, nativeImage, Notification, screen, shell } from 'electron'
 import { randomBytes } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -9,8 +9,10 @@ import { PluginLoader } from './plugin-loader'
 import { createElectronServices, createNativeAppsIconDecoder, fetchViaNet, PluginStorageService } from './services/electron-services'
 import { NativeAppsService, type NativeAppsFs } from './services/native-apps'
 import { ApiCenterService, migrateLegacyTranslate } from './services/api-center'
+import { ClipboardHistoryService } from './services/clipboard-history'
+import { BackgroundService } from './services/background'
 import { createBackendContext } from './services/dispatch'
-import { setupIpc } from './services/ipc'
+import { setupIpc, broadcast } from './services/ipc'
 import {
   applyHideOnBlur,
   bindWindowPositionSink,
@@ -21,8 +23,10 @@ import {
   setRememberedWindowPos,
   toggleSearchWindow,
   showSearchWindow,
+  hideSearchWindow,
   getSearchWindow
 } from './window'
+import { closeClipboardFlyout, setClipboardFlyoutPosition } from './clipboard-flyout-window'
 import { DetachedWindowManager } from './detached-window-manager'
 import { registerHotkey, unregisterAllHotkeys } from './shortcut'
 import { createTray } from './tray'
@@ -79,30 +83,49 @@ async function bootstrap(): Promise<void> {
   const userData = app.getPath('userData')
   const fs = await import('node:fs/promises')
   settingsStore = new SettingsStore(userData, fs)
-  await settingsStore.load()
+  try {
+    await settingsStore.load()
+  } catch (err) {
+    // settings.json 被杀软/备份瞬时锁定时拒启不可接受；update/flush 被 loaded 门控不落盘，盘上设置安全，
+    // 首个设置变更会重试读取，下次启动亦自动恢复
+    console.error('GTools settings.json 读取失败，本会话使用默认设置（不影响已存设置）：', err)
+  }
 
+  // api-services-changed 是全窗投递通道（broadcast-channels 注册表）：detached 窗的 host-client 订阅同源可达
   const broadcastApiServices = (): void => {
-    getSearchWindow()?.webContents.send('api-services-changed', apiCenterRef?.sanitized())
+    broadcast('api-services-changed', apiCenterRef?.sanitized())
   }
   const apiCenter = new ApiCenterService({ dir: userData, fs, fetch: fetchViaNet, notify: broadcastApiServices })
   apiCenterRef = apiCenter
-  await apiCenter.load()
+  try {
+    await apiCenter.load()
+  } catch (err) {
+    // api-services.json 被杀软/备份瞬时锁定时拒启不可接受；flush 被 load 门控（未成功加载不落盘），盘上凭证安全，重启自愈
+    console.error('GTools api-services.json 读取失败，本会话 API 配置不可见（不影响已存数据）：', err)
+  }
 
   // 0.1.0 插件内翻译配置一次性迁移（旧键原样保留不删；采纳成功落标记封存，清空全局中心后不复活）
-  await migrateLegacyTranslate({
-    storage: new PluginStorageService(join(userData, 'storage')),
-    isTranslateEmpty: () => apiCenter.isTranslateEmpty(),
-    adopt: async (provider) => {
-      await apiCenter.adoptMigratedProvider(provider)
-      await apiCenter.flush() // 迁移点立即落库，别让标记先于配置持久化
-    },
-    generateId: () => `u-${randomBytes(4).toString('hex')}`
-  })
+  try {
+    await migrateLegacyTranslate({
+      storage: new PluginStorageService(join(userData, 'storage')),
+      isTranslateEmpty: () => apiCenter.isTranslateEmpty(),
+      adopt: async (provider) => {
+        await apiCenter.adoptMigratedProvider(provider)
+        await apiCenter.flush() // 迁移点立即落库，别让标记先于配置持久化
+      },
+      generateId: () => `u-${randomBytes(4).toString('hex')}`
+    })
+  } catch (err) {
+    // 迁移读旧插件 kv.json 遇瞬时锁等读错时跳过本次即可：标记只在采纳成功后落，下次启动自动重试
+    console.error('GTools 旧翻译配置迁移失败（下次启动自动重试）：', err)
+  }
 
   const services = createElectronServices({
     storageRoot: join(userData, 'storage'),
     appVersion: app.getVersion(),
     getWindow: getSearchWindow,
+    // F1：主窗显隐唯一出口——插件 window.hide 与截图 hideLauncher 经此收口（连带藏飞窗）
+    hideWindow: hideSearchWindow,
     // 插件事件广播面 = 主窗 + 全部独立插件窗（浮窗/遮罩 preload 无订阅面，多发无害）
     listWindows: () => BrowserWindow.getAllWindows(),
     apiCenter
@@ -119,6 +142,30 @@ async function bootstrap(): Promise<void> {
     loadIcon: createNativeAppsIconDecoder()
   })
 
+  // 剪贴板历史采集（面板数据源）：复用 electron clipboard 能力但不扩 ServiceBag 插件面；纯内存，退出即逝
+  const clipboardHistory = new ClipboardHistoryService({
+    readText: services.clipboard.readText,
+    writeText: services.clipboard.writeText,
+    readImage: services.clipboard.readImage,
+    writeImage: services.clipboard.writeImage,
+    // vault 经 writeTextEphemeral 写入的密码/用户名不入面板历史（敏感指纹豁免）
+    isExempted: services.clipboard.isTextExempted
+  })
+  if (settingsStore.settings.clipboardPanel.position !== 'off') clipboardHistory.start()
+
+  // 自定义背景（题5）：固定名重编码产物目录，file 相对名白名单在 settings-store 单点约束
+  // fs/promises 重载返回类型与 BackgroundFs 不全一致，显式构造注入对象代替双重断言
+  const background = new BackgroundService(
+    join(userData, 'backgrounds'),
+    {
+      readFile: (p) => fs.readFile(p),
+      writeFile: (p, data) => fs.writeFile(p, data),
+      rm: (p, opts) => fs.rm(p, opts),
+      mkdir: (p, opts) => fs.mkdir(p, opts)
+    },
+    nativeImage
+  )
+
   loader = new PluginLoader({
     builtinManifests,
     loadBackend,
@@ -132,12 +179,14 @@ async function bootstrap(): Promise<void> {
   // 主窗位置记忆：启动注入上次位置，拖动后经 settings 持久化（防抖内建）
   setRememberedWindowPos(settingsStore.settings.windowPos)
   bindWindowPositionSink((p) => {
-    void settingsStore?.update({ windowPos: p })
+    void settingsStore?.update({ windowPos: p }).catch((err) => console.error('GTools windowPos 保存失败（不影响已存设置）：', err))
   })
   // 先镜像主题/透明再建窗（透明标志/材质依赖当前设置），建窗后自身完成材质应用
   applyThemeToWindow(settingsStore.settings.theme, settingsStore.settings.transparency)
   applyAppLogoSkin(settingsStore.settings.appLogoSkin)
   createSearchWindow()
+  // 飞窗方位与设置对齐：主窗此刻不可见 → 仅记录，首次 showSearchWindow 惰性显示（F6 语义）
+  setClipboardFlyoutPosition(settingsStore.settings.clipboardPanel.position)
 
   // 插件独立窗口管理器（每插件单实例，禁用插件/退出时统一回收）
   const detached = new DetachedWindowManager({
@@ -161,14 +210,29 @@ async function bootstrap(): Promise<void> {
     new Notification({ title: 'GTools', body: r.error ?? '快捷键注册失败' }).show()
   }
 
-  setupIpc({ loader, settings: settingsStore, services, apiCenter, nativeApps, detached, appLog, onHotkeyToggle: toggleSearchWindow })
+  setupIpc({
+    loader,
+    settings: settingsStore,
+    services,
+    apiCenter,
+    nativeApps,
+    clipboardHistory,
+    background,
+    detached,
+    appLog,
+    onHotkeyToggle: toggleSearchWindow
+  })
 
-  // 登录项失败不阻断主功能（区别于快捷键失败弹通知），只留日志
-  try {
-    syncLoginItem(app, settingsStore.settings.launchAtLogin)
-  } catch (err) {
-    console.error('GTools 开机启动设置失败：', err)
-  }
+  // 登录项同步可能同步阻塞（mac osascript 5s 超时面），setImmediate 挪出启动关键路径；
+  // 失败不阻断主功能（区别于快捷键失败弹通知），显式入 appLog（不经 console 包装，防同义双条目）
+  const wantLaunchAtLogin = settingsStore.settings.launchAtLogin
+  setImmediate(() => {
+    try {
+      syncLoginItem(app, wantLaunchAtLogin)
+    } catch (err) {
+      appLog.push('error', 'main', `开机启动设置失败 v${app.getVersion()}：${err instanceof Error ? err.message : String(err)}`)
+    }
+  })
 
   // resident backend 后台起（init/start 可能耗时），失败只记日志不杀宿主；此时 IPC 已注册，
   // 插件进入路径会经 ensureBackendStarted 的 in-flight 复用搭上同一次启动
@@ -216,6 +280,8 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', () => {
     unregisterAllHotkeys()
+    // 退出放行独立窗的 close 拦截（app.quit 先逐窗 close 再 will-quit，拦下会中止退出）
+    detachedRef?.markQuitting()
   })
 
   app.on('will-quit', (e) => {
@@ -230,6 +296,7 @@ if (!app.requestSingleInstanceLock()) {
     const timer = setTimeout(exit, 3000)
     void (async () => {
       try {
+        closeClipboardFlyout() // 飞窗随退出回收
         servicesRef?.window.float.closeAll() // 退出前关全部浮窗，防残留
         detachedRef?.closeAll() // 独立插件窗口同样全量回收
         await loader?.disposeAll()

@@ -5,11 +5,11 @@ import { rimFlowPeriodSeconds, type AppSettings } from '@sdk/settings'
 import type { HostInitResult } from '../env'
 import { buildAppEntries, buildEntries } from '../core/entries'
 import { calc } from '../core/calc'
+import { host } from '../core/host-bridge'
 import { matchEntryBest, warmupPinyinIndex } from '../core/pinyin-index'
 import type { SearchEntry } from '../core/matcher'
 import { buildUtoolsEntries, UTOOLS_PLUGIN_ID, type UtoolsEntryScan } from '../core/utools-entries'
-import { buildRecommendations, fileMatcherHits, type MatchFile, type RecItem } from '../core/recommend'
-import { isSensitiveText } from '../core/sensitive'
+import { buildRecommendations, dedupeRecs, fileMatcherHits, mergeQueryRecommendations, type MatchFile, type RecItem } from '../core/recommend'
 import {
   mergePushedItems,
   normalizePushedItem,
@@ -26,6 +26,7 @@ import {
   type EmptyTargetsInput
 } from '../core/empty-targets'
 import { applyDeepLink, parseDeepLink } from './deep-link'
+import { fillAppInfo } from '../core/app-info'
 import { RIM_SEGMENTS_GRADIENT, RIM_SEGMENTS_RAINBOW } from './rim-ring-segments'
 import { enterPlugin, enterSettings, exitLevel, isSettingsEntry, resetForShow, restOf, router, syncMode } from './router'
 import {
@@ -38,13 +39,13 @@ import {
   type NativeAppItem
 } from './app-grid'
 import { buildRecentTiles, parseRecentRecords, pushRecent, type RecentRecord } from './recent-records'
-import { parseQueryHistory, pushQueryHistory } from './query-history'
 import SearchBox from './SearchBox.vue'
 import ResultList from './ResultList.vue'
 import EmptyState from './EmptyState.vue'
 import PluginViewHost from './PluginViewHost.vue'
 import DetachedHost from './DetachedHost.vue'
 import SettingsPage from './SettingsPage.vue'
+import ClipboardFlyoutHost from './ClipboardFlyoutHost.vue'
 
 interface PluginState {
   manifest: PluginManifest
@@ -64,8 +65,6 @@ interface RecentRow {
 
 // 最近使用属外壳 UI 状态（非插件数据），走 localStorage 不动设置与插件存储协议
 const RECENT_KEY = 'gtools:recent-entries'
-// 搜索历史同理走 localStorage（外壳 UI 状态不新开 IPC）
-const HISTORY_KEY = 'gtools:query-history'
 const APP_GRID_COLS = 9
 // 全局态兜底窗口高度（内容口径，与主进程 CONTENT_H 对齐）；空态高度由 EmptyState 实测内容上报（§1.5）
 const WINDOW_NORMAL_H = 560
@@ -76,12 +75,16 @@ const plugins = ref<PluginState[]>([])
 const settings = ref<AppSettings | null>(null)
 const activeIndex = ref(0)
 const emptyIndex = ref(0)
+// 计算器复制失败 toast：失败不藏窗，结果留在结果区，回车即重试；1.8s 自动消失
+const calcCopyError = ref(false)
+let calcCopyTimer: ReturnType<typeof setTimeout> | undefined
 const searchBox = ref<InstanceType<typeof SearchBox> | null>(null)
 const pluginHost = ref<InstanceType<typeof PluginViewHost> | null>(null)
 const recentRecords = ref<RecentRecord[]>([])
-const queryHistory = ref<string[]>([])
 // 独立窗口分流：#detached=true 深链时只渲染轻量宿主，不渲染主窗外壳
 const isDetachedWindow = ref(false)
+// 剪贴板飞窗分流：#clipboard-flyout=1 深链时只渲染剪贴板卡片（主窗外壳副作用整体跳过，F23）
+const isFlyoutWindow = ref(false)
 
 // 本机应用栏（apps:* 宿主通道）
 const apps = ref<NativeAppItem[]>([])
@@ -169,13 +172,6 @@ function toggleAppsExpanded(): void {
   appsExpanded.value = !appsExpanded.value
 }
 
-// 剪贴板推荐（C2）：每次唤起单次 peek，无轮询不订阅剪贴板变化；仅存内存，主进程不落盘不缓存。
-// clipboardSuggest 由设置链路（sdk/settings.ts）提供，这里宽松读取保持两侧改动解耦，缺省视为开
-const clipboardText = ref('')
-const clipboardSuggestOn = computed(
-  () => (settings.value as (AppSettings & { clipboardSuggest?: boolean }) | null)?.clipboardSuggest !== false
-)
-
 // 拖入集（文件/图片推荐源）与常驻插件推送行；两者都只存内存，激活/清空输入/窗口隐藏时释放
 const dropFiles = ref<MatchFile[]>([])
 const hasDropImage = ref(false)
@@ -201,7 +197,7 @@ function onDocPaste(e: ClipboardEvent): void {
 }
 
 async function refreshPasteThumb(): Promise<void> {
-  const r = await window.gtools.host('clipboard:peek-image')
+  const r = await host('clipboard:peek-image')
   const data = r.ok ? ((r.data as { thumb: string } | null) ?? null) : null
   pasteImage.value = data !== null
   pasteThumb.value = data?.thumb ?? null
@@ -230,22 +226,10 @@ function subscribeResidentPush(m: PluginManifest): void {
       pushedItems.value = replacePushedItems(pushedItems.value, items, m.id, enabledManifests.value)
       return
     }
-    const p = (w.payload ?? {}) as Partial<PushedItem>
-    // pluginId 以通道归属为准（channel 已限定插件），不信任 payload 自带值
-    pushedItems.value = mergePushedItems(
-      pushedItems.value,
-      [
-        {
-          pluginId: m.id,
-          commandId: p.commandId,
-          title: p.title ?? m.name,
-          subtitle: p.subtitle ?? '',
-          icon: p.icon ?? m.icon,
-          payloadText: p.payloadText
-        }
-      ],
-      enabledManifests.value
-    )
+    // 单对象也走 normalizePushedItem 统一规整（含 payloadText 敏感兜底），不在此手拼字段
+    const item = normalizePushedItem(w.payload, m.id, { name: m.name, icon: m.icon })
+    if (item === null) return
+    pushedItems.value = mergePushedItems(pushedItems.value, [item], enabledManifests.value)
   })
   if (off) pushOffs.set(m.id, off)
 }
@@ -271,45 +255,130 @@ watch(enabledManifests, (v) => syncPushSubscriptions(v))
 // 常驻推送行并入两处推荐 computed 最前；拼接按 key 去重先到先得，防推送行与 matcher/拖入行同 key 重复渲染
 const pushedRecs = computed(() => pushedItemsToRecItems(pushedItems.value))
 
-function dedupeRecs(items: RecItem[]): RecItem[] {
-  const seen = new Set<string>()
-  const out: RecItem[] = []
-  for (const it of items) {
-    if (seen.has(it.key)) continue
-    seen.add(it.key)
-    out.push(it)
-  }
-  return out
+// 剪贴板探测结果（唤起/图片粘贴时刷新）：图片驱动「悬浮/保存成文件」动作行，JSON 驱动「JSON 编辑器」行
+const clipboardImage = ref<{ width: number; height: number } | null>(null)
+const clipboardJson = ref<string | null>(null)
+// 剪贴板推荐读取总开关（隐私语义：显式关闭后渲染层不发 peek，主进程 peek 接口另有同闸双保险）
+const clipboardSuggestOn = computed(() => settings.value?.clipboardSuggest !== false)
+
+// 事件路径去抖间隔：合并面板 copy/remove/clear 连击与 ~1s 轮询风暴；直调点（粘贴/首帧/唤起）不走此包装保持即时
+const CLIPBOARD_REC_EVENT_DEBOUNCE_MS = 200
+let clipboardRecTimer: ReturnType<typeof setTimeout> | undefined
+
+function refreshClipboardRecs(): void {
+  if (!clipboardSuggestOn.value) return
+  void host('clipboard:peek-image')
+    .then((r) => {
+      const d = r.ok ? (r.data as { width?: unknown; height?: unknown } | null | undefined) : null
+      clipboardImage.value =
+        d && typeof d.width === 'number' && typeof d.height === 'number'
+          ? { width: d.width, height: d.height }
+          : null
+    })
+    .catch(() => {
+      clipboardImage.value = null
+    })
+  void host('clipboard:peek-json')
+    .then((r) => {
+      clipboardJson.value = r.ok && typeof r.data === 'string' ? r.data : null
+    })
+    .catch(() => {
+      clipboardJson.value = null
+    })
 }
+
+// trailing 去抖：广播事件路径专用（主窗可见期间外部拷贝即时刷新），高频风暴只落最后一次
+function scheduleClipboardRecsRefresh(): void {
+  if (clipboardRecTimer !== undefined) clearTimeout(clipboardRecTimer)
+  clipboardRecTimer = setTimeout(() => {
+    clipboardRecTimer = undefined
+    refreshClipboardRecs()
+  }, CLIPBOARD_REC_EVENT_DEBOUNCE_MS)
+}
+
+// 剪贴板有图时的动作行（图标+名称纪律）：悬浮=pin-clipboard（插件自读剪贴板），保存=save-clipboard
+const clipboardImageRecs = computed<RecItem[]>(() => {
+  const img = clipboardImage.value
+  if (img === null) return []
+  if (!enabledManifests.value.some((m) => m.id === 'float-image')) return []
+  return [
+    {
+      key: 'float-image:pin-clipboard',
+      pluginId: 'float-image',
+      commandId: 'pin-clipboard',
+      title: '悬浮图片',
+      subtitle: `贴图 ${img.width}×${img.height}`,
+      icon: '📌',
+      source: 'img'
+    },
+    {
+      key: 'float-image:save-clipboard',
+      pluginId: 'float-image',
+      commandId: 'save-clipboard',
+      title: '保存成文件',
+      subtitle: '剪贴板图片存为 PNG',
+      icon: '💾',
+      source: 'img'
+    }
+  ]
+})
+
+// 剪贴板有 JSON 时的动作行（空态专属）：payload 全文带进 json-editor，进插件即格式化；
+// query 非空不产出（输入/粘贴的 JSON 走 query 态 json matcher，同链路）
+const clipboardJsonRecs = computed<RecItem[]>(() => {
+  const text = clipboardJson.value
+  if (text === null) return []
+  const m = enabledManifests.value.find((x) => x.id === 'json-editor')
+  if (!m) return []
+  return [
+    {
+      key: 'json-editor:_clipboard',
+      pluginId: 'json-editor',
+      title: m.name,
+      subtitle: `剪贴板 JSON · ${text.trim().length} 字符`,
+      icon: m.icon,
+      source: 'json',
+      payload: text
+    }
+  ]
+})
 
 const clipboardRecs = computed(() =>
   dedupeRecs([
+    ...clipboardImageRecs.value,
+    ...clipboardJsonRecs.value,
     ...pushedRecs.value,
-    ...buildRecommendations({ query: '', clipboardText: clipboardText.value, manifests: enabledManifests.value, enabled: clipboardSuggestOn.value }),
-    // 空 query 下 buildRecommendations 不产出 files/img（只认剪贴板 json），空态拖入/粘贴行直调 fileMatcherHits 补上
-    ...fileMatcherHits(dropFiles.value, enabledManifests.value, hasDropImage.value || pasteImage.value)
+
+    ...buildRecommendations({ query: '', manifests: enabledManifests.value }),
+    // 空 query 下 buildRecommendations 恒空（matcher 只认 query 自身检测，剪贴板源已拆除），拖入行直调 fileMatcherHits 补上
+    ...fileMatcherHits(dropFiles.value, enabledManifests.value, hasDropImage.value)
   ])
 )
 const resultKeys = computed(() => new Set(visibleResults.value.map((i) => i.entry.key)))
-// query 态推荐区（ResultList 推荐段）；空 query 恒空（空态推荐落 EmptyState 顶部行）
-const recommendations = computed(() =>
-  router.query.trim() === ''
-    ? []
-    : dedupeRecs([
-        ...pushedRecs.value,
-        ...buildRecommendations({
-          query: router.query,
-          entries: entries.value,
-          resultKeys: resultKeys.value,
-          manifests: enabledManifests.value,
-          clipboardText: clipboardText.value,
-          files: dropFiles.value,
-          hasImage: hasDropImage.value || pasteImage.value
-        })
-      ])
-)
+// query 态推荐区（ResultList 推荐段）；空 query 恒空（空态推荐落 EmptyState 顶部行）。
+// 顺序：query 自身 JSON 检测第一（mergeQueryRecommendations 契约）→ 剪贴板图片动作行（图片进不了
+// 输入框，粘贴后靠这两行承接）→ 推送行 → 其余推荐
+const recommendations = computed(() => {
+  if (router.query.trim() === '') return []
+  const merged = mergeQueryRecommendations(
+    pushedRecs.value,
+    buildRecommendations({
+      query: router.query,
+      entries: entries.value,
+      resultKeys: resultKeys.value,
+      manifests: enabledManifests.value,
+      files: dropFiles.value,
+      hasImage: hasDropImage.value
+    })
+  )
+  return dedupeRecs([
+    ...merged.filter((r) => r.source === 'json'),
+    ...clipboardImageRecs.value,
+    ...merged.filter((r) => r.source !== 'json')
+  ])
+})
 
-// 剪贴板推荐前置（C2-5a）：两分支均占扁平序最前 K 位；搜索历史 chips 为第二段；
+// 空态推荐行前置（推送/拖入源）：两分支均占扁平序最前 K 位；
 // 拖入行（files/img 源）激活时把拖入集经 initialPayload 通道带给插件
 const emptyInput = computed<EmptyTargetsInput>(() =>
   appsMode.value
@@ -317,7 +386,6 @@ const emptyInput = computed<EmptyTargetsInput>(() =>
         appsMode: true,
         clipRecs: clipboardRecs.value,
         dropFiles: dropFiles.value,
-        history: queryHistory.value,
         recentTiles: recentTiles.value,
         appIds: visibleApps.value.map((a) => a.id),
         hasAppsToggle: hasAppsToggle.value
@@ -326,7 +394,6 @@ const emptyInput = computed<EmptyTargetsInput>(() =>
         appsMode: false,
         clipRecs: clipboardRecs.value,
         dropFiles: dropFiles.value,
-        history: queryHistory.value,
         pluginIds: enabledManifests.value.map((m) => m.id),
         recentRows: recentRows.value
       }
@@ -375,44 +442,34 @@ const measuredH = ref(0)
 function onContentResize(height: number): void {
   measuredH.value = height
 }
-const MIN_HEIGHT_DELTA = 8
-let pendingHeight: number | null = null
-let heightRaf = 0
-function flushHeight(): void {
-  heightRaf = 0
-  const h = pendingHeight
-  pendingHeight = null
-  if (h === null || Math.abs(h - lastSentHeight) < MIN_HEIGHT_DELTA) return
-  lastSentHeight = h
-  void window.gtools.host('window:set-height', { height: h })
-}
-function sendHeight(h: number): void {
-  pendingHeight = h
-  // 隐藏文档的 rAF 被暂停：隐藏期改走同步直发，保证再唤起首帧高度就位（配合隐藏清场）
-  if (document.hidden) {
-    flushHeight()
-    return
-  }
-  if (heightRaf === 0) heightRaf = requestAnimationFrame(flushHeight)
-}
-function contentHeight(): number {
-  if (router.mode !== 'global') return WINDOW_NORMAL_H // 已是内容口径，主进程负责加边距
-  if (measuredH.value <= 0) return WINDOW_NORMAL_H
-  // 实测值含透明窗边距（视口坐标），按内容口径扣掉
-  return document.documentElement.dataset.wintx === '1' ? measuredH.value - WIN_TX_MARGIN : measuredH.value
-}
 watch(emptyVisible, (visible) => {
   if (!visible && appsExpanded.value) appsExpanded.value = false
 })
-// immediate：热重载/挂载即对齐一次窗口高度，否则停留在旧高度（如 560）显得下方留白过大
-watch(contentHeight, sendHeight, { immediate: true })
+
+watch(
+  () => {
+    // 飞窗/独立窗不参与主窗高度上报链（红线 7）
+    if (isDetachedWindow.value || isFlyoutWindow.value) return WINDOW_NORMAL_H
+    if (router.mode !== 'global') return WINDOW_NORMAL_H // 已是内容口径，主进程负责加边距
+    if (measuredH.value <= 0) return WINDOW_NORMAL_H
+    // 实测值含透明窗边距（视口坐标），按内容口径扣掉
+    return document.documentElement.dataset.wintx === '1' ? measuredH.value - WIN_TX_MARGIN : measuredH.value
+  },
+  (h) => {
+    if (h === lastSentHeight) return
+    lastSentHeight = h
+    void host('window:set-height', { height: h })
+  },
+  // immediate：热重载/挂载即对齐一次窗口高度，否则停留在旧高度（如 560）显得下方留白过大
+  { immediate: true }
+)
 
 async function loadApps(force = false): Promise<void> {
   if (isDemo.value) return
   const id = ++appsRequestId
   appsLoading.value = true
   appError.value = null
-  const r = await window.gtools.host('apps:list', force ? { refresh: true } : undefined)
+  const r = await host('apps:list', force ? { refresh: true } : undefined)
   if (id !== appsRequestId) return // 过期响应（期间已手动刷新）丢弃
   appsLoading.value = false
   if (!r.ok) {
@@ -429,18 +486,9 @@ async function loadApps(force = false): Promise<void> {
   appsLoaded.value = true
 }
 
-// 剪贴板单次读取（C2-1）：仅设置开启时进行，读完仅存内存 ref；隐藏窗口不读、无轮询、不订阅变化
-async function peekClipboard(): Promise<void> {
-  if (!clipboardSuggestOn.value) return
-  const r = await window.gtools.host('clipboard:peek')
-  if (r.ok && typeof r.data === 'string') {
-    clipboardText.value = isSensitiveText(r.data) ? '' : r.data
-  }
-}
-
 // uTools 插件扫描→词条：失败/空静默置 []（utools-port 未装插件属常态，不弹错）
 async function loadUtoolsEntries(): Promise<void> {
-  const r = await window.gtools.host('utools:list')
+  const r = await host('utools:list')
   if (!r.ok) {
     utoolsEntries.value = []
     return
@@ -478,6 +526,28 @@ function onDrop(e: DragEvent): void {
   hasDropImage.value = dropped.some((f) => f.isFile && DROP_IMAGE_EXTS.has(extOf(f.name)))
 }
 
+// 位图粘贴：伪文件名（Windows 给位图的 dt.files 名，如 image.png）写进输入框作可见反应，
+// 同时刷新「悬浮/保存成文件」动作行（query 非空时这两行在推荐区仍前置）；插件态只刷新不动参数框
+function onImagePaste(name?: string): void {
+  refreshClipboardRecs()
+  if (router.mode === 'global' && name && name !== '') router.query = name
+}
+
+// 粘贴文件（资源管理器 Ctrl+C）：与拖拽同构入 dropFiles（matchers 推荐 + 激活时 initialPayload 全通路）；
+// 文件名写进输入框作可见反应（仅全局态，插件态参数框不动与拖拽一致）
+function onFilePaste(paths: string[], names: string[]): void {
+  const pasted: MatchFile[] = paths.map((p, i) => ({
+    path: p,
+    name: names[i] !== '' ? names[i] : (p.split(/[\\/]+/).pop() ?? p),
+    isDirectory: false,
+    isFile: true
+  }))
+  dropFiles.value = pasted
+  hasDropImage.value = pasted.some((f) => DROP_IMAGE_EXTS.has(extOf(f.name)))
+  const joined = pasted.map((f) => f.name).join(' ')
+  if (router.mode === 'global' && joined !== '') router.query = joined
+}
+
 async function openAppById(appId: string): Promise<void> {
   const a = apps.value.find((x) => x.id === appId)
   if (!a) return
@@ -488,11 +558,11 @@ async function openAppById(appId: string): Promise<void> {
   pushRecentApp(a.id)
   router.query = ''
   // 先藏窗再异步打开：shell.openPath 可达数百 ms，串行等待会显得「点了没反应」
-  void window.gtools.host('window:hide')
-  const r = await window.gtools.host('apps:open', { path: a.path })
+  void host('window:hide')
+  const r = await host('apps:open', { path: a.path })
   if (!r.ok) {
     // 打开失败把窗口带回来当面报错，否则用户只觉得没反应
-    void window.gtools.host('window:show')
+    void host('window:show')
     opError.value = { id: a.id, name: a.name, error: `打开「${a.name}」失败：${r.error ?? '未知错误'}` }
     return
   }
@@ -509,7 +579,7 @@ async function toggleAppPin(appId: string): Promise<void> {
     apps.value = reorderApps(apps.value, next)
     return
   }
-  const r = await window.gtools.host(pinnedNow ? 'apps:unpin' : 'apps:pin', { id: appId })
+  const r = await host(pinnedNow ? 'apps:unpin' : 'apps:pin', { id: appId })
   if (!r.ok) {
     opError.value = { id: '', name: a.name, error: `${pinnedNow ? '取消置顶' : '置顶'}失败：${r.error ?? '未知错误'}` }
     return
@@ -558,7 +628,7 @@ function activateEntry(pluginId: string, commandId?: string, rest?: string, payl
   // payload 为拖入文件列表走 initialPayload 通道；text 为激活注入文本（如剪贴板 JSON 全文）走 initialText 通道
   enterPlugin(pluginId, enabledManifests.value, commandId, rest ?? '', payload, text)
   // trigger 型带 backend 的插件（如 app-launcher）在首次进入时启动
-  void window.gtools.host('plugin:enter', { id: pluginId })
+  void host('plugin:enter', { id: pluginId })
   pushRecentPlugin(pluginId, commandId)
   releaseDrop()
 }
@@ -566,11 +636,10 @@ function activateEntry(pluginId: string, commandId?: string, rest?: string, payl
 function activateEmptyTarget(t: EmptyTarget): void {
   if (t.kind === 'app') void openAppById(t.appId)
   else if (t.kind === 'apps-toggle') toggleAppsExpanded()
-  else if (t.kind === 'history') onHistorySelect(t.query)
-  else activateEntry(t.pluginId, t.commandId, t.payload, t.files, t.text)
+  else activateEntry(t.pluginId, t.commandId, t.payload, t.files)
 }
 
-// appsMode 键盘导航：扁平序 = 剪贴板推荐行 + 搜索历史 chips + 最近行（三段合并为一个 1×N 前缀）→ 可见应用网格（9 列）→ 抽屉开关格；
+// appsMode 键盘导航：扁平序 = 剪贴板推荐行 + 最近行（两段合并为一个 1×N 前缀）→ 可见应用网格（9 列）→ 抽屉开关格；
 // 横向循环，纵向按列对齐跨行/进前缀行，边界停住
 function navEmptyGrid(dir: 1 | -1, axis: 'x' | 'y'): void {
   // R/A 从与 emptyTargets 同一输入的段界偏移取，不再手写累加
@@ -602,9 +671,9 @@ function onNav(dir: 1 | -1, axis: 'x' | 'y'): void {
     }
     const n = emptyTargets.value.length
     if (n === 0) return
-    // 兜底网格区上下按列距 4 跨行，其余步长 1；整体循环导航（插件中段 [histEnd, middleEnd) y 步长 4）
+    // 兜底网格区上下按列距 4 跨行，其余步长 1；整体循环导航（插件中段 [clipEnd, middleEnd) y 步长 4）
     const off = emptySegmentOffsets(emptyInput.value)
-    const step = axis === 'y' && emptyIndex.value >= off.histEnd && emptyIndex.value < off.middleEnd ? 4 : 1
+    const step = axis === 'y' && emptyIndex.value >= off.clipEnd && emptyIndex.value < off.middleEnd ? 4 : 1
     emptyIndex.value = (emptyIndex.value + dir * step + n) % n
     return
   }
@@ -620,6 +689,23 @@ function onNav(dir: 1 | -1, axis: 'x' | 'y'): void {
   activeIndex.value = navStep(activeIndex.value, sections, dir, axis)
 }
 
+// 计算器复制失败不藏窗（win32 剪贴板被占用时 writeText 会 reject，藏窗即复制了个寂寞）：
+// 窗口留在结果态亮红色 toast，回车即重试
+async function copyCalcResult(result: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(result)
+  } catch {
+    calcCopyError.value = true
+    if (calcCopyTimer !== undefined) clearTimeout(calcCopyTimer)
+    calcCopyTimer = setTimeout(() => (calcCopyError.value = false), 1800)
+    return
+  }
+  // 失败后 1.8s 内重试成功：复位错误态，防下次唤起闪现陈旧失败提示
+  if (calcCopyTimer !== undefined) clearTimeout(calcCopyTimer)
+  calcCopyError.value = false
+  void host('window:hide')
+}
+
 function onSelect(index: number): void {
   if (index >= visibleResults.value.length) {
     const rec = recommendations.value[index - visibleResults.value.length]
@@ -628,11 +714,11 @@ function onSelect(index: number): void {
   }
   const item = visibleResults.value[index]
   if (!item) return
-  // 计算器词条：展示与激活同源（按当前 query 现算），复制结果文本后隐藏窗口
+  // 计算器词条：展示与激活同源（按当前 query 现算），复制成功才隐藏窗口
   if (item.entry.key === 'host:calc') {
     const result = calc(router.query.trim())
-    if (result !== null) void navigator.clipboard.writeText(result)
-    void window.gtools.host('window:hide')
+    if (result !== null) void copyCalcResult(result)
+    else void host('window:hide')
     return
   }
   if (item.entry.kind === 'app' && item.entry.appId) {
@@ -668,43 +754,7 @@ function onEnter(): void {
     if (t) activateEmptyTarget(t)
     return
   }
-  recordHistory(router.query.trim())
   onSelect(activeIndex.value)
-}
-
-// ---- 搜索历史（localStorage，外壳 UI 状态）----
-
-function loadHistory(): void {
-  queryHistory.value = parseQueryHistory(localStorage.getItem(HISTORY_KEY))
-}
-
-function persistHistory(): void {
-  try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(queryHistory.value))
-  } catch {
-    // 存不进去只影响下次启动的历史 chips，静默降级
-  }
-}
-
-function recordHistory(q: string): void {
-  queryHistory.value = pushQueryHistory(queryHistory.value, q)
-  persistHistory()
-}
-
-// chip 点击回填：keyword 后必须跟空格才进插件态（router-core），裸词恒留 global 出结果
-function onHistorySelect(q: string): void {
-  router.query = q
-  void nextTick(() => searchBox.value?.focus())
-}
-
-function onHistoryRemove(q: string): void {
-  queryHistory.value = queryHistory.value.filter((x) => x !== q)
-  persistHistory()
-}
-
-function onHistoryClear(): void {
-  queryHistory.value = []
-  persistHistory()
 }
 
 function onEmptySelect(index: number): void {
@@ -747,7 +797,7 @@ function onExitFromSearchBox(): void {
 function detachActivePlugin(): void {
   if (router.mode !== 'plugin' || router.activePluginId === null) return
   const q = restOf(router.query, enabledManifests.value)
-  void window.gtools.host('window:detach-plugin', { id: router.activePluginId, query: q })
+  void host('window:detach-plugin', { id: router.activePluginId, query: q })
 }
 
 function toggleSettings(): void {
@@ -760,7 +810,8 @@ function toggleSettings(): void {
 
 // 插件态窗口级按键：Cmd/Ctrl+D 独立窗口打开；Esc 逐级退出兜底（插件已消费的 Esc 不劫持）；独立窗口不归主窗外壳管
 function onWindowKeydown(e: KeyboardEvent): void {
-  if (isDetachedWindow.value) return
+
+  if (isDetachedWindow.value || isFlyoutWindow.value) return
   // 设置页 Esc：焦点常落在页面控件上（搜索框之外），SearchBox 收不到，须窗口级兜底（已消费的 Esc 不劫持）
   if (e.key === 'Escape' && router.mode === 'settings' && !e.isComposing && !e.defaultPrevented) {
     e.preventDefault()
@@ -781,11 +832,11 @@ function onWindowKeydown(e: KeyboardEvent): void {
 watch(
   () => router.mode,
   (mode, prev) => {
-    if (isDetachedWindow.value) return
+    if (isDetachedWindow.value || isFlyoutWindow.value) return
     if (mode === 'plugin' && prev !== 'plugin') {
-      void window.gtools.host('window:set-resizable', { resizable: true, minWidth: 520, minHeight: 360 })
+      void host('window:set-resizable', { resizable: true, minWidth: 520, minHeight: 360 })
     } else if (mode !== 'plugin' && prev === 'plugin') {
-      void window.gtools.host('window:set-resizable', { resizable: false })
+      void host('window:set-resizable', { resizable: false })
     }
   }
 )
@@ -803,7 +854,7 @@ function onRzDown(e: PointerEvent, axis: 'x' | 'y' | 'xy'): void {
     if (dw === 0 && dh === 0) return
     lx = ev.screenX
     ly = ev.screenY
-    void window.gtools.host('window:resize-by', { dw, dh })
+    void host('window:resize-by', { dw, dh })
   }
   const up = (): void => {
     el.removeEventListener('pointermove', move)
@@ -830,6 +881,22 @@ function applyVisualSettings(s: AppSettings): void {
   document.documentElement.style.setProperty('--tx', (s.transparency.opacity / 100).toFixed(2))
   // (1-tx)³ 感知曲线：玻璃主题专用——滑杆低段陡增保证 0 档够白可读，高段维持清玻璃
   document.documentElement.style.setProperty('--txp', Math.pow(1 - s.transparency.opacity / 100, 3).toFixed(4))
+
+  // 霜曲线 (glassFrost/100)^0.9 CSS calc 表达不了，JS 算好注入；旧载荷缺字段宽松回 45（与 DetachedHost/飞窗四点同公式）
+  const frostPct = s.transparency.glassFrost
+  const frost = typeof frostPct === 'number' && Number.isFinite(frostPct) ? Math.min(Math.max(frostPct, 0), 100) : 45
+  document.documentElement.style.setProperty('--frost', Math.pow(frost / 100, 0.9).toFixed(4))
+  // 自定义背景恒注入两 token（禁用/glass = none + 0，不清 token 防 IACVT）；独立窗/飞窗不做（F5）；
+  // 契约外补 dataUrl 非空守卫：未拉到时暂按关注入防 url(null)，refreshBackground 拉到后重应用
+  if (!isDetachedWindow.value && !isFlyoutWindow.value) {
+    const bg = s.background
+    const bgOn = bg?.enabled === true && s.theme !== 'glass' && bgDataUrl.value !== null
+    document.documentElement.style.setProperty(
+      '--wp-image',
+      bgOn && bgDataUrl.value ? `url("${bgDataUrl.value}")` : 'none'
+    )
+    document.documentElement.style.setProperty('--wp-dim', bgOn ? ((bg.dim / 100) * 0.85).toFixed(2) : '0')
+  }
   // 霜曲线：(1-t)^0.9 幂次 CSS calc 表达不了，JS 算好注入（themes.css 玻璃块 blur 消费）
   document.documentElement.style.setProperty('--txf', Math.pow(1 - s.transparency.opacity / 100, 0.9).toFixed(4))
   // off 注入 0px 而非清内联——清后回落 CSS 竞争会被透明组特异性压过致环复活
@@ -845,32 +912,56 @@ function applyVisualSettings(s: AppSettings): void {
   document.documentElement.dataset.rimFlow = rimFlow ? 'on' : 'off'
 }
 
+// 背景图 dataUrl（主窗专属拉取，F5）：选图/清除由主进程广播 settings-changed 回流后经 watch 重拉
+const bgDataUrl = ref<string | null>(null)
 
+async function refreshBackground(): Promise<void> {
+  if (isDetachedWindow.value || isFlyoutWindow.value) return
+  const r = await host('background:get')
+  const d = (r.ok ? r.data : null) as { dataUrl?: unknown } | null
+  bgDataUrl.value = d !== null && typeof d.dataUrl === 'string' ? d.dataUrl : null
+  if (settings.value) applyVisualSettings(settings.value)
+}
+
+watch(
+  () => [settings.value?.background.file, settings.value?.background.enabled],
+  () => {
+    void refreshBackground()
+  }
+)
 
 onMounted(async () => {
+
+  // 深度链接初始化（#plugin=<id>&q=… / #demo=1 / #detached=true… / #clipboard-flyout=1），仅启动时生效
+  const link = parseDeepLink(location.hash)
+  isDetachedWindow.value = link?.isDetached === true
+  isFlyoutWindow.value = link?.isFlyout === true
+  if (!isFlyoutWindow.value) loadRecent()
   // 渲染层兜底错误上报主进程日志缓冲（尽力而为：独立窗被主进程拒绝/窗口濒死均忽略不抛）
   window.addEventListener('error', (ev) => {
     const d = ev.error ?? ev.message
     const text = d instanceof Error ? `渲染层 error ${d.name}: ${d.message}` : `渲染层 error ${String(d)}`
-    void window.gtools.host('app-log:push', { level: 'error', text }).catch(() => {})
+    void host('app-log:push', { level: 'error', text }).catch(() => {})
   })
   window.addEventListener('unhandledrejection', (ev) => {
     const r = ev.reason
     const text = r instanceof Error ? `渲染层 unhandledRejection ${r.name}: ${r.message}` : `渲染层 unhandledRejection ${String(r)}`
-    void window.gtools.host('app-log:push', { level: 'error', text }).catch(() => {})
+    void host('app-log:push', { level: 'error', text }).catch(() => {})
   })
-  loadRecent()
-  loadHistory()
-  document.addEventListener('paste', onDocPaste)
-  const r = await window.gtools.host('app:init')
+
+  const r = await host('app:init')
   if (r.ok) {
     const init = r.data as HostInitResult
+    // app:init 真值回填进单例（早于下方 plugins 赋值，任何插件挂载时已是真值；飞窗/独立窗同样路过这里）
+    fillAppInfo({ platform: init.platform, version: init.version })
+    if (isFlyoutWindow.value) {
+      // 飞窗只要视觉态：主窗外壳副作用整体跳过，面板数据与主题订阅在 ClipboardFlyoutHost（F23）
+      applyVisualSettings(init.settings)
+      return
+    }
     plugins.value = init.plugins
     settings.value = init.settings
     applyVisualSettings(init.settings)
-    // 深度链接初始化（#plugin=<id>&q=… / #demo=1 / 独立窗口 #detached=true&plugin=…&query=…），仅启动时生效
-    const link = parseDeepLink(location.hash)
-    if (link?.isDetached) isDetachedWindow.value = true
     if (link?.demo) {
       // demo 态注入示例应用（截图场景），不走宿主 apps 通道；预置置顶示例使角标可核验
       isDemo.value = true
@@ -881,14 +972,25 @@ onMounted(async () => {
     if (link?.pluginId) {
       const ok = applyDeepLink(link, enabledManifests.value)
       console.info(ok ? `[deep-link] 已进入插件 ${link.pluginId}` : `[deep-link] 插件 ${link.pluginId} 不存在或未启用`)
-      if (ok) void window.gtools.host('plugin:enter', { id: link.pluginId })
+      if (ok) void host('plugin:enter', { id: link.pluginId })
     }
     if (!isDemo.value && !isDetachedWindow.value) void loadApps()
     void loadUtoolsEntries()
+    // 首帧即探一次剪贴板图片/JSON（覆盖「已可见但未再经历 visibilitychange」的唤出）
+    if (!isDetachedWindow.value) refreshClipboardRecs()
   }
   window.gtools.on('settings-changed', (p) => {
+    const wasSuggestOn = clipboardSuggestOn.value
     settings.value = p as AppSettings
     applyVisualSettings(p as AppSettings)
+    // 推荐开关切换即时生效：关=清两行缓存（行随之消失），开=立即探一次（不等下次唤起/广播）
+    if (clipboardSuggestOn.value !== wasSuggestOn) {
+      if (clipboardSuggestOn.value) refreshClipboardRecs()
+      else {
+        clipboardImage.value = null
+        clipboardJson.value = null
+      }
+    }
   })
   window.gtools.on('plugin-state-changed', (p) => {
     const d = p as { id: string; enabled: boolean; plugins: PluginState[] }
@@ -907,6 +1009,12 @@ onMounted(async () => {
     if (typeof d.pluginId === 'string' && d.pluginId !== '') activateEntry(d.pluginId, d.commandId)
   })
   if (offHotkey) offFns.push(offHotkey)
+  // 剪贴板即时链路：主窗直订宿主广播（通道刻意不进 sdk HOST_BROADCAST_EVENTS，插件面 host-client 订不到，
+  // 此处只能走 shell 层 window.gtools.on）；detached 窗收不到该广播，判空与首帧探查对称；勿加 hidden 闸（插件态唤回会永久错过刷新）
+  if (!isDetachedWindow.value) {
+    const offClip = window.gtools.on('clipboard-history-changed', scheduleClipboardRecsRefresh)
+    if (offClip) offFns.push(offClip)
+  }
   // 浮窗/后台经 window.showMain 唤起主窗后的直达指令（与指令热键同址同语义，多带 query 预填）
   const offOpenPlugin = window.gtools.on('host:open-plugin', (p) => {
     const d = (p ?? {}) as { pluginId?: string; commandId?: string; query?: string }
@@ -917,7 +1025,6 @@ onMounted(async () => {
     if (document.visibilityState !== 'visible') {
       // 隐私默认：推送与拖入集只在窗口可见会话内保留，隐藏即清（对齐 dropFiles 声明处注释）
       pushedItems.value = []
-      clipboardText.value = ''
       releaseDrop()
       // 主搜索态隐藏即清场：再唤起首帧即空态、高度同步就位，不再「旧内容闪换+二次 resize」；
       // 插件/设置态不清（resetForShow 无 force 分支原样保留现场）
@@ -927,7 +1034,7 @@ onMounted(async () => {
     // 唤起即 peek 不分模式：插件/设置态唤醒不读板的话，Esc 退回 global 空态后剪贴板推荐无源；
     // peek 内部已有 clipboardSuggest 开关与敏感过滤，隐私语义不变（单次读取、隐藏即清、仅存内存）。
     // detached 浮窗不渲染推荐 UI，读了白读，不扩大读取面
-    if (!isDetachedWindow.value) void peekClipboard()
+    if (!isDetachedWindow.value) void refreshClipboardRecs()
     if (router.mode === 'global') {
       // resetForShow 的推送清理点（router-core 不持有推送态，外壳侧同步清）
       pushedItems.value = []
@@ -938,6 +1045,8 @@ onMounted(async () => {
       void loadApps()
       // 覆盖「拷入新 uTools 插件目录后重唤启动器」的词条刷新
       void loadUtoolsEntries()
+      // 剪贴板探测：呼出即刷新「悬浮/保存成文件」「JSON 编辑器」动作行（仅全局态；插件态不打扰）
+      refreshClipboardRecs()
     } else if (router.mode === 'plugin') {
       // 插件/设置态唤醒保留现场：焦点交回插件内容区首个输入控件
       pluginHost.value?.focusContent()
@@ -951,9 +1060,10 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (calcCopyTimer !== undefined) clearTimeout(calcCopyTimer)
+  if (clipboardRecTimer !== undefined) clearTimeout(clipboardRecTimer)
   window.removeEventListener('keydown', onWindowKeydown)
   document.removeEventListener('paste', onDocPaste)
-  if (heightRaf !== 0) cancelAnimationFrame(heightRaf)
   for (const off of pushOffs.values()) off()
   for (const off of offFns) off()
 })
@@ -962,6 +1072,8 @@ onBeforeUnmount(() => {
 <template>
   <!-- 独立窗口：轻量宿主全屏承接插件视图，主窗外壳（空态/结果/设置）不渲染 -->
   <DetachedHost v-if="isDetachedWindow" :manifests="enabledManifests" />
+  <!-- 剪贴板飞窗：主进程锚定窗口尺寸，卡片根满 #app padding-box，主窗外壳不渲染 -->
+  <ClipboardFlyoutHost v-else-if="isFlyoutWindow" />
   <div v-else class="app" @dragover.prevent @drop.prevent="onDrop">
     <!-- 七彩环承载层：常驻挂载不加 v-if，显隐/几何/动画全交 themes.css 门控（防多模式双环）；
          段列与浮窗共享 rim-ring-segments，流动=段列沿环带路径空间位移（dashoffset 推进） -->
@@ -993,6 +1105,9 @@ onBeforeUnmount(() => {
         @exit="onExitFromSearchBox"
         @settings="toggleSettings"
         @detach="detachActivePlugin"
+
+        @image-paste="onImagePaste"
+        @file-paste="onFilePaste"
         @clear-paste="clearPaste"
       />
     </header>
@@ -1005,7 +1120,6 @@ onBeforeUnmount(() => {
           :recents="recentRows"
           :recent-tiles="recentTiles"
           :clipboard-recs="clipboardRecs"
-          :query-history="queryHistory"
           :apps="visibleApps"
           :apps-total="apps.length"
           :apps-expanded="appsExpanded"
@@ -1024,9 +1138,6 @@ onBeforeUnmount(() => {
           @resize="onContentResize"
           @refresh-apps="onRefreshApps"
           @retry-open="onRetryOpen"
-          @history-select="onHistorySelect"
-          @history-remove="onHistoryRemove"
-          @history-clear="onHistoryClear"
         />
         <ResultList
           v-else-if="router.mode === 'global'"
@@ -1062,6 +1173,8 @@ onBeforeUnmount(() => {
         <div class="rz rz-s" title="拖动调整高度" @pointerdown="(e) => onRzDown(e, 'y')" />
         <div class="rz rz-se" title="拖动调整大小" @pointerdown="(e) => onRzDown(e, 'xy')" />
       </template>
+      <!-- 计算器复制失败提示：失败不藏窗，结果留在结果区，回车即重试 -->
+      <div v-if="calcCopyError" class="calc-copy-toast">复制失败：剪贴板可能被占用，按 Enter 重试</div>
   </div>
 </template>
 
@@ -1071,6 +1184,7 @@ onBeforeUnmount(() => {
   height: 100vh;
   display: flex;
   flex-direction: column;
+
   /* 1px 边框本就存在（原 transparent）：glass 下上色成深勾边（--panel-edge），其余主题不变 */
   border: 1px solid var(--panel-edge, transparent);
   overflow: hidden;
@@ -1080,8 +1194,11 @@ onBeforeUnmount(() => {
   box-shadow: var(--panel-halo, none), var(--window-ring, none), var(--shadow-window);
   /* 只铺 padding-box：受光边绝不能走 border-box 层——透明窗 shell 是半透明白，
      border-box 渐变会透过它漏满整窗，即终审实测的 75-80% 白纱；窗缘受光全部由
-     --window-ring 的 inset shadow 承担（分主题定义）。上层 115deg sheen 高光随磨砂度渐显 */
+     --window-ring 的 inset shadow 承担（分主题定义）。上层 115deg sheen 高光随磨砂度渐显；
+     纱罩+图片层插栈最前（自定义背景），同样全 padding-box */
   background:
+    linear-gradient(rgb(var(--wp-veil) / var(--wp-dim)), rgb(var(--wp-veil) / var(--wp-dim))) padding-box,
+    var(--wp-image) center / cover no-repeat padding-box,
     linear-gradient(115deg, rgba(255, 255, 255, var(--glass-sheen)), rgba(255, 255, 255, 0) 46%) padding-box,
     linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
   /* 磨霜面（macOS 主霜源）：backdrop-filter 实时采样窗口背后桌面，与 --glass-filter 同变量——
@@ -1151,11 +1268,18 @@ html[data-wintx='1'] .app {
   /* 透明窗：#app 有 32/32/48 透明边距（base.css），.app 只满 padding-box，外圈投影落进边距 */
   height: 100%;
 }
-/* win32 不透明窗（DWM 亚克力霜面 CSS 采不到）：feTurbulence 噪点自绘玻璃颗粒，叠 sheen 之上 */
-html[data-wintx='0'][data-theme='glass'] .app {
+/* win32 不透明窗（DWM 亚克力霜面 CSS 采不到）：feTurbulence 噪点自绘玻璃颗粒，叠 sheen 之上。
+   blur-on 增补：切模糊触发 recreateSearchWindow 后 DWM 单活霜面槽烧毁不可复活，平灰态靠噪点兜底；
+   须叠 data-transparency='on' 门——纯色档（enabled=false）可能残留 blur=true，实色观感零改动。
+   栈序有意偏离常态栈「纱罩+图片插最前」的字面：噪点居首压在背景图上——颗粒属窗口玻璃材质，
+   须浮于照片之上才不被整层盖死；启用自定义背景时纱罩/图片退居噪点之后 */
+html[data-wintx='0'][data-theme='glass'] .app,
+html[data-wintx='0'][data-transparency='on'][data-blur='on'] .app {
   background:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E")
       padding-box,
+    linear-gradient(rgb(var(--wp-veil) / var(--wp-dim)), rgb(var(--wp-veil) / var(--wp-dim))) padding-box,
+    var(--wp-image) center / cover no-repeat padding-box,
     linear-gradient(115deg, rgba(255, 255, 255, var(--glass-sheen)), rgba(255, 255, 255, 0) 46%) padding-box,
     linear-gradient(var(--bg-shell), var(--bg-shell)) padding-box;
 }
@@ -1251,5 +1375,20 @@ html[data-wintx='0'][data-theme='glass'] .app {
 .settings-btn:hover {
   color: var(--fg);
   background: var(--hover);
+}
+/* 计算器复制失败 toast：极简样式对齐 image-bed .toast，配色走 --danger 两态 */
+.calc-copy-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  background: var(--danger-dim);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  padding: 5px 14px;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 5;
 }
 </style>

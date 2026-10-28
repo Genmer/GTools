@@ -1,24 +1,39 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SettingsStore, DEFAULT_SETTINGS } from '../src/main/settings-store'
 import type { FsLike } from '../src/main/settings-store'
+import type { TransparencySettings } from '@sdk/settings'
 
 const platformDefaults = (): typeof DEFAULT_SETTINGS => structuredClone(DEFAULT_SETTINGS)
 
-function fakeFs(initial?: Record<string, string>): FsLike & {
+type FakeFs = FsLike & {
   writes: { path: string; data: string }[]
   renames: { from: string; to: string }[]
   files: Map<string, string>
-} {
+  readFailCode: string | null
+}
+
+function fakeFs(initial?: Record<string, string>): FakeFs {
   const files = new Map<string, string>(Object.entries(initial ?? {}))
   const writes: { path: string; data: string }[] = []
   const renames: { from: string; to: string }[] = []
-  return {
+  // 非 null 时 readFile 一律抛该错误码（模拟杀软/备份软件瞬时锁文件）
+  let readFailCode: string | null = null
+  const fs: FakeFs = {
     writes,
     renames,
     files,
+    get readFailCode(): string | null {
+      return readFailCode
+    },
+    set readFailCode(code: string | null) {
+      readFailCode = code
+    },
     async readFile(path) {
+      if (readFailCode !== null) {
+        throw Object.assign(new Error(`${readFailCode}: read failed: ${path}`), { code: readFailCode })
+      }
       const v = files.get(path)
-      if (v === undefined) throw new Error('ENOENT')
+      if (v === undefined) throw Object.assign(new Error(`ENOENT: no such file: ${path}`), { code: 'ENOENT' })
       return v
     },
     async writeFile(path, data) {
@@ -35,6 +50,7 @@ function fakeFs(initial?: Record<string, string>): FsLike & {
     },
     async mkdir() {}
   }
+  return fs
 }
 
 const dir = '/tmp/gtools-test'
@@ -207,7 +223,7 @@ describe('settings-store', () => {
     const store = new SettingsStore(dir, fs)
     await store.load()
     expect(store.settings.theme).toBe('glass')
-    expect(store.settings.transparency).toEqual({ enabled: true, opacity: 55, blur: true })
+    expect(store.settings.transparency).toEqual({ enabled: true, opacity: 55, blur: true, glassFrost: 45 })
   })
 
   it('transparency 校验：合法字段收录，opacity 越界夹取 0-100，坏类型丢弃', async () => {
@@ -215,7 +231,7 @@ describe('settings-store', () => {
     const store = new SettingsStore(dir, fs)
     await store.load()
     await store.update({ transparency: { enabled: true, opacity: 150, blur: false } })
-    expect(store.settings.transparency).toEqual({ enabled: true, opacity: 100, blur: false })
+    expect(store.settings.transparency).toEqual({ enabled: true, opacity: 100, blur: false, glassFrost: 45 })
     await store.update({ transparency: { opacity: -5 } })
     expect(store.settings.transparency.opacity).toBe(0)
     await store.update({ transparency: { opacity: 'x' as unknown as number } })
@@ -230,7 +246,7 @@ describe('settings-store', () => {
     await store.load()
     await store.update({ transparency: { enabled: false } })
     await store.update({ transparency: { opacity: 30 } })
-    expect(store.settings.transparency).toEqual({ enabled: false, opacity: 30, blur: true })
+    expect(store.settings.transparency).toEqual({ enabled: false, opacity: 30, blur: true, glassFrost: 45 })
   })
 
   it('旧档含已废弃的 glassMaterial 字段：加载忽略不报错，其余字段照常', async () => {
@@ -359,7 +375,7 @@ describe('settings-store', () => {
     expect(fs.renames).toEqual([{ from: `${dir}/settings.json.tmp`, to: `${dir}/settings.json` }])
     const saved = JSON.parse(fs.writes[0].data)
     expect(saved.theme).toBe('dark')
-    expect(saved.transparency).toEqual({ enabled: true, opacity: 70, blur: true })
+    expect(saved.transparency).toEqual({ enabled: true, opacity: 70, blur: true, glassFrost: 45 })
   })
 
   it('flush 在防抖窗口内被调用时立即落盘', async () => {
@@ -391,6 +407,36 @@ describe('settings-store', () => {
     expect(fs.renames[0].to).toMatch(/[/\\]settings\.json\.corrupt-\d{8}-\d{6}$/)
     expect(fs.files.get(fs.renames[0].to)).toBe('{broken') // 原残余保留在留证文件
     errSpy.mockRestore()
+  })
+
+  it('非 ENOENT 读错（EBUSY 瞬时锁）：load 上抛不置 loaded，update 重试失败不落盘，盘上设置原样', async () => {
+    const onDisk = JSON.stringify({ theme: 'dark', windowPos: { x: 11, y: 22 } })
+    const fs = fakeFs({ [`${dir}/settings.json`]: onDisk })
+    fs.readFailCode = 'EBUSY'
+    const store = new SettingsStore(dir, fs)
+    await expect(store.load()).rejects.toMatchObject({ code: 'EBUSY' })
+    expect(store.settings).toEqual(platformDefaults()) // 未加载：内存停在初始默认态，未被盘上内容污染
+    await expect(store.update({ theme: 'light' })).rejects.toMatchObject({ code: 'EBUSY' }) // 懒加载重试同败
+    await store.flush()
+    expect(fs.writes).toHaveLength(0) // dirty 未置，flush 不写盘
+    expect(fs.renames).toHaveLength(0)
+    expect(fs.files.get(`${dir}/settings.json`)).toBe(onDisk) // 盘上设置原样
+  })
+
+  it('EBUSY 解除后 update 懒加载读回盘上设置：不以默认底整包覆盖', async () => {
+    const onDisk = JSON.stringify({ theme: 'dark', windowPos: { x: 11, y: 22 } })
+    const fs = fakeFs({ [`${dir}/settings.json`]: onDisk })
+    fs.readFailCode = 'EBUSY'
+    const store = new SettingsStore(dir, fs)
+    await expect(store.load()).rejects.toMatchObject({ code: 'EBUSY' })
+    fs.readFailCode = null // 锁解除
+    await store.update({ theme: 'light' })
+    expect(store.settings.theme).toBe('light')
+    expect(store.settings.windowPos).toEqual({ x: 11, y: 22 }) // 盘上原值经重试 load 读回
+    await store.flush()
+    const saved = JSON.parse(fs.files.get(`${dir}/settings.json`)!)
+    expect(saved.theme).toBe('light')
+    expect(saved.windowPos).toEqual({ x: 11, y: 22 })
   })
 
   it('合法 JSON 但字段类型非法：坏值回退默认，不再向快捷键层传非字符串', async () => {
@@ -599,5 +645,183 @@ describe('settings-store', () => {
     }
     const good = await loadWith({ x: 50.7, y: -30.2 })
     expect(good.settings.windowPos).toEqual({ x: 51, y: -30 })
+  })
+
+  // ===== 本地 win 线合流补测（磨砂度/剪贴板面板/自定义背景，随 v0.0.29-0.0.42 线合入）=====
+  it('update transparency.glassFrost：0-100 夹取，坏类型丢弃保留现值，字段级合并不牵连', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    await store.update({ transparency: { glassFrost: 70 } })
+    expect(store.settings.transparency.glassFrost).toBe(70)
+    await store.update({ transparency: { glassFrost: 150 } })
+    expect(store.settings.transparency.glassFrost).toBe(100)
+    await store.update({ transparency: { glassFrost: -3 } })
+    expect(store.settings.transparency.glassFrost).toBe(0)
+    await store.update({ transparency: { glassFrost: 'x' as unknown as number } })
+    expect(store.settings.transparency.glassFrost).toBe(0) // 坏类型丢弃，保留现值
+    await store.update({ transparency: { opacity: 80 } })
+    expect(store.settings.transparency.glassFrost).toBe(0) // 只传 opacity 不丢 glassFrost
+  })
+
+  it('迁移：旧档缺 glassFrost 按 opacity 派生（55→45、30→70、0→100），已带字段不派生', async () => {
+    const loadTx = async (tx: unknown): Promise<TransparencySettings> => {
+      const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'glass', transparency: tx }) })
+      const store = new SettingsStore(dir, fs)
+      await store.load()
+      return store.settings.transparency
+    }
+    expect(await loadTx({ enabled: true, opacity: 55, blur: true, glassFrost: 45 })).toEqual({
+      enabled: true,
+      opacity: 55,
+      blur: true,
+      glassFrost: 45
+    })
+    expect((await loadTx({ opacity: 30 })).glassFrost).toBe(70)
+    expect((await loadTx({ opacity: 0 })).glassFrost).toBe(100)
+    expect((await loadTx({ opacity: 20, glassFrost: 80 })).glassFrost).toBe(80) // 已带字段不派生
+    expect((await loadTx({ opacity: 20, glassFrost: 'x' })).glassFrost).toBe(45) // 字段在但坏类型：不派生，回默认
+    expect((await loadTx({ enabled: false, blur: true })).glassFrost).toBe(45) // 无 opacity：默认 45
+  })
+
+  it('update clipboardPanel position=off：内存立即生效，flush 落盘往返（新 store load 后回显）', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    await store.update({ clipboardPanel: { position: 'off' } })
+    expect(store.settings.clipboardPanel).toEqual({ position: 'off' })
+    await store.flush()
+    expect(JSON.parse(fs.files.get(`${dir}/settings.json`)!).clipboardPanel).toEqual({ position: 'off' })
+    const reopened = new SettingsStore(dir, fs)
+    await reopened.load()
+    expect(reopened.settings.clipboardPanel).toEqual({ position: 'off' })
+  })
+
+  it('迁移：旧文件 clipboardSuggest=false → 新开关 false 且面板 off（显式拒绝读取不被换形态放大采集）', async () => {
+    const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'dark', clipboardSuggest: false }) })
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.clipboardPanel).toEqual({ position: 'off' })
+    expect(store.settings.clipboardSuggest).toBe(false)
+    expect(store.settings.theme).toBe('dark')
+  })
+
+  it('迁移：旧文件 clipboardSuggest=true 或缺省 → 开关默认 true、面板默认 right（true 现为在册字段直接保留）', async () => {
+    const on = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ clipboardSuggest: true }) })
+    const storeOn = new SettingsStore(dir, on)
+    await storeOn.load()
+    expect(storeOn.settings.clipboardPanel).toEqual({ position: 'right' })
+    expect(storeOn.settings.clipboardSuggest).toBe(true)
+
+    const absent = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ theme: 'dark', disabledPlugins: ['x'] }) })
+    const storeAbsent = new SettingsStore(dir, absent)
+    await storeAbsent.load()
+    expect(storeAbsent.settings.clipboardPanel).toEqual({ position: 'right' })
+    expect(storeAbsent.settings.clipboardSuggest).toBe(true)
+    expect(storeAbsent.settings.disabledPlugins).toEqual(['x'])
+  })
+
+  it('迁移：同文件已带合法 clipboardPanel 时旧 clipboardSuggest 残留不反杀新值（开关本身仍保留 false）', async () => {
+    const fs = fakeFs({
+      [`${dir}/settings.json`]: JSON.stringify({ clipboardPanel: { position: 'below' }, clipboardSuggest: false })
+    })
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.clipboardPanel).toEqual({ position: 'below' })
+    expect(store.settings.clipboardSuggest).toBe(false)
+  })
+
+  it('clipboardSuggest 往返：update 落盘为 false，重开加载仍 false（推荐读取开关持久化）', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    await store.update({ clipboardSuggest: false })
+    expect(store.settings.clipboardSuggest).toBe(false)
+    await store.flush()
+    expect(JSON.parse(fs.files.get(`${dir}/settings.json`)!).clipboardSuggest).toBe(false)
+    const reopened = new SettingsStore(dir, fs)
+    await reopened.load()
+    expect(reopened.settings.clipboardSuggest).toBe(false)
+  })
+
+  it('手改文件 clipboardSuggest 非布尔（"yes"）：load 后回退默认 true', async () => {
+    const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ clipboardSuggest: 'yes' }) })
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.clipboardSuggest).toBe(true)
+  })
+
+  it('position 坏值丢弃回默认：手改文件与 update 通道同闸', async () => {
+    const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify({ clipboardPanel: { position: 'middle' } }) })
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.clipboardPanel).toEqual({ position: 'right' })
+    await store.update({ clipboardPanel: { position: 42 as unknown as 'left' } })
+    expect(store.settings.clipboardPanel).toEqual({ position: 'right' })
+    await store.update({ clipboardPanel: { position: 'left' } })
+    expect(store.settings.clipboardPanel).toEqual({ position: 'left' })
+    await store.update({ theme: 'dark' }) // 不携带 clipboardPanel 的 patch 不清空
+    expect(store.settings.clipboardPanel).toEqual({ position: 'left' })
+  })
+
+  it('手改文件行为偏好为合法值：迁移与相邻字段互不牵连（clipboardSuggest=false 迁 off，hideOnBlur 原样）', async () => {
+    const fs = fakeFs({
+      [`${dir}/settings.json`]: JSON.stringify({ clipboardSuggest: false, hideOnBlur: false })
+    })
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.clipboardPanel).toEqual({ position: 'off' })
+    expect(store.settings.clipboardSuggest).toBe(false)
+    expect(store.settings.hideOnBlur).toBe(false)
+  })
+
+  it('update background：三字段收录，file 白名单（空串走清除路径），dim 夹取，字段级合并不牵连', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    await store.update({ background: { enabled: true, file: 'current.jpg', dim: 40 } })
+    expect(store.settings.background).toEqual({ enabled: true, file: 'current.jpg', dim: 40 })
+    await store.update({ background: { dim: 150 } })
+    expect(store.settings.background.dim).toBe(100)
+    expect(store.settings.background.enabled).toBe(true) // 不携带字段不丢
+    await store.update({ background: { file: '' } })
+    expect(store.settings.background.file).toBe('') // '' = 清除路径合法
+    await store.update({ background: { file: '../evil.jpg' } })
+    expect(store.settings.background.file).toBe('') // 白名单外丢弃保留现值
+    await store.update({ background: { dim: 'x' as unknown as number, enabled: 'yes' as unknown as boolean } })
+    expect(store.settings.background).toEqual({ enabled: true, file: '', dim: 100 }) // 坏类型丢弃保留现值
+    await store.update({ theme: 'dark' }) // 不携带 background 的 patch 不清空
+    expect(store.settings.background).toEqual({ enabled: true, file: '', dim: 100 })
+  })
+
+  it('手改文件 background 含坏值：坏项回退默认，相邻字段不受牵连', async () => {
+    const fs = fakeFs({
+      [`${dir}/settings.json`]: JSON.stringify({
+        theme: 'dark',
+        background: { enabled: 'yes', file: 'a/b.jpg', dim: 'x' },
+        hideOnBlur: false
+      })
+    })
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    expect(store.settings.background).toEqual({ enabled: false, file: '', dim: 40 })
+    expect(store.settings.theme).toBe('dark')
+    expect(store.settings.hideOnBlur).toBe(false)
+  })
+
+  it('background 持久化往返：update→flush 落盘，新 store load 后回显', async () => {
+    const fs = fakeFs()
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    await store.update({ background: { enabled: true, file: 'current.jpg', dim: 60 } })
+    await store.flush()
+    expect(JSON.parse(fs.files.get(`${dir}/settings.json`)!).background).toEqual({
+      enabled: true,
+      file: 'current.jpg',
+      dim: 60
+    })
+    const reopened = new SettingsStore(dir, fs)
+    await reopened.load()
+    expect(reopened.settings.background).toEqual({ enabled: true, file: 'current.jpg', dim: 60 })
   })
 })

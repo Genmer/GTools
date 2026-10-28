@@ -8,7 +8,14 @@ export function registerHotkey(accel: string, cb: () => void, gs: GlobalShortcut
   const issue = validateAccelerator(accel, process.platform)
   if (!issue.ok) return { ok: false, error: issue.reason }
   const electronAccel = toElectronAccelerator(accel, process.platform)
-  if (!gs.register(electronAccel, cb)) {
+  // gs.register 对坏加速键抛 TypeError，按注册失败走，防毒丸炸调用链
+  let registered = false
+  try {
+    registered = gs.register(electronAccel, cb)
+  } catch {
+    registered = false
+  }
+  if (!registered) {
     return { ok: false, error: `快捷键 ${accel} 注册失败（可能被其他应用占用）` }
   }
   currentElectronAccel = electronAccel
@@ -22,7 +29,13 @@ let probeAccel: string | null = null
 export function armHotkeyProbe(accel: string, cb: () => void, gs: GlobalShortcutLike = globalShortcut): boolean {
   const electronAccel = toElectronAccelerator(accel, process.platform)
   if (probeAccel === electronAccel) return true
-  if (!gs.register(electronAccel, cb)) return false
+  let registered = false
+  try {
+    registered = gs.register(electronAccel, cb)
+  } catch {
+    registered = false
+  }
+  if (!registered) return false
   probeAccel = electronAccel
   return true
 }
@@ -40,7 +53,13 @@ export function rebindHotkey(newAccel: string, cb: () => void, gs: GlobalShortcu
   const electronAccel = toElectronAccelerator(newAccel, process.platform)
   // 同键保存时探针仍占着键，register 必败：先让位（正常保存与登录项回滚两条路径都经此）
   if (probeAccel === electronAccel) disarmHotkeyProbe(gs)
-  if (!gs.register(electronAccel, cb)) {
+  let registered = false
+  try {
+    registered = gs.register(electronAccel, cb)
+  } catch {
+    registered = false
+  }
+  if (!registered) {
     return { ok: false, error: `快捷键 ${newAccel} 注册失败（可能被其他应用占用），已保留原快捷键` }
   }
   if (currentElectronAccel && currentElectronAccel !== electronAccel) {
@@ -67,9 +86,9 @@ interface SuspendedMain {
   accel: string
   cb: () => void
 }
+// 挂起态只存主键（挂起期换绑后置 null）；指令键不快照，commandActions 实时记账，resume 按当前注册表重建
 interface SuspendedState {
   main: SuspendedMain | null
-  commands: { accel: string; cb: () => void }[]
 }
 let suspendedState: SuspendedState | null = null
 
@@ -77,22 +96,33 @@ let suspendedState: SuspendedState | null = null
 export function suspendHotkeys(gs: Pick<GlobalShortcutLike, 'unregister'> = globalShortcut): boolean {
   if (suspendedState) return false
   const main = currentElectronAccel && mainCb ? { accel: currentElectronAccel, cb: mainCb } : null
-  const commands = [...commandActions.values()].map((a) => ({ accel: a.accel, cb: a.cb }))
+  const commands = [...commandActions.values()]
   if (!main && commands.length === 0) return false
   if (main) gs.unregister(main.accel)
   for (const c of commands) gs.unregister(c.accel)
-  suspendedState = { main, commands }
+  suspendedState = { main }
   return true
 }
 
-/** 恢复挂起的热键；个别重注册失败只能放弃该键（下次换绑/同步时重建），不报错 */
+/** 恢复挂起的热键；指令键从当前 commandActions 重建（挂起期 sync 已随启用态增删，禁用插件的键不复活、新启插件的键自然带上），个别重注册失败只能放弃该键，不报错 */
 export function resumeHotkeys(gs: Pick<GlobalShortcutLike, 'register'> = globalShortcut): boolean {
   if (!suspendedState) return false
   const s = suspendedState
   suspendedState = null
-  if (s.main) gs.register(s.main.accel, s.main.cb)
-  for (const c of s.commands) gs.register(c.accel, c.cb)
+  const tryRegister = (accel: string, cb: () => void): void => {
+    try {
+      gs.register(accel, cb)
+    } catch {
+      // 防注册器抛异常炸链，语义同失败：放弃该键，下次换绑/同步时重建
+    }
+  }
+  if (s.main) tryRegister(s.main.accel, s.main.cb)
+  for (const c of commandActions.values()) tryRegister(c.accel, c.cb)
   return true
+}
+
+export function isHotkeysSuspended(): boolean {
+  return suspendedState !== null
 }
 
 /** globalShortcut 可注入子集：node 单测不触 electron */
@@ -151,6 +181,7 @@ export function syncCommandHotkeys(
 ): CommandHotkeySyncResult {
   const platform = process.platform
   const mainElectron = mainAccel ? toElectronAccelerator(mainAccel, platform) : null
+  const suspended = isHotkeysSuspended()
   const skipped: CommandHotkeyIssue[] = []
   const failed: CommandHotkeyIssue[] = []
   const wanted = new Map<string, { pluginId: string; commandId: string; accel: string; cb: () => void }>()
@@ -201,6 +232,11 @@ export function syncCommandHotkeys(
       // 同键换绑另一指令：electron 对已注册加速键重复注册会失败，须先让位再注册
       gs.unregister(b.accel)
       commandActions.delete(b.accel)
+    }
+    if (suspended) {
+      // 挂起期全键已让路：只记账不注册，resume 按当前注册表重建
+      commandActions.set(b.accel, action)
+      continue
     }
     if (gs.register(b.accel, action.cb)) commandActions.set(b.accel, action)
     else {

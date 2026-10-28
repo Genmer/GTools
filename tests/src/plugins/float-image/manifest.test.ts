@@ -35,7 +35,7 @@ describe('float-image manifest', () => {
 
   it('commands 唯一且与全局词条直达对应', () => {
     const ids = manifest.commands?.map((c) => c.id) ?? []
-    expect(ids).toEqual(['pin-clipboard', 'pin-file'])
+    expect(ids).toEqual(['pin-clipboard', 'pin-file', 'save-clipboard'])
   })
 
   it('matchers 包含 files 图片匹配与 img 剪贴板粘贴匹配（commandId 均指向已存在命令）', () => {

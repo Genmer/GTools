@@ -1,4 +1,5 @@
 import type { PluginManifest } from '@sdk/manifest'
+import { host } from '../core/host-bridge'
 import { restOf, router } from './router-core'
 
 // 纯状态机在 router-core（不含 DOM 依赖，可进 node 单测程序）；此处只补窗口侧出口并统一再导出
@@ -25,5 +26,5 @@ export function exitLevel(manifests: PluginManifest[]): void {
     router.query = ''
     return
   }
-  void window.gtools.host('window:hide')
+  void host('window:hide')
 }

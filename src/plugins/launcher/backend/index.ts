@@ -25,7 +25,7 @@ async function buildDefaultDeps(): Promise<ScanDeps> {
     execFile(
       cmd: string,
       args: string[],
-      opts: { windowsHide: true },
+      opts: { windowsHide: true; timeout: number; maxBuffer: number },
       cb: (err: Error | null, stdout: string, stderr: string) => void
     ): unknown
   }
@@ -43,9 +43,9 @@ async function buildDefaultDeps(): Promise<ScanDeps> {
       readFile: (path) => fsMod.readFile(path, { encoding: 'utf-8' })
     },
     exec: {
-      execFile: (cmd, args) =>
+      execFile: (cmd, args, opts) =>
         new Promise((resolve, reject) => {
-          cpMod.execFile(cmd, args, { windowsHide: true }, (err, stdout, stderr) =>
+          cpMod.execFile(cmd, args, { windowsHide: true, timeout: opts.timeout, maxBuffer: opts.maxBuffer }, (err, stdout, stderr) =>
             err ? reject(err) : resolve({ stdout, stderr })
           )
         })

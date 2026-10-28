@@ -5,6 +5,7 @@ import type { HostFetchInit, HostFetchResult } from '@sdk/api'
 import { fetchChecked, unescapeHtml } from '../src/main/services/api-center/executors/http'
 import { executeHttpTemplate, extractTemplateResult } from '../src/main/services/api-center/executors/http-template'
 import { executeMyMemory, parseMyMemoryBody } from '../src/main/services/api-center/executors/mymemory'
+import { executeAiChat } from '../src/main/services/api-center/executors/openai-chat'
 import { TranslateExecutorError, type FetchFn } from '../src/main/services/api-center/executors/types'
 import { ApiCenterService, ApiServiceError } from '../src/main/services/api-center'
 import type { FsLike } from '../src/main/settings-store'
@@ -47,6 +48,17 @@ function rejectKindFn(f: () => unknown): string {
     expect(e).toBeInstanceOf(TranslateExecutorError)
     return (e as TranslateExecutorError).kind
   }
+}
+
+/** 取 promise 的 rejection 为 TranslateExecutorError（断言 message 细节用） */
+async function rejectErr(p: Promise<unknown>): Promise<TranslateExecutorError> {
+  try {
+    await p
+  } catch (e) {
+    expect(e).toBeInstanceOf(TranslateExecutorError)
+    return e as TranslateExecutorError
+  }
+  throw new Error('(resolved)')
 }
 
 const zh = { text: '你好世界', from: 'zh-CN', to: 'en' }
@@ -206,7 +218,7 @@ describe('executeHttpTemplate（自定义 HTTP 接口执行器）', () => {
 
 // ---------- 全局中心路径（B.5.1 补充用例：activeProviderId 路由、回退默认、禁用 provider） ----------
 
-const noopFs = { readFile: async () => { throw new Error('ENOENT') }, writeFile: async () => {}, rename: async () => {}, mkdir: async () => {} } as FsLike
+const noopFs = { readFile: async () => { throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }) }, writeFile: async () => {}, rename: async () => {}, mkdir: async () => {} } as FsLike
 
 function makeService(fetch: FetchFn, notify?: () => void): ApiCenterService {
   return new ApiCenterService({ dir: '/data', fs: noopFs, fetch, notify, generateId: () => 'u-abcd1234' })
@@ -350,5 +362,70 @@ describe('ApiCenterService 路由与状态', () => {
     await expect(
       svc.upsertProvider({ type: 'http-template', name: 'x', endpoint: 'https://a.example.com/?key={key}' })
     ).rejects.toThrow(/密钥/)
+  })
+})
+
+// ---------- executeAiChat（题3：OpenAI 兼容代理执行器） ----------
+
+describe('executeAiChat（主进程代理执行）', () => {
+  const provider = {
+    id: 'u-aiface01',
+    type: 'ai-chat' as const,
+    name: 'GLM',
+    enabled: true,
+    baseUrl: 'https://api.example.com/v4/',
+    model: 'glm-4',
+    secrets: { apiKey: 'sk-secret-9' }
+  }
+
+  it('URL 去尾斜杠拼 /chat/completions；Bearer 注入；body 含 system 提示词与 model、stream:false', async () => {
+    const { fn, calls } = recordingFetch(() => okBody('{"choices":[{"message":{"content":"Hello"}}]}'))
+    const out = await executeAiChat({ text: '你好' }, rt(fn), provider)
+    expect(out).toEqual({ resultText: 'Hello', providerId: 'u-aiface01' })
+    expect(calls[0].url).toBe('https://api.example.com/v4/chat/completions')
+    expect(calls[0].init?.method).toBe('POST')
+    expect(calls[0].init?.headers).toEqual({ 'Content-Type': 'application/json', Authorization: 'Bearer sk-secret-9' })
+    const body = JSON.parse(String(calls[0].init?.body))
+    expect(body.model).toBe('glm-4')
+    expect(body.stream).toBe(false)
+    expect(body.messages[0].role).toBe('system')
+    expect(body.messages[0].content).toContain('只输出译文')
+    expect(body.messages[1]).toEqual({ role: 'user', content: '你好' })
+  })
+
+  it('超时预算显式 60s（F8：init.timeoutMs 覆盖 rt 默认 10s）', async () => {
+    const { fn, calls } = recordingFetch(() => okBody('{"choices":[{"message":{"content":"x"}}]}'))
+    await executeAiChat({ text: 'hi' }, rt(fn), provider)
+    expect(calls[0].init?.timeoutMs).toBe(60_000)
+    await executeAiChat({ text: 'hi' }, { fetch: fn, timeoutMs: 1_000 }, provider)
+    expect(calls[1].init?.timeoutMs).toBe(60_000)
+  })
+
+  it('choices 缺失/译文非字符串/非 JSON 归 parse；401 归 http、429 归 quota，文案带「AI 服务」label', async () => {
+    const { fn } = recordingFetch(() => okBody('{"choices":[]}'))
+    expect(await rejectKind(executeAiChat({ text: 'hi' }, rt(fn), provider))).toBe('parse')
+    const noContent = recordingFetch(() => okBody('{"choices":[{"message":{}}]}')).fn
+    expect(await rejectKind(executeAiChat({ text: 'hi' }, rt(noContent), provider))).toBe('parse')
+    const badJson = recordingFetch(() => okBody('<html>502</html>')).fn
+    const err = await rejectErr(executeAiChat({ text: 'hi' }, rt(badJson), provider))
+    expect(err.kind).toBe('parse')
+    expect(err.message).toContain('AI 服务')
+
+    const http401 = recordingFetch(() => httpErr(401)).fn
+    const err401 = await rejectErr(executeAiChat({ text: 'hi' }, rt(http401), provider))
+    expect(err401.kind).toBe('http')
+    expect(err401.message).toBe('AI 服务返回 HTTP 401')
+    const quota429 = recordingFetch(() => httpErr(429)).fn
+    expect(await rejectKind(executeAiChat({ text: 'hi' }, rt(quota429), provider))).toBe('quota')
+  })
+
+  it('空文本请求前拦截（fetch 零调用）；异常与错误 message 均不含 apiKey', async () => {
+    const { fn, calls } = recordingFetch(() => okBody('{}'))
+    expect(await rejectKind(executeAiChat({ text: ' \n\t' }, rt(fn), provider))).toBe('config')
+    expect(calls).toHaveLength(0)
+
+    const boom = await rejectErr(executeAiChat({ text: 'hi' }, rt(recordingFetch(() => new Error('socket hang up')).fn), provider))
+    expect(boom.kind).toBe('network')
+    expect(`${boom.message}`).not.toContain('sk-secret-9')
   })
 })

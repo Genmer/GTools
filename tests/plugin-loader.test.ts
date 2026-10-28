@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { PluginLoader } from '../src/main/plugin-loader'
 import type { PluginBackend, BackendContext } from '../sdk/api'
 import type { PluginManifest } from '../sdk/manifest'
+import { createBackendContext, type ServiceBag } from '../src/main/services/dispatch'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -266,6 +267,60 @@ describe('plugin-loader backend 生命周期', () => {
     await loader.load([])
     await loader.disposeAll()
     expect(calls).toEqual(['start', 'stop', 'dispose'])
+  })
+
+  // 禁用链先 registry.setEnabled(false) 再 backend.stop()：本用真 createBackendContext + 记录型 storage 搭全链，验证收尾 flush 不被 PLUGIN_DISABLED 拒
+  it('禁用/退出收尾：stop() 与 dispose() 内的落盘 flush 全链不丢', async () => {
+    const writes: Array<{ pluginId: string; key: string; value: unknown }> = []
+    // 未触能力面按本文件 ctxFactory 惯例置 {} as never
+    const services: ServiceBag = {
+      clipboard: {} as never,
+      storage: {
+        get: async () => null,
+        set: async (pluginId: string, key: string, value: unknown) => {
+          writes.push({ pluginId, key, value })
+        },
+        remove: async () => {},
+        keys: async () => [],
+        dumpAll: async () => ({}),
+        replaceAll: async () => {}
+      },
+      net: {} as never,
+      notification: {} as never,
+      shell: {} as never,
+      window: {} as never,
+      screenshot: {} as never,
+      dialog: {} as never,
+      fs: {} as never,
+      app: { platform: 'test', version: '0', arch: 'x64' },
+      apis: {} as never,
+      events: { emitToRenderer: () => {}, emit: () => {}, onPluginEvent: () => () => {} }
+    }
+    let ctx!: BackendContext
+    const be: PluginBackend = {
+      init: async (c) => {
+        ctx = c
+      },
+      start: async () => {},
+      stop: async () => {
+        await ctx.storage.set('stopFlush', 'last-batch')
+      },
+      dispose: async () => {
+        await ctx.storage.set('disposeFlush', 'final')
+      }
+    }
+    const loader: PluginLoader = new PluginLoader({
+      builtinManifests: [manifest({ id: 'flushy', activation: 'resident', backend: './b', keywords: ['flushy'], permissions: ['storage'] })],
+      loadBackend: async () => be,
+      externalDir: null,
+      createBackendContext: (pid) => createBackendContext(loader.registry, services, pid)
+    })
+    await loader.load([])
+    const r = await loader.setEnabled('flushy', false)
+    expect(r.ok).toBe(true)
+    expect(writes).toContainEqual({ pluginId: 'flushy', key: 'stopFlush', value: 'last-batch' })
+    await loader.disposeAll()
+    expect(writes).toContainEqual({ pluginId: 'flushy', key: 'disposeFlush', value: 'final' })
   })
 })
 

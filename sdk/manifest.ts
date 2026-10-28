@@ -13,6 +13,8 @@ export type Permission =
   | 'dialog'
   | 'fs'
   | 'apis:translate'
+  /** API 中心 AI 对话品类（OpenAI 兼容 /chat/completions），经 host.apis 代理调用 */
+  | 'apis:ai'
   /** 截图：唤起全屏选区遮罩窗抓屏（desktopCapturer + 冻结帧选区） */
   | 'screenshot'
   /** 仅声明面：常驻推送闸在渲染层，推送走既有 plugin-event 通道不经 dispatchApi，主进程无感知 */
@@ -31,6 +33,7 @@ export const ALL_PERMISSIONS: readonly Permission[] = [
   'dialog',
   'fs',
   'apis:translate',
+  'apis:ai',
   'screenshot',
   'mainPush'
 ]

@@ -6,17 +6,24 @@ export interface DeepLink {
   query: string
   demo: boolean
   isDetached: boolean
+  isFlyout: boolean
 }
 
 /**
- * 解析 hash 深链（截图/自动化/独立窗口入口）：
- * '#plugin=<id>&q=<query>&demo=1' 或独立窗口形态 '#detached=true&plugin=<id>&query=<q>'。
- * 仅 '#demo=1'（无 plugin）也合法：demo 态注入示例应用供空态截图，pluginId 为空串。
+ * 解析 hash 深链（截图/自动化/独立窗口/剪贴板飞窗入口）：
+ * '#plugin=<id>&q=<query>&demo=1'、独立窗口 '#detached=true&plugin=<id>&query=<q>'、飞窗 '#clipboard-flyout=1'。
+ * 仅 '#demo=1'/'#clipboard-flyout=1'（无 plugin）也合法：demo 态注入示例应用，飞窗态渲染剪贴板卡片，pluginId 为空串。
  * 值一律 decodeURIComponent，'+' 不当空格（计算式查询里是真实加号）。
  */
 export function parseDeepLink(hash: string): DeepLink | null {
   const h = hash.replace(/^#/, '')
-  if (!h.startsWith('plugin=') && !h.startsWith('demo=') && !h.startsWith('detached=')) return null
+  if (
+    !h.startsWith('plugin=') &&
+    !h.startsWith('demo=') &&
+    !h.startsWith('detached=') &&
+    !h.startsWith('clipboard-flyout=')
+  )
+    return null
   const params = new Map<string, string>()
   for (const part of h.split('&')) {
     const eq = part.indexOf('=')
@@ -34,13 +41,16 @@ export function parseDeepLink(hash: string): DeepLink | null {
   const demoOn = demo === '1' || demo === 'true'
   const detachedRaw = (params.get('detached') ?? '').toLowerCase()
   const detachedOn = detachedRaw === '1' || detachedRaw === 'true'
+  const flyoutRaw = (params.get('clipboard-flyout') ?? '').toLowerCase()
+  const flyoutOn = flyoutRaw === '1' || flyoutRaw === 'true'
   const pluginId = params.get('plugin') ?? ''
-  if (pluginId === '' && !demoOn) return null
+  if (pluginId === '' && !demoOn && !flyoutOn) return null
   return {
     pluginId,
     query: params.get('query') ?? params.get('q') ?? '',
     demo: demoOn,
-    isDetached: detachedOn
+    isDetached: detachedOn,
+    isFlyout: flyoutOn
   }
 }
 

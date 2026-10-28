@@ -1,7 +1,7 @@
 import { app, clipboard, ClipboardItem, desktopCapturer, dialog as electronDialog, nativeImage, net, Notification, screen, shell } from 'electron'
 import { BrowserWindow } from 'electron'
 import { networkInterfaces, tmpdir } from 'node:os'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { isAbsolute, join } from 'node:path'
@@ -17,6 +17,7 @@ import type {
   HostFetchResult
 } from '@sdk/api'
 import { PluginStorageService } from './storage'
+import { createClipboardExemptions } from './clipboard-exemptions'
 import { assertHttpUrl, resolveFetchBody } from './net-guard'
 import { lanIPv4Addresses } from './lan'
 import type { StreamFetchResponse } from './update-downloader'
@@ -25,6 +26,7 @@ import { getSearchWindow, showSearchWindow } from '../window'
 import { FileAccessService, type FileAccessFs } from './file-access'
 import { createScreenshotService, type CapturedFrame, type OverlayHandle } from './screenshot'
 import { extractIcnsPngForSize, lnkIconCandidates } from './native-apps'
+import { secureWebContents } from '../window'
 import type { ApiCenterService } from './api-center'
 
 export { PluginStorageService }
@@ -187,6 +189,8 @@ export function createElectronServices(opts: {
   storageRoot: string
   appVersion: string
   getWindow: () => BrowserWindow | null
+  /** 主窗显隐唯一出口（F1）：插件 window.hide 与截图 hideLauncher 全部经此收口到 hideSearchWindow（连带藏飞窗） */
+  hideWindow: () => void
   /** 全部窗口枚举（主窗 + 独立插件窗）：插件事件广播面，detached 窗依赖此回调收 plugin-event */
   listWindows: () => RendererWindowLike[]
   apiCenter: ApiCenterService
@@ -265,6 +269,7 @@ export function createElectronServices(opts: {
         }
       })
       if (o.alwaysOnTop) win.setAlwaysOnTop(true, 'floating')
+      secureWebContents(win.webContents)
       // macOS 全屏覆盖：浮窗常驻全工作区可见（含全屏空间），不切走前台 app 全屏
       if (process.platform === 'darwin') {
         win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
@@ -302,7 +307,7 @@ export function createElectronServices(opts: {
   })
 
   const screenshot = createScreenshotService({
-    hideLauncher: () => opts.getWindow()?.hide(),
+    hideLauncher: () => opts.hideWindow(),
     getTargetDisplay: () => {
       let d
       try {
@@ -347,6 +352,7 @@ export function createElectronServices(opts: {
       })
       // screen-saver 级压住任务栏；注入冻结帧完成后再 show，避免闪黑
       win.setAlwaysOnTop(true, 'screen-saver')
+      secureWebContents(win.webContents)
       // macOS 全屏覆盖：截图取景 overlay 挂全屏空间可见，全屏应用上取景不切空间
       if (process.platform === 'darwin') {
         win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
@@ -433,11 +439,20 @@ export function createElectronServices(opts: {
 
   const gifDataUrl = (src: ClipboardImageSource): string => `data:image/gif;base64,${src.buffer.toString('base64')}`
 
+  // 敏感指纹豁免表（vault 密码/用户名经 writeTextEphemeral 登记后不被采集器入史）；sha256 在此注入保持豁免表纯逻辑可单测
+  const clipboardExemptions = createClipboardExemptions((text) => createHash('sha256').update(text, 'utf8').digest('hex'))
+
   return {
     clipboard: {
       // Electron 44 clipboard 已 W3C 异步化（无同步 readImage/writeImage），图片走 ClipboardItem + Blob
       readText: () => clipboard.readText(),
       writeText: (t) => clipboard.writeText(t),
+      writeTextEphemeral: async (t, opts) => {
+        // 先登记后写：写入生效与登记的间隙里轮询器可能读到未豁免的密码；写失败留下的孤儿豁免无害
+        clipboardExemptions.register(t, opts?.ttlMs)
+        await clipboard.writeText(t)
+      },
+      isTextExempted: async (t) => clipboardExemptions.isExempted(t),
       readImage: async () => {
         const src = await readClipboardImageSource()
         if (!src) return null
@@ -492,7 +507,7 @@ export function createElectronServices(opts: {
     },
     window: {
       hide: () => {
-        opts.getWindow()?.hide()
+        opts.hideWindow()
         return Promise.resolve()
       },
       // 浮窗/后台回到主 UI：唤起主窗 + 可选直达插件命令态（渲染层经 host:open-plugin 白名单通道接收）
@@ -556,6 +571,7 @@ export function createElectronServices(opts: {
     app: { platform: process.platform, version: opts.appVersion, arch: process.arch },
     apis: {
       translate: (req) => opts.apiCenter.translate(req),
+      chat: (req) => opts.apiCenter.chat(req),
       status: (service) => opts.apiCenter.status(service)
     },
     events

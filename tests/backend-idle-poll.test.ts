@@ -41,10 +41,12 @@ vi.mock('node:fs/promises', () => ({
 import { PluginStorageService } from '../src/main/services/storage'
 import { IDLE_POLL_MS, TICK_MS, TimerBackend } from '../src/plugins/timer/backend'
 import { CMD_KEY } from '../src/plugins/timer/logic/commands'
+import { join } from 'node:path'
 
 const ROOT = '/gtools-test/storage'
 const PLUGIN = 'timer'
-const KV = `${ROOT}/${PLUGIN}/kv.json`
+// storage 内部用 join 拼路径（win 反斜杠），断言键必须同构
+const KV = join(ROOT, PLUGIN, 'kv.json')
 const STATE_KEY = 'timer-state'
 
 interface FakeTimer {

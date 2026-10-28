@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { parseColor } from './logic/color'
-import { copyText } from './copy'
+import { useCopyFeedback } from './copy'
 
 const input = ref('#4493f8')
 const result = computed(() => parseColor(input.value))
+const { msg: copyMsg, copy } = useCopyFeedback()
 </script>
 
 <template>
@@ -21,9 +22,10 @@ const result = computed(() => parseColor(input.value))
         <span class="ok">hsl({{ result.color.hsl.h }}, {{ result.color.hsl.s }}%, {{ result.color.hsl.l }}%)</span>
       </div>
       <div class="bar">
-        <button class="btn" @click="copyText(result.color.hex)">复制 HEX</button>
-        <button class="btn" @click="copyText(`rgb(${result.color.rgb.r}, ${result.color.rgb.g}, ${result.color.rgb.b})`)">复制 RGB</button>
-        <button class="btn" @click="copyText(`hsl(${result.color.hsl.h}, ${result.color.hsl.s}%, ${result.color.hsl.l}%)`)">复制 HSL</button>
+        <button class="btn" @click="copy(result.color.hex)">复制 HEX</button>
+        <button class="btn" @click="copy(`rgb(${result.color.rgb.r}, ${result.color.rgb.g}, ${result.color.rgb.b})`)">复制 RGB</button>
+        <button class="btn" @click="copy(`hsl(${result.color.hsl.h}, ${result.color.hsl.s}%, ${result.color.hsl.l}%)`)">复制 HSL</button>
+        <span v-if="copyMsg !== ''" :class="copyMsg === '复制失败' ? 'err' : 'ok'">{{ copyMsg }}</span>
       </div>
     </template>
   </div>

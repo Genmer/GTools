@@ -54,8 +54,9 @@ export interface FsLike {
   readFile(path: string): Promise<string>
 }
 
+/** opts 透传 node child_process 同名参数：timeout 防挂起、maxBuffer 防 App Paths 输出超限报错 */
 export interface ExecLike {
-  execFile(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }>
+  execFile(cmd: string, args: string[], opts: { timeout: number; maxBuffer: number }): Promise<{ stdout: string; stderr: string }>
 }
 
 export interface ScanDeps {

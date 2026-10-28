@@ -100,6 +100,15 @@ export const PROVIDER_PRESETS: readonly ProviderPresetMeta[] = [
       { key: 'accessKeyId', label: 'Access Key ID', placeholder: '火山引擎 IAM 访问密钥' },
       { key: 'secretAccessKey', label: 'Secret Access Key', placeholder: '与 Access Key ID 配对' }
     ]
+  },
+  {
+    type: 'ai-chat',
+    label: 'AI 翻译（OpenAI 兼容）',
+    description: 'OpenAI 兼容 /chat/completions 端点，密钥只存本机',
+    quotaNote: '按所用服务商计费',
+    consoleUrl: null,
+    credentials: [{ key: 'apiKey', label: 'API Key', placeholder: 'sk-…（OpenAI 兼容服务的密钥）' }],
+    hints: ['大模型引擎：输出非逐字确定、延迟略高']
   }
 ]
 

@@ -5,6 +5,9 @@ directories:
 files:
   - out/**
   - package.json
+  # 渲染层依赖全被 Vite bundle，运行时零消费；排除后 main 不得有裸依赖导入
+  #（electron.vite.config.ts 已 exclude pinyin-pro，tests/packaging-slim.test.ts 守门）
+  - "!node_modules/**"
 extraResources:
   - from: resources
     to: .

@@ -1,11 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import defaultBackend, {
   ClipboardHistoryBackend,
-  MAIN_PUSH_PAYLOAD_CHARS,
   POLL_INTERVAL_MS,
   SYNC_INTERVAL_MS,
-  type BackendScheduler,
-  type MainPushItem
+  type BackendScheduler
 } from '../../../../src/plugins/clipboard/backend'
 import { MAX_TEXT_CHARS, toPersisted } from '../../../../src/plugins/clipboard/logic/history'
 import type { BackendContext } from '@sdk/api'
@@ -47,15 +45,20 @@ interface Harness {
   }
   storage: Map<string, unknown>
   emits: { event: string; payload: unknown }[]
-  calls: { readImage: number }
+  calls: { readImage: number; isTextExempted: number }
+  /** 豁免集合：加入其中的文本 pollOnce 视为宿主写入的敏感内容（清空即模拟 TTL 过期） */
+  exempted: Set<string>
 }
 
-async function makeHarness(seedState?: unknown): Promise<Harness> {
+async function makeHarness(seedState?: unknown, seedExtra?: [string, unknown][]): Promise<Harness> {
   const scheduler = new ManualScheduler()
-  const storage = new Map<string, unknown>(seedState === undefined ? [] : [['state', seedState]])
+  const storage = new Map<string, unknown>(
+    seedState === undefined ? (seedExtra ?? []) : ([['state', seedState]] as [string, unknown][]).concat(seedExtra ?? [])
+  )
   const clipboard = { text: '', image: null as { width: number; height: number; dataUrl: string } | null, failReadText: false }
   const emits: { event: string; payload: unknown }[] = []
-  const calls = { readImage: 0 }
+  const calls = { readImage: 0, isTextExempted: 0 }
+  const exempted = new Set<string>()
   const ctx: BackendContext = {
     apiVersion: 1,
     clipboard: {
@@ -65,6 +68,14 @@ async function makeHarness(seedState?: unknown): Promise<Harness> {
       },
       writeText: async (t) => {
         clipboard.text = t
+      },
+      writeTextEphemeral: async (t) => {
+        clipboard.text = t
+        exempted.add(t)
+      },
+      isTextExempted: async (t) => {
+        calls.isTextExempted++
+        return exempted.has(t)
       },
       readImage: async () => {
         calls.readImage++
@@ -121,7 +132,7 @@ async function makeHarness(seedState?: unknown): Promise<Harness> {
   }
   const backend = new ClipboardHistoryBackend(scheduler)
   await backend.init(ctx)
-  return { backend, scheduler, clipboard, storage, emits, calls }
+  return { backend, scheduler, clipboard, storage, emits, calls, exempted }
 }
 
 const storedStateOf = (h: Harness): { settings: { maxRecords: number; clearOnExit: boolean }; records: unknown[] } =>
@@ -275,6 +286,49 @@ describe('clipboard backend 容量与清空', () => {
     expect(storedStateOf(h)?.records).toHaveLength(1)
   })
 
+  it('用户清空→采集新记录→重启（init）→新记录仍在（标记采纳即消费）', async () => {
+    const h1 = await makeHarness()
+    h1.clipboard.text = 'old'
+    await h1.backend.pollOnce()
+    await h1.backend.flush()
+    h1.storage.set('clear-marker', 42) // 用户清空
+    await h1.backend.syncExternal()
+    expect(h1.storage.get('clear-marker')).toBe(0) // 采纳即消费（修复前残留 42）
+    h1.clipboard.text = 'new'
+    await h1.backend.pollOnce()
+    await h1.backend.flush()
+
+    // 重启：内存 clearMarker 归零，靠已消费的标记避免 init→syncExternal 再次采纳
+    const h2 = await makeHarness(h1.storage.get('state'), [['clear-marker', h1.storage.get('clear-marker')]])
+    expect(h2.backend.snapshot().map((r) => (r.kind === 'text' ? r.text : ''))).toEqual(['new'])
+    h2.clipboard.text = 'post-restart'
+    await h2.backend.pollOnce()
+    await h2.backend.flush()
+    expect(h2.backend.snapshot().map((r) => (r.kind === 'text' ? r.text : ''))).toEqual(['post-restart', 'new'])
+    expect(storedStateOf(h2).records.map((r) => (r as { text: string }).text)).toEqual(['post-restart', 'new'])
+  })
+
+  it('导入带清空标记的备份→backend 重启（init）→导入的历史仍在（不再被 adoptClear 清掉）', async () => {
+    // 备份源会话：清空已采纳，标记随之消费为 0（备份随 kv.json 带上该键）
+    const src = await makeHarness()
+    src.storage.set('clear-marker', 42)
+    await src.backend.syncExternal()
+    expect(src.storage.get('clear-marker')).toBe(0)
+
+    // 恢复导入：backend 停机期间 restore 写入历史 state（连同备份里的 clear-marker 键），随后重启
+    const h = await makeHarness(
+      toPersisted({ maxRecords: 10, clearOnExit: false, skipSensitive: true }, [
+        { id: 'imp1', kind: 'text', ts: 100, text: 'imported-1' },
+        { id: 'imp2', kind: 'text', ts: 101, text: 'imported-2' }
+      ]),
+      [['clear-marker', src.storage.get('clear-marker')]]
+    )
+    expect(h.backend.snapshot().map((r) => (r.kind === 'text' ? r.text : ''))).toEqual(['imported-2', 'imported-1'])
+    await h.backend.flush()
+    expect(storedStateOf(h).records).toHaveLength(2)
+    expect(h.emits.some((e) => e.event === 'history-changed' && (e.payload as { count: number }).count === 0)).toBe(false)
+  })
+
   it('渲染层改容量：设置生效并重收敛，records 非空时以内存为准', async () => {
     const h = await makeHarness()
     const texts = Array.from({ length: 12 }, (_, i) => `t${i}`)
@@ -349,6 +403,54 @@ describe('clipboard backend 敏感内容拦截', () => {
   })
 })
 
+describe('clipboard backend 敏感指纹豁免（writeTextEphemeral 闭环）', () => {
+  it('豁免命中 → 不入库不通知，同内容指纹短路不重复查询（skipSensitive 关闭也拦）', async () => {
+    const h = await makeHarness()
+    h.clipboard.text = 'one'
+    await h.backend.pollOnce()
+    await h.backend.flush()
+    h.storage.set('state', {
+      v: 1,
+      settings: { maxRecords: 10, clearOnExit: false, skipSensitive: false },
+      records: storedStateOf(h).records
+    })
+    await h.backend.syncExternal()
+
+    h.clipboard.text = 'vault-pw-xyz' // 任意形态密码：正则拦不住，靠指纹豁免
+    h.exempted.add('vault-pw-xyz')
+    const emitsBefore = h.emits.length
+    const exemptBefore = h.calls.isTextExempted
+    await h.backend.pollOnce()
+    await h.backend.pollOnce() // 同内容指纹短路，第二轮不再查豁免
+    expect(h.backend.snapshot().map((r) => (r.kind === 'text' ? r.text : ''))).toEqual(['one'])
+    expect(h.emits).toHaveLength(emitsBefore)
+    expect(h.calls.isTextExempted).toBe(exemptBefore + 1)
+  })
+
+  it('TTL 过期（豁免失效）后同内容重新采集（经内容变化重置指纹）', async () => {
+    const h = await makeHarness()
+    h.clipboard.text = 'pw'
+    h.exempted.add('pw')
+    await h.backend.pollOnce()
+    expect(h.backend.snapshot()).toHaveLength(0)
+
+    h.exempted.delete('pw') // 模拟 TTL 过期
+    h.clipboard.text = 'other' // 剪贴板换了内容再换回，重置 lastSig 指纹
+    await h.backend.pollOnce()
+    h.clipboard.text = 'pw'
+    await h.backend.pollOnce()
+    expect(h.backend.snapshot().map((r) => (r.kind === 'text' ? r.text : ''))).toEqual(['pw', 'other'])
+  })
+
+  it('未登记豁免的文本不受影响（正常采集）', async () => {
+    const h = await makeHarness()
+    h.clipboard.text = 'plain text'
+    await h.backend.pollOnce()
+    expect(h.backend.snapshot().map((r) => (r.kind === 'text' ? r.text : ''))).toEqual(['plain text'])
+    expect(h.calls.isTextExempted).toBe(1)
+  })
+})
+
 describe('clipboard backend 单条删除（remove-marker 协议）', () => {
   const idOfText = (h: Harness, t: string): string => {
     const rec = h.backend.snapshot().find((r) => r.kind === 'text' && r.text === t)
@@ -403,97 +505,6 @@ describe('clipboard backend 单条删除（remove-marker 协议）', () => {
     expect(storedStateOf(h).records).toHaveLength(0)
     expect(h.storage.get('remove-marker')).toEqual({ ts: 2000, ids: [] })
     expect(h.emits.some((e) => e.event === 'history-changed' && (e.payload as { count: number }).count === 0)).toBe(true)
-  })
-})
-
-describe('clipboard backend 主推送（main-push）', () => {
-  const pushesOf = (h: Harness): MainPushItem[] => {
-    const last = [...h.emits].reverse().find((e) => e.event === 'main-push')
-    return last === undefined ? [] : (last.payload as MainPushItem[])
-  }
-
-  it('复制文本产生推送行：title 取首行截 40 字，payloadText 全文', async () => {
-    const h = await makeHarness()
-    h.clipboard.text = 'first line\nsecond line'
-    await h.backend.pollOnce()
-    expect(pushesOf(h)).toEqual([
-      {
-        pluginId: 'clipboard',
-        pushId: (h.backend.snapshot()[0] as { id: string }).id,
-        title: 'first line',
-        subtitle: '剪贴板',
-        payloadText: 'first line\nsecond line'
-      }
-    ])
-
-    h.clipboard.text = `${'t'.repeat(60)}\nrest`
-    await h.backend.pollOnce()
-    const items = pushesOf(h)
-    // 推送组是「最近 ≤3 条」全量而非增量：新旧行都在
-    expect(items).toHaveLength(2)
-    expect(items[0]?.title).toBe('t'.repeat(40))
-    expect(items[0]?.payloadText).toBe(`${'t'.repeat(60)}\nrest`)
-    expect(items[1]?.payloadText).toBe('first line\nsecond line')
-    // pushId 逐条唯一：多行推送在渲染层不塌缩的前提
-    expect(new Set(items.map((x) => x.pushId)).size).toBe(items.length)
-  })
-
-  it('payloadText 在 emit 侧截断到 2000（构造 >2000 字符记录验证）', async () => {
-    expect(MAIN_PUSH_PAYLOAD_CHARS).toBe(2000)
-    const h = await makeHarness()
-    h.clipboard.text = 'x'.repeat(2500)
-    await h.backend.pollOnce()
-    const items = pushesOf(h)
-    expect(items).toHaveLength(1)
-    expect(items[0]?.payloadText).toHaveLength(2000)
-  })
-
-  it('敏感文本不推送（skipSensitive 默认开：不入库亦无 main-push emit）', async () => {
-    const h = await makeHarness()
-    h.clipboard.text = 'token: abc'
-    await h.backend.pollOnce()
-    expect(h.backend.snapshot()).toHaveLength(0)
-    expect(h.emits.some((e) => e.event === 'main-push')).toBe(false)
-  })
-
-  it('关闭 skipSensitive 后敏感内容入库但仍不进推送（推送过滤独立于入库设置）', async () => {
-    const h = await makeHarness()
-    h.clipboard.text = 'one'
-    await h.backend.pollOnce()
-    await h.backend.flush()
-    h.storage.set('state', {
-      v: 1,
-      settings: { maxRecords: 10, clearOnExit: false, skipSensitive: false },
-      records: storedStateOf(h).records
-    })
-    await h.backend.syncExternal()
-    h.clipboard.text = 'password: hunter2'
-    await h.backend.pollOnce()
-    expect(h.backend.snapshot()).toHaveLength(2)
-    const items = pushesOf(h)
-    expect(items.map((i) => i.payloadText)).toEqual(['one'])
-  })
-
-  it('推送行只取最近 3 条非敏感文本，图片不计', async () => {
-    const h = await makeHarness()
-    for (const t of ['a', 'b', 'c', 'd']) {
-      h.clipboard.text = t
-      await h.backend.pollOnce()
-    }
-    h.clipboard.text = ''
-    h.clipboard.image = { width: 4, height: 4, dataUrl: pngDataUrl('push') }
-    await h.backend.pollOnce()
-    expect(pushesOf(h).map((i) => i.payloadText)).toEqual(['d', 'c', 'b'])
-  })
-
-  it('清空后推送空数组（渲染层按最新一组整组替换语义）', async () => {
-    const h = await makeHarness()
-    h.clipboard.text = 'a'
-    await h.backend.pollOnce()
-    await h.backend.flush() // 落盘后 dirty/saving 复位，syncExternal 才会采纳外部标记
-    h.storage.set('clear-marker', 42)
-    await h.backend.syncExternal()
-    expect(pushesOf(h)).toEqual([])
   })
 })
 

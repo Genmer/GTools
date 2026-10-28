@@ -135,6 +135,46 @@ describe('history 容量与图片预算', () => {
     expect(records[0]).toMatchObject({ kind: 'image', hash: 'h2', dataUrl: bigB })
     expect(records[1]).toMatchObject({ kind: 'image', hash: 'h1', dataUrl: null })
   })
+
+  it('单张超总预算的新图只置自身墓碑，存量图片 dataUrl 完好', () => {
+    let records = appendRecord([], imgRec({ hash: 'h1', dataUrl: 'a'.repeat(1000) }), 1, 500)
+    records = appendRecord(records, imgRec({ hash: 'h2', dataUrl: 'b'.repeat(2000) }), 2, 500)
+    const next = appendRecord(records, imgRec({ hash: 'h3', dataUrl: 'x'.repeat(IMAGE_DATA_BUDGET + 1) }), 3, 500)
+    expect(next).toHaveLength(3)
+    expect(next[0]).toMatchObject({ kind: 'image', hash: 'h3', dataUrl: null })
+    expect(next[1]).toMatchObject({ kind: 'image', hash: 'h2', dataUrl: 'b'.repeat(2000) })
+    expect(next[2]).toMatchObject({ kind: 'image', hash: 'h1', dataUrl: 'a'.repeat(1000) })
+  })
+
+  it('正常大小图片照旧按预算从最旧淘汰（回归）', () => {
+    const each = 'c'.repeat(Math.ceil(IMAGE_DATA_BUDGET / 3))
+    let records: ClipboardRecord[] = []
+    for (const h of ['h1', 'h2', 'h3']) {
+      records = appendRecord(records, imgRec({ hash: h, dataUrl: each }), records.length + 1, 500)
+    }
+    expect(records).toHaveLength(3)
+    expect(records[0]).toMatchObject({ hash: 'h3', dataUrl: each })
+    expect(records[1]).toMatchObject({ hash: 'h2', dataUrl: each })
+    expect(records[2]).toMatchObject({ hash: 'h1', dataUrl: null })
+  })
+
+  it('加载存量状态：单条超预算图只置自身墓碑，不连坐清光存量图片', () => {
+    const raw = {
+      v: 1,
+      settings: { maxRecords: 100, clearOnExit: false, skipSensitive: true },
+      records: [
+        imgRec({ hash: 'hbig', dataUrl: 'x'.repeat(IMAGE_DATA_BUDGET + 1), ts: 3 }),
+        imgRec({ hash: 'h2', dataUrl: 'b'.repeat(2000), ts: 2 }),
+        imgRec({ hash: 'h1', dataUrl: 'a'.repeat(1000), ts: 1 })
+      ]
+    }
+    const parsed = parsePersistedState(raw)
+    expect(parsed).not.toBeNull()
+    expect(parsed!.records).toHaveLength(3)
+    expect(parsed!.records[0]).toMatchObject({ hash: 'hbig', dataUrl: null })
+    expect(parsed!.records[1]).toMatchObject({ hash: 'h2', dataUrl: 'b'.repeat(2000) })
+    expect(parsed!.records[2]).toMatchObject({ hash: 'h1', dataUrl: 'a'.repeat(1000) })
+  })
 })
 
 describe('history 搜索与预览', () => {
@@ -318,7 +358,7 @@ describe('clipboard-history manifest', () => {
     expect(errors).toEqual([])
     expect(manifest.activation).toBe('resident')
     expect(typeof manifest.backend).toBe('string')
-    expect([...manifest.permissions].sort()).toEqual(['clipboard:read', 'clipboard:write', 'mainPush', 'storage'])
+    expect([...manifest.permissions].sort()).toEqual(['clipboard:read', 'clipboard:write', 'storage'])
   })
 
   it('keyword 与已启用插件冲突时被校验拒绝', () => {

@@ -206,6 +206,20 @@ export class PluginLoader {
     }
   }
 
+  /** 备份导入的重载信令前半：stop 运行中的 backend 并清 init 标记，返回是否发生了 stop。
+   *  backend 的 stop 会把内存态 flush 落盘（clipboard/todo-pomodoro 均如此），调用方必须把本方法
+   *  放在 storage.replaceAll 之前让导入数据覆盖之；后半 ensureBackendStarted 在 replaceAll 之后调，
+   *  backend 重新 init 才会读到导入后的 kv（模块级单例，重复 loadBackend 拿不到新实例）。 */
+  async suspendBackend(id: string): Promise<boolean> {
+    const entry = this.registry.get(id)
+    if (!entry || !entry.backendStarted || entry.backend === null) return false
+    const r = await withTimeout(Promise.resolve(entry.backend.stop()), this.stopTimeoutMs)
+    if (!r.ok) console.error(`GTools backend 停止超时（${id}），重载继续`)
+    entry.backendStarted = false
+    entry.backendInited = false
+    return true
+  }
+
   async setEnabled(id: string, enabled: boolean): Promise<{ ok: boolean; error?: string }> {
     const entry = this.registry.get(id)
     if (!entry) return { ok: false, error: `插件不存在：${id}` }

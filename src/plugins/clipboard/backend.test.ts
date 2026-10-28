@@ -26,6 +26,7 @@ function makeCtx(): Harness {
         if (shouldFail) throw new Error('clipboard busy')
         return nextText
       },
+      isTextExempted: async (): Promise<boolean> => false,
       readImage: async () => nextImage
     },
     storage: {
@@ -79,19 +80,13 @@ describe('pollOnce 文本与图片记录', () => {
     h.setText('hello')
     await b.pollOnce()
     expect(texts(b.snapshot())).toEqual(['hello'])
-    // commit 成对 emit：history-changed + 主框直推 main-push（最近非敏感文本行）
-    expect(h.emits).toEqual([
-      { event: 'history-changed', payload: { count: 1 } },
-      {
-        event: 'main-push',
-        payload: [{ pluginId: 'clipboard', pushId: (b.snapshot()[0] as { id: string }).id, title: 'hello', subtitle: '剪贴板', payloadText: 'hello' }]
-      }
-    ])
+    // commit emit：history-changed（main-push 直推链路已拆除）
+    expect(h.emits).toEqual([{ event: 'history-changed', payload: { count: 1 } }])
     expect(stateIn(h).records).toHaveLength(1)
 
     await b.pollOnce()
     expect(b.snapshot()).toHaveLength(1)
-    expect(h.emits).toHaveLength(2) // 仍停在首轮 commit 的一对 emit，短路轮零 emit
+    expect(h.emits).toHaveLength(1) // 仍停在首轮 commit 的 emit，短路轮零 emit
   })
 
   it('文本→图片→文本交替记录，图片含指纹字段', async () => {
@@ -124,11 +119,8 @@ describe('pollOnce 文本与图片记录', () => {
     h.setImage({ width: 5, height: 5, dataUrl: 'data:image/jpeg;base64,QUJD' }) // 前缀不同但字节相同
     await b.pollOnce() // hash 相同 → 短路
     expect(b.snapshot()).toHaveLength(1)
-    // 首轮 commit 的一对 emit（图片无文本，main-push 为空组），短路轮零 emit
-    expect(h.emits).toEqual([
-      { event: 'history-changed', payload: { count: 1 } },
-      { event: 'main-push', payload: [] }
-    ])
+    // 首轮 commit 的 emit，短路轮零 emit
+    expect(h.emits).toEqual([{ event: 'history-changed', payload: { count: 1 } }])
   })
 
   it('字节不同的图片正常新增为第二条', async () => {
@@ -259,6 +251,7 @@ describe('syncExternal 外部变更', () => {
     const ctx = {
       clipboard: {
         readText: async (): Promise<string> => curText,
+        isTextExempted: async (): Promise<boolean> => false,
         readImage: async (): Promise<null> => null
       },
       storage: {
@@ -297,7 +290,7 @@ describe('syncExternal 外部变更', () => {
     h.store.delete('state') // PluginStorageService 读失败静默返回 {} → get 为 null
     await b.syncExternal()
     expect(texts(b.snapshot())).toEqual(['a'])
-    expect(h.emits).toHaveLength(2) // 仅首轮 commit 的一对 emit；无 count 0 误报
+    expect(h.emits).toHaveLength(1) // 仅首轮 commit 的 emit；无 count 0 误报
   })
 
   it('flush 在途（慢盘）时 syncExternal 读到的旧空状态不清内存，旧记录不丢', async () => {
@@ -312,6 +305,7 @@ describe('syncExternal 外部变更', () => {
     const ctx = {
       clipboard: {
         readText: async (): Promise<string> => curText,
+        isTextExempted: async (): Promise<boolean> => false,
         readImage: async (): Promise<null> => null
       },
       storage: {

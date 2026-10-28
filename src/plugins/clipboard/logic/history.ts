@@ -88,7 +88,12 @@ export function appendRecord(
   if (newest !== undefined && sameRecordContent(newest, incoming)) {
     return [{ ...newest, ts: now }, ...records.slice(1)]
   }
-  return enforceImageBudget(enforceCap([incoming, ...records], maxRecords), IMAGE_DATA_BUDGET)
+  // 单条自身超总预算的图先置墓碑，否则它让累计永远超限，会把存量图片全部清成墓碑
+  const entry: ClipboardRecord =
+    incoming.kind === 'image' && incoming.dataUrl !== null && incoming.dataUrl.length > IMAGE_DATA_BUDGET
+      ? { ...incoming, dataUrl: null }
+      : incoming
+  return enforceImageBudget(enforceCap([entry, ...records], maxRecords), IMAGE_DATA_BUDGET)
 }
 
 export function filterRecords(records: ClipboardRecord[], query: string): ClipboardRecord[] {
@@ -180,10 +185,14 @@ export function parsePersistedState(raw: unknown): PersistedClipboardState | nul
     if (rec !== null) records.push(rec)
   }
   records.sort((a, b) => b.ts - a.ts)
+  // 与 appendRecord 同款单条预检：存量里的超预算图（旧版本写入/预算常量下调）只置自身墓碑，不连坐清光存量
+  const prechecked = records.map((r) =>
+    r.kind === 'image' && r.dataUrl !== null && r.dataUrl.length > IMAGE_DATA_BUDGET ? { ...r, dataUrl: null } : r
+  )
   return {
     v: 1,
     settings,
-    records: enforceImageBudget(enforceCap(records, settings.maxRecords), IMAGE_DATA_BUDGET)
+    records: enforceImageBudget(enforceCap(prechecked, settings.maxRecords), IMAGE_DATA_BUDGET)
   }
 }
 

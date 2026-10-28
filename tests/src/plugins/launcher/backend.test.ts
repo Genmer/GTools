@@ -212,6 +212,42 @@ describe('launcher backend 生命周期', () => {
     expect(emits[3].payload).toMatchObject({ count: 1 })
   })
 
+  it('reg 查询失败（超时/超缓冲）：扫描降级完成不卡死，console.warn 留痕，scanning 复位可再扫', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { ctx, map, emits } = fakeCtx()
+      let execCalls = 0
+      const backend = createLauncherBackend({
+        deps: async () => ({
+          ...fakeDeps,
+          platform: 'win32',
+          win32Roots: [],
+          exec: {
+            execFile: async () => {
+              execCalls++
+              throw new Error('reg query 超时')
+            }
+          }
+        }),
+        pollMs: POLL_MS
+      })
+      await backend.init(ctx)
+      await backend.start()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(emits.map((e) => e.event)).toEqual(['scan-started', 'scan-done']) // 降级完成，非 scan-error
+      expect(execCalls).toBe(2) // HKLM + HKCU
+      expect(warn).toHaveBeenCalledTimes(2)
+
+      map.set('scanRequest', Date.now() + 10) // scanning 已复位 → 刷新可再扫
+      await vi.advanceTimersByTimeAsync(POLL_MS)
+      expect(execCalls).toBe(4)
+      expect(emits.map((e) => e.event)).toEqual(['scan-started', 'scan-done', 'scan-started', 'scan-done'])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('扫描进行中的请求不并发触发（单飞），完成后旧请求不补扫', async () => {
     const { ctx, map, emits } = fakeCtx()
     let release!: (apps: AppEntry[]) => void

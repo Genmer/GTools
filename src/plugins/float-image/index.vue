@@ -19,6 +19,7 @@ import {
   shrinkScaleFor,
   type NaturalSize
 } from './logic/state'
+import { normalizePinHistory, pushPinHistory, type PinHistoryItem } from './logic/history'
 
 const props = defineProps<{
   ctx: PluginContext
@@ -28,12 +29,15 @@ const props = defineProps<{
 }>()
 
 const STORAGE_KEY = 'state'
+const HISTORY_KEY = 'history'
 const THUMB_MAX = 96
 
 /** 已悬浮列表一行：会话级展示信息（缩略图/显示尺寸来自事件回传，不持久化） */
 interface PinRow {
   id: string
   label: string
+  /** 本窗图片的数据源：重挂载后找回的幽灵窗没有（对应历史行也找不回） */
+  dataUrl?: string
   thumb?: string
   /** 无真实缩略图时的占位图样式（demo 行固定给，真实贴图失败兜底 photo） */
   ph?: 'photo' | 'palette'
@@ -42,6 +46,20 @@ interface PinRow {
   x?: number
   y?: number
   opacity?: number
+}
+
+/** 悬浮历史列表行（含 demo/幽灵窗占位），canPin 的行点击再次悬浮 */
+interface ListRow {
+  key: string
+  thumb: string
+  ph: 'photo' | 'palette'
+  label: string
+  sub: string
+  live: boolean
+  canPin: boolean
+  demo: boolean
+  item?: PinHistoryItem
+  closeId?: string
 }
 
 // demo 态（#plugin=float-image&demo=1）：2 条稳定示例供截图与新手引导，关闭按钮只改本地数组
@@ -57,10 +75,58 @@ const busy = ref(false)
 const dragOver = ref(false)
 const clipboardImage = ref<{ dataUrl: string; width: number; height: number } | null>(null)
 const pins = reactive(new Map<string, PinRow>())
+const history = ref<PinHistoryItem[]>([])
 
 // demo 态下真实贴图仍会生效并追加展示，示例行固定排前面
 const rows = computed<PinRow[]>(() => (demoMode ? [...demoRows.value, ...pins.values()] : [...pins.values()]))
 const openCount = computed(() => rows.value.length)
+
+function saveHistory(): void {
+  if (demoMode) return
+  // IPC 结构化克隆不认 Vue reactive 代理，先 JSON 走一遍拿纯对象
+  void props.ctx.host.storage.set(HISTORY_KEY, JSON.parse(JSON.stringify(history.value))).catch(() => {})
+}
+
+function histTime(at: number): string {
+  const d = new Date(at)
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+// 悬浮历史行：贴过的图持久留存（点击再次悬浮）；正在悬浮的图标 live；找不到 dataUrl 的幽灵窗补占位行
+const listRows = computed<ListRow[]>(() => {
+  const histUrls = new Set(history.value.map((x) => x.dataUrl))
+  const liveUrls = new Set(
+    [...pins.values()].map((p) => p.dataUrl).filter((u): u is string => typeof u === 'string' && u !== '')
+  )
+  const out: ListRow[] = history.value.map((it) => ({
+    key: `${it.at}-${it.dataUrl.length}-${it.dataUrl.slice(24, 48)}`,
+    thumb: it.thumb,
+    ph: 'photo' as const,
+    label: it.label,
+    sub: `原始 ${it.natural.width}×${it.natural.height} · ${histTime(it.at)}`,
+    live: liveUrls.has(it.dataUrl),
+    canPin: true,
+    demo: false,
+    item: it
+  }))
+  for (const r of rows.value) {
+    if (r.dataUrl !== undefined && histUrls.has(r.dataUrl)) continue
+    out.push({
+      key: 'g:' + r.id,
+      thumb: r.thumb ?? '',
+      ph: r.ph ?? 'photo',
+      label: r.label,
+      sub: rowSub(r),
+      live: false,
+      canPin: false,
+      demo: isDemoRow(r.id),
+      closeId: r.id
+    })
+  }
+  return out
+})
+const histCount = computed(() => listRows.value.length)
 
 let runtime: PinRuntime = createPinRuntime(normalizePersist(null))
 let offEvents: (() => void) | null = null
@@ -78,7 +144,10 @@ onBeforeUnmount(() => {
   offEvents?.()
   if (persistTimer !== null) clearTimeout(persistTimer)
   // demo 态不落盘：示例会话的位置/倍率记忆不能覆盖真实用户数据
-  if (!demoMode) void props.ctx.host.storage.set(STORAGE_KEY, runtime.persist).catch(() => {})
+  if (!demoMode) {
+    void props.ctx.host.storage.set(STORAGE_KEY, runtime.persist).catch(() => {})
+    saveHistory()
+  }
 })
 
 // 全局词条直达：pin-clipboard 直接贴出剪贴板，pin-file 优先消费拖入文件（demo 不触发动作）
@@ -89,6 +158,8 @@ watch(
     commandDone = true
     if (cmd === 'pin-clipboard') {
       await pinClipboard()
+    } else if (cmd === 'save-clipboard') {
+      await saveClipboard()
     } else if (cmd === 'pin-file') {
       const files = props.initialPayload ?? []
       if (files.length > 0) {
@@ -126,6 +197,7 @@ async function loadPersist(): Promise<void> {
   if (demoMode) return
   try {
     runtime = createPinRuntime(normalizePersist(await props.ctx.host.storage.get(STORAGE_KEY)))
+    history.value = normalizePinHistory(await props.ctx.host.storage.get(HISTORY_KEY))
   } catch {
     // 读取失败按全新状态走，不阻塞功能
   }
@@ -153,23 +225,15 @@ function onFloatEvent(ev: FloatWindowEvent): void {
   trackPinFromEvent(ev)
   const r = reduceFloatEvent(runtime, ev)
   runtime = r.runtime
-  for (const action of r.actions) {
-    if (action.kind === 'update') {
-      props.ctx.host.window.float.update(action.id, action.patch).catch(() => {
-        // 窗口已被关掉：清出计数即可，不影响其余浮窗
-        runtime = dropPin(runtime, action.id)
-        pins.delete(action.id)
-      })
-    } else {
-      schedulePersist()
-    }
-  }
+  // 浮窗页已本地自管几何（gtoolsFloat.setBounds 直达主进程），update 动作不再回放 float.update——
+  // 回放会在快速滚轮时用旧尺寸覆盖页面新尺寸；这里只消费 persist 记忆位置/倍率/不透明度
+  if (r.actions.some((a) => a.kind === 'persist')) schedulePersist()
 }
 
 // 浮窗周期性 state 报告回填列表行的显示尺寸/位置/不透明度；重挂载后的幽灵窗口找不回缩略图，给占位
 function trackPinFromEvent(ev: FloatWindowEvent): void {
   if (typeof ev?.id !== 'string' || ev.id === '') return
-  if (ev.event === 'closing') {
+  if (ev.event === 'closing' || ev.event === 'closed') {
     pins.delete(ev.id)
     return
   }
@@ -217,6 +281,39 @@ async function pinClipboard(): Promise<void> {
       return
     }
     await pinDataUrl(img.dataUrl, { width: img.width, height: img.height }, '剪贴板图片')
+    await hideHostWindow()
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err))
+  } finally {
+    busy.value = false
+  }
+}
+
+// 保存成文件：读剪贴板图 → 另存对话框（取消=静默结束）→ base64 落盘
+async function saveClipboard(): Promise<void> {
+  if (busy.value) return
+  busy.value = true
+  error.value = ''
+  try {
+    const img = clipboardImage.value ?? (await props.ctx.host.clipboard.readImage())
+    clipboardImage.value = img
+    if (!img) {
+      fail('剪贴板里没有图片：先截图（macOS ⇧⌘4 / Windows Win+Shift+S）或复制一张图片')
+      return
+    }
+    const stamp = new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '')
+    const path = await props.ctx.host.dialog.saveFile({
+      title: '保存剪贴板图片',
+      defaultPath: `clipboard_${stamp}.png`,
+      filters: [{ name: 'PNG 图片', extensions: ['png'] }]
+    })
+    if (path === null) return
+    await props.ctx.host.fs.grant([path])
+    const comma = img.dataUrl.indexOf(',')
+    await props.ctx.host.fs.write(path, comma >= 0 ? img.dataUrl.slice(comma + 1) : img.dataUrl, {
+      encoding: 'base64'
+    })
+    flash(`已保存：${path}`)
     await hideHostWindow()
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err))
@@ -320,7 +417,7 @@ async function pinDataUrl(rawUrl: string, natural: NaturalSize, label: string): 
     themeVars: extractThemeVars((name) => getComputedStyle(document.documentElement).getPropertyValue(name)),
     opacity: plan.opacity
   })
-  // win32 透明窗不支持原生缩放，本插件统一 resizable:false + update 改尺寸（Windows 分支未实测）
+  // win32 透明窗不支持原生拖缘缩放，统一 resizable:false；setBounds 改尺寸已在 Electron 44.4.5 win32 实证生效
   const id = await props.ctx.host.window.float.create({
     html,
     title: '贴图',
@@ -333,7 +430,17 @@ async function pinDataUrl(rawUrl: string, natural: NaturalSize, label: string): 
     focus: true
   })
   runtime = registerPin(runtime, id, size)
-  pins.set(id, { id, label, thumb, ph: 'photo', natural: size, opacity: plan.opacity })
+  pins.set(id, { id, label, thumb, dataUrl, ph: 'photo', natural: size, opacity: plan.opacity })
+  if (!demoMode) {
+    history.value = pushPinHistory(history.value, {
+      dataUrl,
+      label,
+      thumb: thumb ?? '',
+      natural: size,
+      at: Date.now()
+    })
+    saveHistory()
+  }
   // 连续贴多张时按 26px 阶梯错位，避免完全叠在同一处
   if (plan.x !== undefined && plan.y !== undefined) {
     runtime = {
@@ -445,6 +552,36 @@ function isDemoRow(id: string): boolean {
   return id.startsWith('demo-')
 }
 
+// 历史行点击：同一张图再悬浮一次（重新走完整贴图链路，含压缩/主题变量/错位）
+async function repin(row: ListRow): Promise<void> {
+  if (busy.value || row.item === undefined) return
+  busy.value = true
+  error.value = ''
+  try {
+    await pinDataUrl(row.item.dataUrl, row.item.natural, row.item.label)
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err))
+  } finally {
+    busy.value = false
+  }
+}
+
+function removeHistory(dataUrl: string): void {
+  history.value = history.value.filter((x) => x.dataUrl !== dataUrl)
+  saveHistory()
+}
+
+function removeRow(row: ListRow): void {
+  if (row.closeId !== undefined) closeOne(row.closeId)
+  else if (row.item !== undefined) removeHistory(row.item.dataUrl)
+}
+
+function clearHistory(): void {
+  history.value = []
+  saveHistory()
+  flash('已清空悬浮历史')
+}
+
 function rowSub(row: PinRow): string {
   const parts: string[] = []
   if (row.natural) parts.push(`原始 ${row.natural.width}×${row.natural.height}`)
@@ -477,6 +614,7 @@ function rowSub(row: PinRow): string {
       <div class="d-actions">
         <button class="btn primary" :disabled="busy" @click="pickFiles">新建悬浮窗…</button>
         <button class="btn" :disabled="busy" @click="pinClipboard">贴出剪贴板</button>
+        <button class="btn" :disabled="busy" @click="saveClipboard">保存成文件</button>
       </div>
       <p v-if="clipboardImage" class="d-clip">
         剪贴板里有一张图（{{ clipboardImage.width }}×{{ clipboardImage.height }}），点「贴出剪贴板」直接钉住
@@ -488,28 +626,36 @@ function rowSub(row: PinRow): string {
       {{ error !== '' ? error : status }}
     </p>
 
-    <!-- 已悬浮列表 -->
+    <!-- 悬浮历史列表 -->
     <div class="list">
       <div class="l-head">
-        <span class="l-title">悬浮中</span>
-        <span class="l-count">{{ openCount }}</span>
+        <span class="l-title">悬浮历史</span>
+        <span class="l-count">{{ histCount }}</span>
         <span class="l-space"></span>
+        <button class="linkbtn" :disabled="history.length === 0" @click="clearHistory">清空历史</button>
         <button class="linkbtn danger" :disabled="openCount === 0" @click="closeAll">关闭全部</button>
       </div>
 
-      <div v-if="rows.length === 0" class="l-empty">
+      <div v-if="listRows.length === 0" class="l-empty">
         <svg class="e-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
           <rect x="3" y="5" width="18" height="14" rx="2.5" />
           <circle cx="9" cy="10" r="1.6" />
           <path d="M5 17l5-5 3.5 3.5L16 13l3 3" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
-        <p>还没有悬浮的图片：拖一张图到上方，或点「贴出剪贴板」</p>
+        <p>还没有悬浮记录：拖一张图到上方，或点「贴出剪贴板」；贴过的图会留在这里，点击可再次悬浮</p>
       </div>
 
       <div v-else class="rows">
-        <div v-for="row in rows" :key="row.id" class="row" :title="row.label">
+        <div
+          v-for="row in listRows"
+          :key="row.key"
+          class="row"
+          :class="{ pin: row.canPin }"
+          :title="row.canPin ? '点击再次悬浮' : row.label"
+          @click="repin(row)"
+        >
           <span class="thumb">
-            <img v-if="row.thumb" :src="row.thumb" alt="" />
+            <img v-if="row.thumb !== ''" :src="row.thumb" alt="" />
             <!-- 占位图全部用主题变量绘制，三主题可用的"简单占位图" -->
             <svg v-else-if="row.ph === 'palette'" class="ph" viewBox="0 0 48 48" aria-hidden="true">
               <rect x="8" y="12" width="32" height="24" rx="4" fill="var(--bg-raised)" stroke="var(--border)" stroke-width="1.5" />
@@ -526,11 +672,17 @@ function rowSub(row: PinRow): string {
           <span class="r-main">
             <span class="r-label">
               <span class="name">{{ row.label }}</span>
-              <em v-if="isDemoRow(row.id)" class="r-demo">示例</em>
+              <em v-if="row.live" class="r-live">悬浮中</em>
+              <em v-if="row.demo" class="r-demo">示例</em>
             </span>
-            <span class="r-sub">{{ rowSub(row) }}</span>
+            <span class="r-sub">{{ row.sub }}</span>
           </span>
-          <button class="r-close" title="关闭该悬浮窗" aria-label="关闭该悬浮窗" @click="closeOne(row.id)">
+          <button
+            class="r-close"
+            :title="row.canPin ? '删除该条记录' : '关闭该悬浮窗'"
+            :aria-label="row.canPin ? '删除该条记录' : '关闭该悬浮窗'"
+            @click.stop="removeRow(row)"
+          >
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
               <line x1="6" y1="6" x2="18" y2="18" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
               <line x1="18" y1="6" x2="6" y2="18" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
@@ -541,7 +693,8 @@ function rowSub(row: PinRow): string {
     </div>
 
     <p class="tips">
-      悬浮窗操作：悬停浮出底部控制条（缩放 / 不透明度 / 关闭）· 滚轮缩放 · 双击图片回到 1:1 · Esc 关闭 · 位置与大小会被记住
+      悬浮窗操作：拖动图片移动 · 滚轮缩放 · 双击图片回到 1:1 · 悬停浮出底部控制条（不透明度 /
+      关闭，贴出后先显示 3 秒）· Esc 关闭 · 位置与大小会被记住
     </p>
   </div>
 </template>
@@ -805,6 +958,22 @@ function rowSub(row: PinRow): string {
   border-radius: var(--r-sm);
   background: var(--accent-dim);
   color: var(--accent);
+}
+
+/* 正在悬浮的历史行标记 + 可点击再悬浮的行态 */
+.r-live {
+  flex: none;
+  font-style: normal;
+  font-size: var(--fs-foot);
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  color: var(--ok);
+}
+
+.row.pin {
+  cursor: pointer;
 }
 .r-sub {
   font-size: var(--fs-sub);

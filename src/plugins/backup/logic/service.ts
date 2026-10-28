@@ -186,7 +186,8 @@ function safetyFileName(now: Date): string {
   )
 }
 
-/** 只保留最近 SAFETY_KEEP 份导入前快照，防止 backups/ 无限膨胀 */
+/** 只保留最近 SAFETY_KEEP 份导入前快照（按文件名时间降序留新，SAFETY_KEEP≥1 保证永不删尽），
+ *  防止 backups/ 无限膨胀；单份删除失败只跳过不阻塞导入（多留一份无害） */
 async function pruneSafetyBackups(port: BackupPort, safetyDir: string): Promise<void> {
   const stat = await port.stat(safetyDir)
   if (stat?.exists !== true) return
@@ -194,7 +195,7 @@ async function pruneSafetyBackups(port: BackupPort, safetyDir: string): Promise<
     .filter((e) => !e.isDirectory && /^pre-import-\d{8}-\d{6}\.gtools$/.test(e.name))
     .sort((a, b) => b.name.localeCompare(a.name))
   for (const old of files.slice(SAFETY_KEEP)) {
-    await port.remove(old.path)
+    await port.remove(old.path).catch(() => {})
   }
 }
 

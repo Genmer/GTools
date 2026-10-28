@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { PluginContext } from '@sdk/api'
 import ImageBedSettingsPanel from './settings.vue'
 import { base64ToBytes, dataUrlToBase64, dataUrlToMime } from './logic/base64'
+import { copyFeedbackMessage } from './logic/copy-feedback'
 import { FORMAT_LABELS, formatLink } from './logic/formats'
 import {
   HISTORY_STORAGE_KEY,
@@ -48,6 +49,7 @@ const lastResult = ref<{ url: string; filename: string } | null>(null)
 const showSettings = ref(false)
 const dragOver = ref(false)
 const toast = ref('')
+const toastError = ref(false)
 
 const hostFetch: FetchFn = (url, init) => props.ctx.host.net.fetch(url, init)
 // v-for 迭代对象会丢字面量键类型，改用键数组保住 LinkFormat
@@ -60,8 +62,9 @@ const providerName = computed(() => providerLabel(settings.value))
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let uploadRunning = false
 
-function showToast(msg: string): void {
+function showToast(msg: string, error = false): void {
   toast.value = msg
+  toastError.value = error
   if (toastTimer !== undefined) clearTimeout(toastTimer)
   toastTimer = setTimeout(() => (toast.value = ''), 1800)
 }
@@ -186,8 +189,8 @@ async function drainQueue(): Promise<void> {
         item.url = res.url
         lastResult.value = { url: res.url, filename: item.filename }
         await appendHistory(item, res)
-        await copyText(formatLink(format.value, res.url, item.filename))
-        showToast(`已上传并复制${FORMAT_LABELS[format.value]}链接`)
+        const copied = await copyText(formatLink(format.value, res.url, item.filename))
+        showToast(copyFeedbackMessage('upload', copied, FORMAT_LABELS[format.value]), !copied)
       } catch (err) {
         item.status = 'error'
         item.error = err instanceof ImageBedError || err instanceof Error ? err.message : String(err)
@@ -223,23 +226,25 @@ async function persistHistory(): Promise<void> {
   }
 }
 
-async function copyText(text: string): Promise<void> {
+// 成败交调用方出文案（这里 toast 会与成功文案连弹成矛盾双 toast）
+async function copyText(text: string): Promise<boolean> {
   try {
     await props.ctx.host.clipboard.writeText(text)
+    return true
   } catch {
-    showToast('复制到剪贴板失败')
+    return false
   }
 }
 
 async function copyEntryLink(e: HistoryEntry): Promise<void> {
-  await copyText(formatLink(format.value, e.url, e.filename))
-  showToast(`已复制${FORMAT_LABELS[format.value]}链接`)
+  const copied = await copyText(formatLink(format.value, e.url, e.filename))
+  showToast(copyFeedbackMessage('link', copied, FORMAT_LABELS[format.value]), !copied)
 }
 
 async function copyCurrentLink(): Promise<void> {
   if (lastResult.value === null) return
-  await copyText(currentLinkText.value)
-  showToast(`已复制${FORMAT_LABELS[format.value]}链接`)
+  const copied = await copyText(currentLinkText.value)
+  showToast(copyFeedbackMessage('link', copied, FORMAT_LABELS[format.value]), !copied)
 }
 
 async function openUrl(url: string): Promise<void> {
@@ -261,8 +266,9 @@ async function clearHistory(): Promise<void> {
   showToast('已清空上传历史')
 }
 
+// 只清已结束（成功/失败）行：排队与上传中的任务仍在队列里会被 drainQueue 继续消费，误清即静默丢图
 function clearPending(): void {
-  pending.value = pending.value.filter((p) => p.status === 'uploading')
+  pending.value = pending.value.filter((p) => p.status === 'waiting' || p.status === 'uploading')
 }
 
 function statusText(item: PendingItem): string {
@@ -320,7 +326,7 @@ function onSettingsSaved(next: ImageBedSettings): void {
       <div v-if="pending.length > 0" class="pending">
         <div class="phead">
           <span>本次队列（{{ pending.length }}）</span>
-          <button class="btn small" @click="clearPending">清空已完成</button>
+          <button class="btn small" @click="clearPending">清空已结束</button>
         </div>
         <div class="plist">
           <div v-for="item in pending" :key="item.key" class="pitem" :class="item.status">
@@ -376,7 +382,7 @@ function onSettingsSaved(next: ImageBedSettings): void {
     </template>
 
     <Transition name="fade">
-      <div v-if="toast" class="toast">{{ toast }}</div>
+      <div v-if="toast" class="toast" :class="{ error: toastError }">{{ toast }}</div>
     </Transition>
   </div>
 </template>
@@ -655,6 +661,11 @@ function onSettingsSaved(next: ImageBedSettings): void {
   font-size: 12px;
   pointer-events: none;
   z-index: 5;
+}
+.toast.error {
+  background: var(--danger-dim);
+  color: var(--danger);
+  border-color: var(--danger);
 }
 .fade-enter-active,
 .fade-leave-active {

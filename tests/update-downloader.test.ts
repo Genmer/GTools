@@ -32,7 +32,7 @@ function makeFs(listing: Record<string, number> = {}) {
     mkdirs: [] as string[]
   }
   const sinks: FakeSink[] = []
-  const base = (p: string): string => p.slice(p.lastIndexOf('/') + 1)
+  const base = (p: string): string => p.split(/[\\/]/).pop() ?? p
   const fs: UpdateDownloaderFs = {
     mkdir: async (d) => {
       state.mkdirs.push(d)

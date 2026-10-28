@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { validateManifest, PROTOCOL_VERSION } from '../sdk/manifest'
+import { ALL_PERMISSIONS, validateManifest, PROTOCOL_VERSION } from '../sdk/manifest'
 import type { PluginManifest } from '../sdk/manifest'
 
 const base = (over: Partial<PluginManifest> = {}): PluginManifest => ({
@@ -56,6 +56,11 @@ describe('manifest 校验', () => {
   it('未知权限拒绝', () => {
     const errs = validateManifest(base({ permissions: ['superuser' as never] }), emptyCtx())
     expect(errs.some((e) => e.field === 'permissions')).toBe(true)
+  })
+
+  it('apis:ai 权限全集：ALL_PERMISSIONS 含该项，声明即通过', () => {
+    expect(ALL_PERMISSIONS).toContain('apis:ai')
+    expect(validateManifest(base({ permissions: ['apis:ai'] }), emptyCtx())).toEqual([])
   })
 
   it('非对象清单不抛异常，返回可读错误', () => {

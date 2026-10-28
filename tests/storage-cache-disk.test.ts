@@ -9,7 +9,8 @@ const mem = vi.hoisted(() => {
     writes: [] as { file: string; content: string }[],
     renames: [] as { from: string; to: string }[],
     failWrites: 0,
-    failRenames: 0
+    failRenames: 0,
+    failReads: 0
   }
   return state
 })
@@ -19,6 +20,10 @@ vi.mock('node:fs/promises', () => ({
   readdir: vi.fn(async () => [] as Array<{ name: string; isDirectory(): boolean }>),
   readFile: vi.fn(async (file: string): Promise<string> => {
     mem.reads++
+    if (mem.failReads > 0) {
+      mem.failReads--
+      throw Object.assign(new Error(`EBUSY: read failed: ${file}`), { code: 'EBUSY' })
+    }
     const content = mem.files.get(file)
     if (content === undefined) {
       const err = new Error(`ENOENT: no such file: ${file}`) as NodeJS.ErrnoException
@@ -31,7 +36,7 @@ vi.mock('node:fs/promises', () => ({
     mem.renames.push({ from, to }) // 失败也留痕，便于断言留证目标路径
     if (mem.failRenames > 0) {
       mem.failRenames--
-      throw new Error('EBUSY: rename failed')
+      throw Object.assign(new Error('EBUSY: rename failed'), { code: 'EBUSY' })
     }
     const content = mem.files.get(from)
     mem.files.delete(from)
@@ -49,9 +54,11 @@ vi.mock('node:fs/promises', () => ({
 
 import { PluginStorageService } from '../src/main/services/storage'
 
+// 路径与实现同源 join：win32 上 join 产反斜杠，POSIX 字面量会对不上假 fs 的键（双端适配）
+import { join } from 'node:path'
 const ROOT = '/gtools-test/storage'
-const KV = `${ROOT}/p/kv.json`
-const KV_TMP = `${ROOT}/p/kv.json.tmp`
+const KV = join(ROOT, 'p', 'kv.json')
+const KV_TMP = join(ROOT, 'p', 'kv.json.tmp')
 
 beforeEach(() => {
   mem.files.clear()
@@ -60,6 +67,7 @@ beforeEach(() => {
   mem.renames.length = 0
   mem.failWrites = 0
   mem.failRenames = 0
+  mem.failReads = 0
 })
 
 describe('PluginStorageService 内存缓存（get 不重复读盘）', () => {
@@ -132,5 +140,54 @@ describe('PluginStorageService 损坏留证的失败分支', () => {
     expect(await svc.get('p', 'k')).toBe('v')
     expect(JSON.parse(mem.files.get(KV)!)).toEqual({ k: 'v' })
     errSpy.mockRestore()
+  })
+})
+
+describe('PluginStorageService 读错误不污染缓存（仅 ENOENT 是无数据）', () => {
+  it('EBUSY 读失败：get 拿到错误而非空，缓存不被空态污染——锁解除后 set 不以空底覆盖盘上数据', async () => {
+    mem.files.set(KV, JSON.stringify({ a: 1 })) // 盘上已有数据
+    mem.failReads = 1 // 首读被瞬时锁（杀软/备份软件）
+    const svc = new PluginStorageService(ROOT)
+    await expect(svc.get('p', 'a')).rejects.toThrow('EBUSY')
+    // 修复前：读错误被当无数据，空态进缓存，set 会把盘上 {a:1} 覆盖成只剩新键
+    await svc.set('p', 'b', 2)
+    expect(JSON.parse(mem.files.get(KV)!)).toEqual({ a: 1, b: 2 })
+  })
+
+  it('读失败后下次触达重新读盘：成功后恢复正常缓存语义', async () => {
+    mem.files.set(KV, JSON.stringify({ a: 1 }))
+    mem.failReads = 1
+    const svc = new PluginStorageService(ROOT)
+    await expect(svc.keys('p')).rejects.toThrow('EBUSY')
+    expect(await svc.get('p', 'a')).toBe(1) // 第二次读盘成功（single-flight 已随失败清空）
+    expect(mem.reads).toBe(2)
+  })
+})
+
+describe('PluginStorageService rename 瞬时锁退避重试', () => {
+  it('第一次 EBUSY 第二次成功：写成功，rename 共尝试两次', async () => {
+    const svc = new PluginStorageService(ROOT)
+    mem.failRenames = 1
+    await svc.set('p', 'a', 1)
+    expect(mem.renames.filter((r) => r.to === KV)).toHaveLength(2)
+    expect(JSON.parse(mem.files.get(KV)!)).toEqual({ a: 1 })
+    expect(await svc.get('p', 'a')).toBe(1)
+  })
+
+  it('三次全失败：错误上抛，后续写不被传染', async () => {
+    const svc = new PluginStorageService(ROOT)
+    mem.failRenames = 3
+    await expect(svc.set('p', 'a', 1)).rejects.toThrow('EBUSY')
+    expect(mem.renames.filter((r) => r.to === KV)).toHaveLength(3)
+    await svc.set('p', 'b', 2) // 锁解除后正常入队
+    // 缓存是单一事实源：失败写遗留的 a 随成功写一并全量提交
+    expect(JSON.parse(mem.files.get(KV)!)).toEqual({ a: 1, b: 2 })
+  })
+
+  it('非瞬时锁错误码（如 ENOSPC）不重试：一次失败即上抛', async () => {
+    const svc = new PluginStorageService(ROOT)
+    mem.failWrites = 1 // writeFile 错误不在 rename 重试范围
+    await expect(svc.set('p', 'a', 1)).rejects.toThrow('ENOSPC')
+    expect(mem.renames).toHaveLength(0)
   })
 })

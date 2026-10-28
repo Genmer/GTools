@@ -29,6 +29,7 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../src/main/window', () => ({
+  allLiveWindows: vi.fn(() => []),
   applyHideOnBlur: vi.fn(),
   applyThemeToWindow: vi.fn(),
   getSearchWindow: vi.fn(() => null),
@@ -45,7 +46,7 @@ vi.mock('../src/main/tray', () => ({ createTray: vi.fn(), applyTraySkin: vi.fn()
 import { ipcMain } from 'electron'
 import { setupIpc } from '../src/main/services/ipc'
 import { AppLog } from '../src/main/services/app-log'
-import { applyThemeToWindow } from '../src/main/window'
+import { applyThemeToWindow, getSearchWindow } from '../src/main/window'
 import { SettingsStore, type FsLike } from '../src/main/settings-store'
 import { parseBackup, serializeBackup } from '../src/main/services/backup'
 import { DEFAULT_SETTINGS, OUTLINE_CUSTOM_COLOR_DEFAULT, type AppSettings } from '@sdk/settings'
@@ -57,7 +58,7 @@ const sender = (): { sender: { id: number } } => ({ sender: { id: 1 } })
 
 const noopFs: FsLike = {
   readFile: vi.fn(async () => {
-    throw new Error('no file')
+    throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' })
   }),
   writeFile: vi.fn(async () => {}),
   rename: vi.fn(async () => {}),
@@ -65,7 +66,7 @@ const noopFs: FsLike = {
 }
 
 function makeLoader() {
-  const entries = new Map<string, { manifest: { id: string }; enabled: boolean }>()
+  const entries = new Map<string, { manifest: { id: string }; enabled: boolean; backend: unknown; backendStarted: boolean }>()
   return {
     entries,
     loader: {
@@ -76,6 +77,12 @@ function makeLoader() {
       issues: [] as { pluginId: string; field: string; message: string }[],
       externalDetected: [] as { manifest: { id: string; name: string } }[],
       ensureBackendStarted: vi.fn(async () => undefined),
+      suspendBackend: vi.fn(async (id: string) => {
+        const e = entries.get(id)
+        if (!e || !e.backendStarted || e.backend === null) return false
+        e.backendStarted = false
+        return true
+      }),
       setEnabled: vi.fn(async (id: string, enabled: boolean) => {
         const e = entries.get(id)
         if (e) e.enabled = enabled
@@ -85,10 +92,18 @@ function makeLoader() {
   }
 }
 
-async function boot(seed: Partial<AppSettings> = {}): Promise<{ store: SettingsStore; host: Host; detached: { applyThemeToAll: Mock } }> {
+async function boot(seed: Partial<AppSettings> = {}): Promise<{
+  store: SettingsStore
+  host: Host
+  detached: { applyThemeToAll: Mock }
+  loader: ReturnType<typeof makeLoader>['loader']
+  entries: ReturnType<typeof makeLoader>['entries']
+  storage: { dumpAll: Mock; replaceAll: Mock }
+}> {
   const store = new SettingsStore(state.userDataDir, noopFs, 1)
   if (Object.keys(seed).length > 0) await store.update(seed)
-  const { loader } = makeLoader()
+  const { loader, entries } = makeLoader()
+  const storage = { dumpAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) }
   const detached = { applyThemeToAll: vi.fn(), closeForPlugin: vi.fn(), open: vi.fn(), closeByWebContents: vi.fn(), setAlwaysOnTopFor: vi.fn() }
   setupIpc({
     loader,
@@ -96,8 +111,8 @@ async function boot(seed: Partial<AppSettings> = {}): Promise<{ store: SettingsS
     appLog: new AppLog(),
     services: {
       window: { float: { closeAllForPlugin: vi.fn() } },
-      storage: { dumpAll: vi.fn(async () => ({})), replaceAll: vi.fn(async () => {}) },
-      app: { version: '0.0.0' },
+      storage,
+      app: { platform: 'darwin', version: '0.0.0' },
       clipboard: { readText: vi.fn(async () => '') },
       net: { fetch: vi.fn() }
     },
@@ -108,7 +123,7 @@ async function boot(seed: Partial<AppSettings> = {}): Promise<{ store: SettingsS
   } as unknown as Parameters<typeof setupIpc>[0])
   const call = (ipcMain.handle as unknown as Mock).mock.calls.find(([ch]) => ch === 'gtools:host')
   if (!call) throw new Error('gtools:host 未注册')
-  return { store, host: call[1] as Host, detached }
+  return { store, host: call[1] as Host, detached, loader, entries, storage }
 }
 
 async function writeBackup(name: string, overrides: Record<string, unknown>): Promise<void> {
@@ -133,6 +148,10 @@ afterAll(async () => {
 beforeEach(() => {
   vi.clearAllMocks()
   state.confirmResponse = 0
+  // backup:export/import 已加主窗 sender 守卫：sender() 的 id 1 需匹配主窗假窗
+  vi.mocked(getSearchWindow).mockReturnValue({
+    webContents: { id: 1, on: vi.fn(), send: vi.fn(), removeListener: vi.fn(), isDestroyed: () => false }
+  } as unknown as ReturnType<typeof getSearchWindow>)
 })
 
 describe('gtools:host backup:import 轮廓环字段恢复', () => {
@@ -164,14 +183,14 @@ describe('gtools:host backup:import 轮廓环字段恢复', () => {
     expect(store.settings.clipboardSuggest).toBe(true)
     // 恢复完成即向浮窗下发洗后字段，主窗主题也同步
     expect(detached.applyThemeToAll).toHaveBeenCalledTimes(1)
-    expect(detached.applyThemeToAll).toHaveBeenCalledWith('dark', { enabled: false, opacity: 30, blur: false }, {
+    expect(detached.applyThemeToAll).toHaveBeenCalledWith('dark', { enabled: false, opacity: 30, blur: false, glassFrost: 45 }, {
       enabled: true,
       width: 5,
       color: 'rainbow-gradient',
       customColor: '#abcdef',
       flowSpeed: 7
     })
-    expect(vi.mocked(applyThemeToWindow).mock.calls.at(-1)).toEqual(['dark', { enabled: false, opacity: 30, blur: false }])
+    expect(vi.mocked(applyThemeToWindow).mock.calls.at(-1)).toEqual(['dark', { enabled: false, opacity: 30, blur: false, glassFrost: 45 }])
     // 导入前快照已写盘且含导入前 outline 现值（回退依据）
     expect(data.safetyBackupPath).not.toBeNull()
     const snap = parseBackup(await readFile(data.safetyBackupPath!, 'utf-8'), { knownPluginIds: new Set<string>() })
@@ -240,5 +259,66 @@ describe('gtools:host backup:import 轮廓环字段恢复', () => {
       customColor: '#aabbcc',
       flowSpeed: 3
     })
+  })
+
+  it('重载信令：备份携带数据且运行中的 backend 在 replaceAll 前 stop、replaceAll 后重载', async () => {
+    state.backupFile = join(state.userDataDir, 'reload.gtools')
+    await writeFile(
+      state.backupFile,
+      JSON.stringify(
+        serializeBackup({
+          settings: { ...DEFAULT_SETTINGS },
+          pluginStorage: { clipboard: { state: { items: [1] } } },
+          platform: 'darwin',
+          appVersion: '0.0.0'
+        })
+      ),
+      'utf-8'
+    )
+    const { host, loader, entries, storage } = await boot()
+    // clipboard：运行中的 backend（应收到信令）；memo：未运行（不该收到）
+    entries.set('clipboard', { manifest: { id: 'clipboard' }, enabled: true, backend: { stop: vi.fn() }, backendStarted: true })
+    entries.set('memo', { manifest: { id: 'memo' }, enabled: true, backend: null, backendStarted: false })
+
+    const r = await host(sender(), { api: 'backup:import' })
+    expect(r.ok).toBe(true)
+    expect(storage.replaceAll).toHaveBeenCalledWith('clipboard', { state: { items: [1] } })
+    expect(loader.suspendBackend).toHaveBeenCalledTimes(1)
+    expect(loader.suspendBackend).toHaveBeenCalledWith('clipboard')
+    // 顺序锁死：stop 先于 replaceAll（stop 的 flush 由 replaceAll 覆盖），重载后于 replaceAll（init 读导入态）
+    const suspendAt = vi.mocked(loader.suspendBackend).mock.invocationCallOrder[0]
+    const replaceAt = vi.mocked(storage.replaceAll).mock.invocationCallOrder[0]
+    const resumeAt = vi.mocked(loader.ensureBackendStarted).mock.invocationCallOrder[0]
+    expect(suspendAt).toBeLessThan(replaceAt)
+    expect(replaceAt).toBeLessThan(resumeAt)
+  })
+
+  it('导入失败恢复：replaceAll 中途抛错时被 stop 的 backend 仍复活（finally 兜底）', async () => {
+    state.backupFile = join(state.userDataDir, 'fail.gtools')
+    await writeFile(
+      state.backupFile,
+      JSON.stringify(
+        serializeBackup({
+          settings: { ...DEFAULT_SETTINGS },
+          pluginStorage: { clipboard: { state: { items: [1] } }, 'todo-pomodoro': { state: { items: [2] } } },
+          platform: 'darwin',
+          appVersion: '0.0.0'
+        })
+      ),
+      'utf-8'
+    )
+    const { host, loader, entries, storage } = await boot()
+    entries.set('clipboard', { manifest: { id: 'clipboard' }, enabled: true, backend: { stop: vi.fn() }, backendStarted: true })
+    entries.set('todo-pomodoro', { manifest: { id: 'todo-pomodoro' }, enabled: true, backend: { stop: vi.fn() }, backendStarted: true })
+    // 第二个插件 replaceAll 抛错（杀软锁文件/盘满形态）
+    storage.replaceAll.mockImplementation(async (pid: string) => {
+      if (pid === 'todo-pomodoro') throw new Error('EACCES: 写 todo-pomodoro 失败')
+    })
+
+    const r = await host(sender(), { api: 'backup:import' })
+    expect(r.ok).toBe(false)
+    expect(loader.suspendBackend).toHaveBeenCalledTimes(2)
+    // finally 兜底：两个被 stop 的 backend 都复活，单个复活失败也不拖垮其余
+    expect(loader.ensureBackendStarted).toHaveBeenCalledTimes(2)
   })
 })

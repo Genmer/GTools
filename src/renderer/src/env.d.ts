@@ -4,6 +4,7 @@ import type { ApiCallError } from '@sdk/api'
 
 export interface HostInitResult {
   version: string
+  platform: string
   settings: AppSettings
   plugins: { manifest: PluginManifest; enabled: boolean }[]
   loadIssues: { pluginId: string; message: string }[]

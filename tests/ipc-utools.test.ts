@@ -25,6 +25,7 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../src/main/window', () => ({
+  allLiveWindows: vi.fn(() => []),
   applyHideOnBlur: vi.fn(),
   applyThemeToWindow: vi.fn(),
   getSearchWindow: vi.fn(() => null),
@@ -58,7 +59,7 @@ const sender = (): { sender: { id: number; once: Mock; removeListener: Mock } } 
 
 const noopFs: FsLike = {
   readFile: vi.fn(async () => {
-    throw new Error('no file')
+    throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' })
   }),
   writeFile: vi.fn(async () => {}),
   rename: vi.fn(async () => {}),

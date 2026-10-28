@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -170,11 +170,14 @@ describe('win32 扫描（本机为 macOS，真机行为未实测）', () => {
     expect(ok.map((a) => a.name).sort()).toEqual(['Foo', 'only'])
     expect(ok.find((a) => a.name === 'Foo')?.path.toLowerCase().endsWith('.lnk')).toBe(true)
 
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const failing = await scanWin32({
       ...base,
       exec: { execFile: async () => { throw new Error('reg 不可用') } }
     })
     expect(failing.map((a) => a.name)).toEqual(['Foo'])
+    expect(warn).toHaveBeenCalledTimes(2) // 双 hive 各留痕一次
+    warn.mockRestore()
   })
 
   it('用户/全局开始菜单的同名 .lnk 只保留先扫到的（用户级优先）', async () => {

@@ -1,4 +1,5 @@
-// 浮窗回传事件的纯 reducer：输入当前运行态 + 事件，输出新状态与待执行动作，视图层只做副作用
+// 浮窗回传事件的纯 reducer：浮窗页已自管几何（gtoolsFloat.setBounds 直落主进程），本 reducer 的
+// 核心职责降级为持久化记忆；update 动作是给视图层的尺寸提示，视图层不再回放（避免旧尺寸覆盖）
 import type { FloatWindowEvent } from '@sdk/api'
 import {
   applyZoom,
@@ -95,7 +96,8 @@ export function reduceFloatEvent(
     return { runtime: withPersist(next, persist), actions: [{ kind: 'persist' }] }
   }
 
-  if (ev.event === 'closing') {
+  // closing=页内关闭前置，closed=主进程 closed 兜底（Esc/外部关闭没有前置事件）
+  if (ev.event === 'closing' || ev.event === 'closed') {
     return { runtime: dropPin(next, ev.id), actions: [] }
   }
 

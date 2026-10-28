@@ -5,6 +5,7 @@ import {
   rebindHotkey,
   suspendHotkeys,
   resumeHotkeys,
+  isHotkeysSuspended,
   armHotkeyProbe,
   disarmHotkeyProbe,
   syncCommandHotkeys,
@@ -166,5 +167,81 @@ describe('armHotkeyProbe / disarmHotkeyProbe（Alt+Space 录入探针）', () =>
     expect(armHotkeyProbe('Alt+Space', vi.fn(), gsFallback)).toBe(true)
     unregisterAllHotkeys(gsFallback)
     expect(gsFallback.unregister).toHaveBeenCalledWith('Alt+Space')
+  })
+})
+
+// gs.register 抛异常（坏加速键 TypeError 等毒丸）按注册失败走，不炸调用链
+describe('gs.register 抛异常防毒丸 + 挂起期 syncCommandHotkeys 记账', () => {
+  const throwingGs = (): FakeGs => {
+    const gs = makeGs()
+    gs.register.mockImplementation(() => {
+      throw new TypeError('Invalid accelerator')
+    })
+    return gs
+  }
+
+  it('registerHotkey：gs.register 抛异常返回 ok:false 不上抛', () => {
+    expect(registerHotkey('Ctrl+Alt+Space', noop, throwingGs())).toMatchObject({ ok: false })
+  })
+
+  it('armHotkeyProbe：gs.register 抛异常返回 false 不记态（其后 disarm 为 no-op）', () => {
+    expect(armHotkeyProbe('Alt+Space', vi.fn(), throwingGs())).toBe(false)
+    const gs = makeGs()
+    disarmHotkeyProbe(gs)
+    expect(gs.unregister).not.toHaveBeenCalled()
+  })
+
+  it('rebindHotkey：gs.register 抛异常返回 ok:false，旧键未注销（保留旧绑定）', () => {
+    const gs = makeGs()
+    expect(registerHotkey('Ctrl+Alt+Space', noop, gs)).toEqual({ ok: true })
+    const t = throwingGs()
+    expect(rebindHotkey('Ctrl+Alt+K', noop, t)).toMatchObject({ ok: false })
+    expect(t.unregister).not.toHaveBeenCalled()
+    unregisterAllHotkeys(gs)
+  })
+
+  it('挂起期 syncCommandHotkeys 不调 gs.register 但记账，resume 按当前注册表重建（挂起期新启插件的键带上）', () => {
+    const gs = makeGs()
+    expect(registerHotkey('Ctrl+Alt+Space', noop, gs)).toEqual({ ok: true })
+    expect(suspendHotkeys(makeGs())).toBe(true)
+    expect(isHotkeysSuspended()).toBe(true)
+    const gsSync = makeGs()
+    const r = syncCommandHotkeys([{ accel: 'Alt+T', pluginId: 'json-editor', commandId: 'format' }], null, noop, gsSync)
+    expect(r.ok).toBe(true)
+    expect(gsSync.register).not.toHaveBeenCalled()
+    const gsR = makeGs()
+    expect(resumeHotkeys(gsR)).toBe(true)
+    expect(isHotkeysSuspended()).toBe(false)
+    expect(gsR.register.mock.calls.map((c) => c[0]).sort()).toEqual(['Alt+T', toElectronAccelerator('Ctrl+Alt+Space', process.platform)])
+    unregisterAllHotkeys(gs)
+  })
+
+  it('挂起期禁用插件指令后 resume 不重注该键（当前态重建，禁用键不复活）', () => {
+    const gs = makeGs()
+    expect(syncCommandHotkeys([{ accel: 'Alt+T', pluginId: 'json-editor', commandId: 'format' }], null, noop, gs).ok).toBe(true)
+    expect(suspendHotkeys(makeGs())).toBe(true)
+    const gsSync = makeGs()
+    const r = syncCommandHotkeys(
+      [{ accel: 'Alt+T', pluginId: 'json-editor', commandId: 'format' }],
+      null,
+      noop,
+      gsSync,
+      { disabledPluginIds: new Set(['json-editor']) }
+    )
+    expect(r.skipped).toHaveLength(1)
+    expect(gsSync.register).not.toHaveBeenCalled()
+    const gsR = makeGs()
+    expect(resumeHotkeys(gsR)).toBe(true)
+    expect(gsR.register).not.toHaveBeenCalled()
+    unregisterAllHotkeys(gs)
+  })
+
+  it('resume 时单键 register 抛异常跳过不炸', () => {
+    const gs = makeGs()
+    expect(registerHotkey('Ctrl+Alt+Space', noop, gs)).toEqual({ ok: true })
+    expect(syncCommandHotkeys([{ accel: 'Alt+T', pluginId: 'json-editor', commandId: 'format' }], null, noop, gs).ok).toBe(true)
+    expect(suspendHotkeys(makeGs())).toBe(true)
+    expect(resumeHotkeys(throwingGs())).toBe(true)
+    unregisterAllHotkeys(gs)
   })
 })

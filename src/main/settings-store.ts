@@ -10,6 +10,9 @@ import {
   type AppSettings,
   type AppLogSkin as AppLogSkinType,
   type AppLogoSkin as AppLogoSkinType,
+  type BackgroundSettings,
+  type ClipboardPanelPosition,
+  type ClipboardPanelSettings,
   type CommandHotkey,
   type OutlineColor,
   type ThemeName,
@@ -39,21 +42,43 @@ type SettingsPatch = {
   appLogoSkin?: AppLogoSkinType
   disabledPlugins?: string[]
   launchAtLogin?: boolean
+  clipboardPanel?: Partial<ClipboardPanelSettings>
   clipboardSuggest?: boolean
+  background?: Partial<BackgroundSettings>
   hideOnBlur?: boolean
   commandHotkeys?: CommandHotkey[]
   windowPos?: { x: number; y: number } | null
+}
+
+const CLIPBOARD_PANEL_POSITIONS: readonly ClipboardPanelPosition[] = ['off', 'left', 'right', 'below']
+
+function sanitizeClipboardPanelPosition(v: unknown): ClipboardPanelPosition | undefined {
+  return typeof v === 'string' && (CLIPBOARD_PANEL_POSITIONS as readonly string[]).includes(v)
+    ? (v as ClipboardPanelPosition)
+    : undefined
 }
 
 function clampOpacity(v: number): number {
   return Math.min(100, Math.max(0, Math.round(v)))
 }
 
+/** 背景图固定存 userData/backgrounds/ 下的重编码产物，file 只收相对名；'' = 未选图（清除路径要写回） */
+const BACKGROUND_FILE_RE = /^[a-zA-Z0-9._-]+$/
+
+function sanitizeBackground(raw: unknown): Partial<BackgroundSettings> | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const b = raw as Record<string, unknown>
+  const out: Partial<BackgroundSettings> = {}
+  if (typeof b.enabled === 'boolean') out.enabled = b.enabled
+  if (typeof b.file === 'string' && (b.file === '' || BACKGROUND_FILE_RE.test(b.file))) out.file = b.file
+  if (typeof b.dim === 'number' && Number.isFinite(b.dim)) out.dim = clampOpacity(b.dim)
+  return out
+}
+
 /** 损坏留证文件名后缀：settings.json → settings.json.corrupt-20261006-093000 */
 function corruptStamp(now = new Date()): string {
   const p = (n: number): string => String(n).padStart(2, '0')
-  return `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`
-}
+  return `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`}
 
 function merge(base: AppSettings, patch: SettingsPatch): AppSettings {
   return {
@@ -69,7 +94,9 @@ function merge(base: AppSettings, patch: SettingsPatch): AppSettings {
     appLogoSkin: patch.appLogoSkin ?? base.appLogoSkin,
     disabledPlugins: patch.disabledPlugins ?? base.disabledPlugins,
     launchAtLogin: patch.launchAtLogin ?? base.launchAtLogin,
+    clipboardPanel: { ...base.clipboardPanel, ...(patch.clipboardPanel ?? {}) },
     clipboardSuggest: patch.clipboardSuggest ?? base.clipboardSuggest,
+    background: { ...base.background, ...(patch.background ?? {}) },
     hideOnBlur: patch.hideOnBlur ?? base.hideOnBlur,
     commandHotkeys: patch.commandHotkeys ?? base.commandHotkeys,
     windowPos: patch.windowPos === undefined ? base.windowPos : patch.windowPos
@@ -115,12 +142,22 @@ function sanitizePatch(raw: unknown): SettingsPatch {
     if (typeof t.enabled === 'boolean') tx.enabled = t.enabled
     if (typeof t.opacity === 'number' && Number.isFinite(t.opacity)) tx.opacity = clampOpacity(t.opacity)
     if (typeof t.blur === 'boolean') tx.blur = t.blur
+    if (typeof t.glassFrost === 'number' && Number.isFinite(t.glassFrost)) tx.glassFrost = clampOpacity(t.glassFrost)
     patch.transparency = { ...patch.transparency, ...tx }
   }
   if (Array.isArray(p.disabledPlugins) && p.disabledPlugins.every((x) => typeof x === 'string')) {
     patch.disabledPlugins = p.disabledPlugins
   }
   if (typeof p.launchAtLogin === 'boolean') patch.launchAtLogin = p.launchAtLogin
+  if (typeof p.clipboardPanel === 'object' && p.clipboardPanel !== null) {
+    const c = p.clipboardPanel as Record<string, unknown>
+    const cp: Partial<ClipboardPanelSettings> = {}
+    const position = sanitizeClipboardPanelPosition(c.position)
+    if (position !== undefined) cp.position = position
+    patch.clipboardPanel = { ...patch.clipboardPanel, ...cp }
+  }
+  const bg = sanitizeBackground(p.background)
+  if (bg !== undefined) patch.background = bg
   if (typeof p.outlineEnabled === 'boolean') patch.outlineEnabled = p.outlineEnabled
   const outlineWidth = sanitizeOutlineWidth(p.outlineWidth)
   if (outlineWidth !== null) patch.outlineWidth = outlineWidth
@@ -133,8 +170,8 @@ function sanitizePatch(raw: unknown): SettingsPatch {
   if (appLogSkin !== null) patch.appLogSkin = appLogSkin
   const appLogoSkin = sanitizeAppLogoSkin(p.appLogoSkin)
   if (appLogoSkin !== null) patch.appLogoSkin = appLogoSkin
-  if (typeof p.clipboardSuggest === 'boolean') patch.clipboardSuggest = p.clipboardSuggest
   if (typeof p.hideOnBlur === 'boolean') patch.hideOnBlur = p.hideOnBlur
+  if (typeof p.clipboardSuggest === 'boolean') patch.clipboardSuggest = p.clipboardSuggest
   // 数组即收（含空数组 = 清空全部指令绑定）；非数组整体丢弃由 merge 回退现值
   if (Array.isArray(p.commandHotkeys)) patch.commandHotkeys = sanitizeCommandHotkeys(p.commandHotkeys)
   if (p.windowPos === null || typeof p.windowPos === 'object') {
@@ -180,13 +217,34 @@ export class SettingsStore {
     let raw: string | null = null
     try {
       raw = await this.fs.readFile(this.file, { encoding: 'utf-8' })
-    } catch {
-      raw = null // 文件不存在：用默认值，首次写入即落地
+    } catch (err) {
+      // 仅 ENOENT 视为无配置用默认值；其余（杀软/备份瞬时锁 EBUSY/EACCES）上抛且不置 loaded，
+      // 否则降级会话停在默认空态，之后的整包重写会清掉用户全部设置
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
     }
     if (raw !== null) {
       try {
         const parsed: unknown = JSON.parse(raw)
-        this.current = merge(this.current, sanitizePatch(parsed))
+        const patch = sanitizePatch(parsed)
+        // 迁移必须读 sanitizePatch 之前的原始 parsed 判断面板缺位：旧 clipboardSuggest:false = 用户显式拒绝剪贴板读取，
+        // 该值本身经 sanitize 保留为新开关，面板也一并关闭（不因换形态被放大采集）；
+        // 同文件已带合法 clipboardPanel 时不让旧键残留反杀新值
+        if (patch.clipboardPanel === undefined && (parsed as { clipboardSuggest?: unknown } | null)?.clipboardSuggest === false) {
+          patch.clipboardPanel = { position: 'off' }
+        }
+        // glassFrost 一次性迁移：旧档缺字段时按 opacity 派生（g=100−o 逐位复现旧 --txf 观感），已带字段不派生；
+        // 必须读 sanitize 前原始 parsed（sanitize 已丢旧键），无 opacity 段落时走默认 45
+        const rawTx = (parsed as { transparency?: Record<string, unknown> } | null)?.transparency
+        if (
+          typeof rawTx === 'object' &&
+          rawTx !== null &&
+          rawTx.glassFrost === undefined &&
+          typeof rawTx.opacity === 'number' &&
+          Number.isFinite(rawTx.opacity)
+        ) {
+          patch.transparency = { ...patch.transparency, glassFrost: clampOpacity(100 - clampOpacity(rawTx.opacity)) }
+        }
+        this.current = merge(this.current, patch)
       } catch {
         // 损坏先留证再按默认值处理，防首次写入静默覆盖残余
         const evidence = `${this.file}.corrupt-${corruptStamp()}`
@@ -199,6 +257,7 @@ export class SettingsStore {
 
   /** 更新内存立即生效；持久化按防抖合并，退出前 flush 兜底 */
   async update(patch: SettingsPatch): Promise<AppSettings> {
+    // 未加载先重试 load；读错上抛则本次不置 dirty，flush 因此不落盘（防默认空态整包覆盖盘上设置）
     if (!this.loaded) await this.load()
     this.current = merge(this.current, sanitizePatch(patch))
     this.dirty = true

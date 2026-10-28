@@ -23,7 +23,7 @@ function manifest(id: string, permissions: PluginManifest['permissions']): Plugi
 
 function makeRegistry(): PluginRegistry {
   const reg = new PluginRegistry()
-  reg.register(manifest('full', ['window:float', 'window:main', 'dialog', 'fs', 'net', 'shell:open', 'storage', 'apis:translate', 'screenshot']), true)
+  reg.register(manifest('full', ['window:float', 'window:main', 'dialog', 'fs', 'net', 'shell:open', 'storage', 'apis:translate', 'apis:ai', 'screenshot']), true)
   reg.register(manifest('bare', ['storage']), true)
   reg.register(manifest('off', ['fs', 'apis:translate']), false)
   return reg
@@ -41,6 +41,8 @@ function makeServices(): ServiceBag & {
     clipboard: {
       readText: async () => '',
       writeText: async () => {},
+      writeTextEphemeral: async () => {},
+      isTextExempted: async () => false,
       readImage: async () => null,
       readImageThumb: async () => null,
       writeImage: async () => {}
@@ -100,6 +102,7 @@ function makeServices(): ServiceBag & {
     app: { platform: 'darwin', version: '0.2.0', arch: 'x64' },
     apis: {
       translate: async () => ({ resultText: '你好', providerId: 'builtin:mymemory' }),
+      chat: async () => ({ resultText: 'hello', providerId: 'u-ai' }),
       status: () => ({
         service: 'translate' as const,
         configured: false,
@@ -133,6 +136,8 @@ describe('dispatchApi 新增能力面的权限校验', () => {
       'net.lanAddresses',
       'apis.translate',
       'apis.translate.status',
+      'apis.ai',
+      'apis.ai.status',
       'screenshot.capture',
       'window.showMain'
     ]) {
@@ -166,6 +171,35 @@ describe('dispatchApi 新增能力面的权限校验', () => {
     const services = makeServices()
     const r = await dispatchApi(makeRegistry(), services, 'off', 'fs.read', ['/tmp/x'])
     expect(r).toMatchObject({ ok: false, error: 'PLUGIN_DISABLED' })
+  })
+
+  it('禁用 entry 默认调用（不传 opts）拒 PLUGIN_DISABLED（既有行为锁定）', async () => {
+    const services = makeServices()
+    const reg = makeRegistry()
+    reg.register(manifest('off-store', ['storage']), false)
+    const writes: unknown[][] = []
+    services.storage.set = async (pluginId, key, value) => {
+      writes.push([pluginId, key, value])
+    }
+    expect(await dispatchApi(reg, services, 'off-store', 'storage.set', ['k', 'v'])).toMatchObject({
+      ok: false,
+      error: 'PLUGIN_DISABLED'
+    })
+    expect(writes).toEqual([])
+  })
+
+  it('禁用 entry 传 opts.allowDisabled → storage.set 成功落 fake（backend 收尾 flush 通道）', async () => {
+    const services = makeServices()
+    const reg = makeRegistry()
+    reg.register(manifest('off-store', ['storage']), false)
+    const writes: unknown[][] = []
+    services.storage.set = async (pluginId, key, value) => {
+      writes.push([pluginId, key, value])
+    }
+    expect(await dispatchApi(reg, services, 'off-store', 'storage.set', ['k', 'v'], { allowDisabled: true })).toMatchObject({
+      ok: true
+    })
+    expect(writes).toEqual([['off-store', 'k', 'v']])
   })
 
   it('未知 api 拒绝；参数类型错误 → BAD_REQUEST 而非崩溃', async () => {
@@ -268,5 +302,66 @@ describe('dispatchApi apis.translate（全局 API 中心代理面）', () => {
     expect(
       await dispatchApi(makeRegistry(), services, 'full', 'apis.translate', [{ text: 'hi', from: 'en', to: 'zh-CN', providerId: 9 }])
     ).toMatchObject({ ok: false, error: 'BAD_REQUEST' })
+  })
+})
+
+describe('dispatchApi apis.ai（AI 对话品类代理面）', () => {
+  it('声明 apis:ai → 放行并把 payload 规整后透传给服务层', async () => {
+    const seen: unknown[] = []
+    const services = makeServices()
+    services.apis.chat = async (req) => {
+      seen.push(req)
+      return { resultText: 'Hello', providerId: 'u-ai' }
+    }
+    const r = await dispatchApi(makeRegistry(), services, 'full', 'apis.ai', [{ text: '你好' }])
+    expect(r).toEqual({ ok: true, data: { resultText: 'Hello', providerId: 'u-ai' } })
+    expect(seen).toEqual([{ text: '你好', providerId: undefined }])
+  })
+
+  it('providerId 空串归一成 undefined；字符串透传；非字符串 → BAD_REQUEST', async () => {
+    const seen: unknown[] = []
+    const services = makeServices()
+    services.apis.chat = async (req) => {
+      seen.push(req)
+      return { resultText: 'x', providerId: req.providerId ?? '' }
+    }
+    await dispatchApi(makeRegistry(), services, 'full', 'apis.ai', [{ text: 'a', providerId: '' }])
+    expect(seen[0]).toEqual({ text: 'a', providerId: undefined })
+    await dispatchApi(makeRegistry(), services, 'full', 'apis.ai', [{ text: 'a', providerId: 'u-9' }])
+    expect(seen[1]).toEqual({ text: 'a', providerId: 'u-9' })
+    expect(
+      await dispatchApi(makeRegistry(), services, 'full', 'apis.ai', [{ text: 'a', providerId: 9 }])
+    ).toMatchObject({ ok: false, error: 'BAD_REQUEST' })
+    expect(await dispatchApi(makeRegistry(), services, 'full', 'apis.ai', ['plain'])).toMatchObject({ ok: false, error: 'BAD_REQUEST' })
+    expect(await dispatchApi(makeRegistry(), services, 'full', 'apis.ai', [{ text: 1 }])).toMatchObject({ ok: false, error: 'BAD_REQUEST' })
+  })
+
+  it('status 面受 apis:ai 权限约束并返回 service=ai 状态', async () => {
+    const services = makeServices()
+    services.apis.status = (service) => ({
+      service,
+      configured: false,
+      activeProviderId: '',
+      activeProviderName: '',
+      providers: []
+    })
+    const r = await dispatchApi(makeRegistry(), services, 'full', 'apis.ai.status', [])
+    expect(r).toMatchObject({ ok: true, data: { service: 'ai', configured: false } })
+  })
+
+  it('SERVICE_* 错误码透传（不被通用 catch 归并成 BAD_REQUEST）', async () => {
+    const services = makeServices()
+    services.apis.chat = async () => {
+      throw new ApiServiceError('SERVICE_UNCONFIGURED', null, 'AI 服务当前不可用')
+    }
+    expect(
+      await dispatchApi(makeRegistry(), services, 'full', 'apis.ai', [{ text: 'hi' }])
+    ).toEqual({ ok: false, error: 'SERVICE_UNCONFIGURED', message: 'AI 服务当前不可用' })
+    services.apis.chat = async () => {
+      throw new ApiServiceError('SERVICE_ERROR', 'timeout', 'timeout: AI 服务请求超时')
+    }
+    expect(
+      await dispatchApi(makeRegistry(), services, 'full', 'apis.ai', [{ text: 'hi' }])
+    ).toEqual({ ok: false, error: 'SERVICE_ERROR', message: 'timeout: AI 服务请求超时' })
   })
 })

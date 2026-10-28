@@ -58,6 +58,7 @@ function makeServices(windows: Target[]): ServiceBag {
     storageRoot: '/tmp/gtools-test-storage',
     appVersion: '0.0.0-test',
     getWindow: () => null,
+    hideWindow: () => {},
     listWindows: () => windows,
     apiCenter: {} as never
   })

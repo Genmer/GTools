@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { countLines, expandIfJson, parseJson, posToLineCol, reformat, topLevelSegments, windowRange } from '../../../../src/plugins/json-editor/logic/json'
+import {
+  composeIncomingPayload,
+  countLines,
+  decodeUnicodeEscapes,
+  escapeJsonString,
+  parseJson,
+  parseJsonInfo,
+  pathAt,
+  posToLineCol,
+  reformat,
+  stripJsonc,
+  unescapeJsonString
+} from '../../../../src/plugins/json-editor/logic/json'
 import { SAMPLE_JSON } from '../../../../src/plugins/json-editor/logic/sample'
 
 function errOf(text: string): { message: string; line: number; column: number; offset: number } {
@@ -151,169 +163,169 @@ describe('reformat', () => {
   })
 })
 
-describe('topLevelSegments（顶层切段）', () => {
-  it('单段切一段，多段按直拼/空白分隔切多段，首尾空白不产生空段', () => {
-    expect(topLevelSegments('{"a":1}')).toEqual(['{"a":1}'])
-    expect(topLevelSegments('[1]{"a":1}')).toEqual(['[1]', '{"a":1}'])
-    expect(topLevelSegments('  {"a":1}\n\t [2]  ')).toEqual(['{"a":1}', '[2]'])
+describe('parseJsonInfo 重复键计数', () => {
+  it('同对象同键计数（last-wins 语义不变），不同对象互不影响', () => {
+    const r = parseJsonInfo('{"a":1,"a":2,"b":{"a":3,"a":4}}')
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      // 外层 a 重复 1 次 + 内层 a 重复 1 次
+      expect(r.dupKeys).toBe(2)
+      expect(r.value).toEqual({ a: 2, b: { a: 4 } })
+    }
+    const clean = parseJsonInfo('{"a":1,"b":{"a":2}}')
+    expect(clean.ok && clean.dupKeys).toBe(0)
   })
 
-  it('嵌套只切顶层：深层括号不归零切段', () => {
-    expect(topLevelSegments('{"a":{"b":[1,{"c":2}]}}[3]')).toEqual(['{"a":{"b":[1,{"c":2}]}}', '[3]'])
-  })
-
-  it('引号内括号不切段、转义引号与转义反斜杠不提前闭串', () => {
-    expect(topLevelSegments('{"k":"a]{b"}[1]')).toEqual(['{"k":"a]{b"}', '[1]'])
-    expect(topLevelSegments('{"k":"a\\"}{"x":1}')).toEqual(['{"k":"a\\"}{"x":1}'])
-    expect(topLevelSegments('{"k":"a\\\\b"}[1]')).toEqual(['{"k":"a\\\\b"}', '[1]'])
-  })
-
-  it('段间/段前出现非空白字符返回 null（垃圾文本、多余闭合）', () => {
-    expect(topLevelSegments('{"a":1} x [2]')).toBeNull()
-    expect(topLevelSegments('x {"a":1}')).toBeNull()
-    expect(topLevelSegments('{"a":1}}[2]')).toBeNull()
-  })
-
-  it('未闭合尾段原样入列，交逐段 reformat 兜底判失败', () => {
-    expect(topLevelSegments('{"a":1}{"b":2')).toEqual(['{"a":1}', '{"b":2'])
-    expect(topLevelSegments('{"a":1}[2,')).toEqual(['{"a":1}', '[2,'])
-  })
-
-  it('空串与纯空白返回空段列表', () => {
-    expect(topLevelSegments('')).toEqual([])
-    expect(topLevelSegments('  \n\t ')).toEqual([])
+  it('原型链键名（toString 等）不误报重复', () => {
+    const r = parseJsonInfo('{"toString":1,"constructor":2}')
+    expect(r.ok && r.dupKeys).toBe(0)
   })
 })
 
-describe('expandIfJson', () => {
-  it('压缩 object 展开（2 空格缩进），首尾空白容忍', () => {
-    expect(expandIfJson('{"a":1,"b":[2,3]}')).toBe(JSON.stringify({ a: 1, b: [2, 3] }, null, 2))
-    expect(expandIfJson('  \n{"a":1}\n  ')).toBe(JSON.stringify({ a: 1 }, null, 2))
+describe('stripJsonc', () => {
+  it('行注释/块注释/尾逗号等长替换为空格，剥后可解析', () => {
+    const src = `{
+  // 行注释
+  "a": 1, /* 块
+注释 */
+  "b": [1, 2,],
+}`
+    const { text: out, ignored } = stripJsonc(src)
+    expect(out.length).toBe(src.length)
+    expect(ignored).toBe(4)
+    const r = parseJson(out)
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.value).toEqual({ a: 1, b: [1, 2] })
   })
 
-  it('压缩数组展开', () => {
-    expect(expandIfJson('[1,{"k":"v"}]')).toBe(JSON.stringify([1, { k: 'v' }], null, 2))
+  it('换行位置逐字符不变（行列号与 offset 全程有效）', () => {
+    const src = '{\n  // c\n  "a": 1,\n}'
+    const out = stripJsonc(src).text
+    const nl = (s: string): number[] => [...s].map((c, i) => (c === '\n' ? i : -1)).filter((i) => i >= 0)
+    expect(nl(out)).toEqual(nl(src))
   })
 
-  it('非法 JSON 原样返回（含 { 开头但解析失败的文本）', () => {
-    const bad = '{"a":1,}'
-    expect(expandIfJson(bad)).toBe(bad)
-    expect(expandIfJson('not json')).toBe('not json')
+  it('字符串字面量内的 //、/*、} 与 , 不剥', () => {
+    const src = '{"url": "http://x", "s": "a,]//b", "c": "/* 不是注释 */"}'
+    const r = stripJsonc(src)
+    expect(r.text).toBe(src)
+    expect(r.ignored).toBe(0)
   })
 
-  it('顶层标量原样返回（与宿主 looksLikeJson 口径一致：只展开顶层 object/array）', () => {
-    expect(expandIfJson('123')).toBe('123')
-    expect(expandIfJson('"str"')).toBe('"str"')
-    expect(expandIfJson('true')).toBe('true')
+  it('无宽松内容时原样返回', () => {
+    const r = stripJsonc('{"a": [1, 2]}')
+    expect(r).toEqual({ text: '{"a": [1, 2]}', ignored: 0 })
   })
 
-  it('空串与空白原样返回', () => {
-    expect(expandIfJson('')).toBe('')
-    expect(expandIfJson('   ')).toBe('   ')
-  })
-
-  it('超 1MB 不展开（防大文本同步 parse 卡顿）', () => {
-    const big = '["' + 'x'.repeat(1_000_000) + '"]'
-    expect(big.length).toBeGreaterThan(1_000_000)
-    expect(expandIfJson(big)).toBe(big)
-  })
-
-  it('恰 1MB（含）仍展开：上限判定为严格大于', () => {
-    // 前缀 {"k":" 6 字符 + 后缀 "} 2 字符 = 8 字符壳
-    const exact = '{"k":"' + 'x'.repeat(1_000_000 - 8) + '"}'
-    expect(exact.length).toBe(1_000_000)
-    expect(expandIfJson(exact)).toBe(JSON.stringify({ k: 'x'.repeat(1_000_000 - 8) }, null, 2))
-  })
-
-  it('幂等：已展开文本再入参返回等值，不再变形', () => {
-    const once = expandIfJson('{"a":1,"b":[{"c":true},null]}')
-    expect(expandIfJson(once)).toBe(once)
-    // 带首尾空白的已展开文本同样收敛到同一份展开结果
-    expect(expandIfJson(`\n${once}\n`)).toBe(once)
-  })
-
-  it('16 位以上连续数字保守跳过（往返会改写 >2^53 整数，如 snowflake ID 静默进位）', () => {
-    const big = '{"id":1234567890123456789}'
-    expect(expandIfJson(big)).toBe(big)
-  })
-
-  it('科学计数法形状保守跳过（溢出指数往返变 null）', () => {
-    const exp = '{"big":1e999}'
-    expect(expandIfJson(exp)).toBe(exp)
-    const smallExp = '{"s":2.5e-3}'
-    expect(expandIfJson(smallExp)).toBe(smallExp)
-  })
-
-  it('16 位以下正常数字照常展开', () => {
-    expect(expandIfJson('{"n":123456789012345}')).toBe(JSON.stringify({ n: 123456789012345 }, null, 2))
-  })
-
-  it('字符串值含长数字照常展开（字符串重排原样保留无损，剥字符串后只剩安全数字 token）', () => {
-    const s = '{"order":"1234567890123456789"}'
-    expect(expandIfJson(s)).toBe(JSON.stringify({ order: '1234567890123456789' }, null, 2))
-  })
-
-  it('真实日志回归：字符串里 19 位 trace id + 13 位毫秒时间戳数字值，整体展开', () => {
-    const raw =
-      '{"id":"2607080222582615858aaa6487d8ae7b","requestDateTtl":1783448578000,"cityId":31113}'
-    expect(expandIfJson(raw)).toBe(
-      JSON.stringify({ id: '2607080222582615858aaa6487d8ae7b', requestDateTtl: 1783448578000, cityId: 31113 }, null, 2)
-    )
-  })
-
-  it('字符串里的科学计数法形状照常展开；数字 token 的仍跳过', () => {
-    const s = '{"note":"1e999"}'
-    expect(expandIfJson(s)).toBe(JSON.stringify({ note: '1e999' }, null, 2))
-    const n = '{"big":1e999}'
-    expect(expandIfJson(n)).toBe(n)
-  })
-
-  it('含转义引号的字符串剥净后不影响判定（数字 token 16 位仍跳过）', () => {
-    const s = '{"msg":"say \\"big 12345678901234567890\\" ok"}'
-    expect(expandIfJson(s)).toBe(JSON.stringify({ msg: 'say "big 12345678901234567890" ok' }, null, 2))
-    const n = `{"msg":"plain","id":12345678901234567890}`
-    expect(expandIfJson(n)).toBe(n)
-  })
-
-  it('多段拼接：逐段 2 空格展开后换行连接', () => {
-    const a = JSON.stringify({ a: 1, b: [2, 3] }, null, 2)
-    const b = JSON.stringify([4, 5], null, 2)
-    expect(expandIfJson('{"a":1,"b":[2,3]}[4,5]')).toBe(`${a}\n${b}`)
-    expect(expandIfJson('{"a":1,"b":[2,3]}\n\n  [4,5]')).toBe(`${a}\n${b}`)
-    // 引号内括号不切段
-    expect(expandIfJson('{"k":"a]{b"}[2]')).toBe(
-      `${JSON.stringify({ k: 'a]{b' }, null, 2)}\n${JSON.stringify([2], null, 2)}`
-    )
-  })
-
-  it('多段拼接危险数字形状：该段原样保留、安全段照常展开', () => {
-    const raw = '{"id":1234567890123456789}{"n":1}'
-    expect(expandIfJson(raw)).toBe('{"id":1234567890123456789}\n' + JSON.stringify({ n: 1 }, null, 2))
-    // 科学计数法段同理
-    const exp = '{"big":1e999}[1]'
-    expect(expandIfJson(exp)).toBe('{"big":1e999}\n' + JSON.stringify([1], null, 2))
-  })
-
-  it('多段拼接任一段非法整体原样返回（含未闭合、危险形状的非法段）', () => {
-    const bad = '{"a":1}{bad}'
-    expect(expandIfJson(bad)).toBe(bad)
-    const unclosed = '{"a":1}{"b":2'
-    expect(expandIfJson(unclosed)).toBe(unclosed)
-    // 非法且带危险数字形状的尾段不能被「原样保留」误放行
-    const badDanger = '{"a":1}{"id":12345678901234567890'
-    expect(expandIfJson(badDanger)).toBe(badDanger)
+  it('注释中的伪字符串不干扰字符串态跟踪', () => {
+    const src = '{\n  // "unclosed\n  "a": 1\n}'
+    const r = stripJsonc(src)
+    expect(parseJson(r.text).ok).toBe(true)
   })
 })
 
-describe('windowRange', () => {
-  it('常规窗口含 overscan 缓冲', () => {
-    expect(windowRange(1000, 0, 480, 24)).toEqual({ start: 0, end: 28 })
-    expect(windowRange(1000, 24 * 100, 480, 24)).toEqual({ start: 92, end: 128 })
+describe('escapeJsonString / unescapeJsonString', () => {
+  it('转义-还原往返（控制符/引号/反斜杠）', () => {
+    const s = 'a"b\\c\nd\te'
+    expect(escapeJsonString(s)).toBe(JSON.stringify(s))
+    expect(unescapeJsonString(escapeJsonString(s))).toBe(s)
   })
 
-  it('边界：滚过头/零视口/空列表钳制', () => {
-    expect(windowRange(10, 99999, 480, 24)).toEqual({ start: 10, end: 10 })
-    expect(windowRange(0, 100, 480, 24)).toEqual({ start: 0, end: 0 })
-    expect(windowRange(100, -5, 0, 24)).toEqual({ start: 0, end: 8 })
+  it('去转义只认整文单个字符串字面量，其余形态返回 null', () => {
+    expect(unescapeJsonString('"abc"')).toBe('abc')
+    expect(unescapeJsonString('"a\\nb"')).toBe('a\nb')
+    expect(unescapeJsonString('{"a":1}')).toBeNull()
+    expect(unescapeJsonString('abc')).toBeNull()
+    expect(unescapeJsonString('"a" "b"')).toBeNull()
+    expect(unescapeJsonString('')).toBeNull()
+  })
+})
+
+describe('decodeUnicodeEscapes', () => {
+  it('基本平面 \\uXXXX 还原为字符', () => {
+    expect(decodeUnicodeEscapes('{"\\u4e2d": "\\u0041"}')).toBe('{"中": "A"}')
+  })
+
+  it('高低代理配对合并为单码位（emoji）', () => {
+    const out = decodeUnicodeEscapes('"\\ud83d\\ude00"')
+    expect(out).toBe('"😀"')
+    expect([...out]).toHaveLength(3)
+  })
+
+  it('孤立高代理不炸，按单码元原样输出', () => {
+    const out = decodeUnicodeEscapes('\\ud83d')
+    expect(out.length).toBe(1)
+    expect(out.charCodeAt(0)).toBe(0xd83d)
+  })
+
+  it('偶数个前置反斜杠的 \\u 是字面反斜杠+u，不动', () => {
+    expect(decodeUnicodeEscapes('\\\\u0041')).toBe('\\\\u0041')
+  })
+
+  it('无转义原文返回（零拷贝路径）', () => {
+    expect(decodeUnicodeEscapes('{"a": 1}')).toBe('{"a": 1}')
+  })
+})
+
+describe('pathAt', () => {
+  const doc = '{"a": {"b": [1, "x"]}, "c d": 2}'
+
+  it('对象/数组/嵌套/键名归其值', () => {
+    expect(pathAt(doc, 13)).toBe('$.a.b[0]')
+    expect(pathAt(doc, 17)).toBe('$.a.b[1]')
+    expect(pathAt(doc, 8)).toBe('$.a.b')
+    expect(pathAt(doc, 23)).toBe('$["c d"]')
+    expect(pathAt(doc, 30)).toBe('$["c d"]')
+    expect(pathAt(doc, 6)).toBe('$.a')
+    expect(pathAt(doc, 0)).toBe('$')
+  })
+
+  it('区间端点都算在内；文末与前后空白落到根', () => {
+    expect(pathAt(doc, 14)).toBe('$.a.b[0]')
+    expect(pathAt(doc, 19)).toBe('$.a.b[1]')
+    expect(pathAt(doc, doc.length)).toBe('$')
+    expect(pathAt(' 42', 0)).toBe('$')
+  })
+
+  it('简单键名点号连接，特殊键名（含空格/引号）退回转义括号', () => {
+    expect(pathAt('{"a-b": 1, "q\\"r": 2}', 8)).toBe('$["a-b"]')
+    expect(pathAt('{"a-b": 1, "q\\"r": 2}', 17)).toBe('$["q\\"r"]')
+    expect(pathAt('[{"k": [true, null]}]', 3)).toBe('$[0].k')
+    expect(pathAt('[{"k": [true, null]}]', 9)).toBe('$[0].k[0]')
+  })
+
+  it('非法文本返回 null；根为基本类型返回 $', () => {
+    expect(pathAt('{"a":', 3)).toBeNull()
+    expect(pathAt('', 0)).toBeNull()
+    expect(pathAt('42', 0)).toBe('$')
+    expect(pathAt('"s"', 2)).toBe('$')
+  })
+})
+
+describe('composeIncomingPayload（进入插件时的草稿合成）', () => {
+  it('合法 query 替换草稿', () => {
+    expect(composeIncomingPayload('{"a":1}', '{"b":2}', '')).toBe('{"b":2}')
+  })
+
+  it('无输入保留草稿', () => {
+    expect(composeIncomingPayload('{"a":1}', '', '')).toBe('{"a":1}')
+  })
+
+  it('query 与文件并存且均合法时文件优先', () => {
+    expect(composeIncomingPayload('{"a":1}', '{"b":2}', '{"c":3}')).toBe('{"c":3}')
+  })
+
+  it('非 JSON 残留 query 不覆盖草稿（防 junk 经 DRAFT_KEY 落盘不可恢复）', () => {
+    expect(composeIncomingPayload('{"a":1}', 'foo', '')).toBe('{"a":1}')
+  })
+
+  it('文件非法时回退 query；两者均非法保留草稿', () => {
+    expect(composeIncomingPayload('{"a":1}', '{"b":2}', 'not-json')).toBe('{"b":2}')
+    expect(composeIncomingPayload('{"a":1}', 'foo', 'bar')).toBe('{"a":1}')
+  })
+
+  it('无草稿：合法 query 直接采用，残留丢弃给空编辑器', () => {
+    expect(composeIncomingPayload('', '[1,2]', '')).toBe('[1,2]')
+    expect(composeIncomingPayload('', 'foo', '')).toBe('')
   })
 })
