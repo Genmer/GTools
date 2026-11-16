@@ -16,7 +16,7 @@ const JPEG_URL = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAA='
 const SVG_URL = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4='
 
 const THEME: Record<ThemeVarName, string> = {
-  '--bg-raised': '#f2f3f5',
+  '--bg-raised': '#f7f7f9',
   '--fg': '#1f2328',
   '--fg-dim': '#59626d',
   '--border': '#d8dee4',

@@ -31,7 +31,7 @@ import { DetachedWindowManager } from './detached-window-manager'
 import { registerHotkey, unregisterAllHotkeys } from './shortcut'
 import { createTray } from './tray'
 import { applyAppLogoSkin } from './logo-skin'
-import { syncLoginItem } from './login-item'
+import { syncLoginItemWithFingerprint } from './login-item'
 import { AppLog } from './services/app-log'
 import { sweepUpdateCache } from './services/update-downloader'
 
@@ -228,7 +228,7 @@ async function bootstrap(): Promise<void> {
   const wantLaunchAtLogin = settingsStore.settings.launchAtLogin
   setImmediate(() => {
     try {
-      syncLoginItem(app, wantLaunchAtLogin)
+      syncLoginItemWithFingerprint(app, wantLaunchAtLogin, join(userData, 'login-item.json'))
     } catch (err) {
       appLog.push('error', 'main', `开机启动设置失败 v${app.getVersion()}：${err instanceof Error ? err.message : String(err)}`)
     }

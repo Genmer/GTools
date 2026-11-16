@@ -660,10 +660,10 @@ onBeforeUnmount(() => {
                 min="0"
                 max="100"
                 step="5"
-                :value="settings?.transparency?.opacity ?? 55"
+                :value="settings?.transparency?.opacity ?? 15"
                 @change="setTransparency({ opacity: Number(($event.target as HTMLInputElement).value) })"
               />
-              <span class="accel">{{ settings?.transparency?.opacity ?? 55 }}%</span>
+              <span class="accel">{{ settings?.transparency?.opacity ?? 15 }}%</span>
             </div>
             <div class="row">
               <div class="row-main">

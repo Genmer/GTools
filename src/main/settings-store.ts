@@ -1,6 +1,7 @@
 export type { ThemeName, AppSettings, CommandHotkey, TransparencySettings, OutlineColor, AppLogSkin, AppLogoSkin } from '@sdk/settings'
 import {
   DEFAULT_SETTINGS,
+  MIGRATION_TX_OPACITY_15,
   isOutlineColor,
   sanitizeAppLogSkin,
   sanitizeAppLogoSkin,
@@ -48,6 +49,7 @@ type SettingsPatch = {
   hideOnBlur?: boolean
   commandHotkeys?: CommandHotkey[]
   windowPos?: { x: number; y: number } | null
+  migrations?: string[]
 }
 
 const CLIPBOARD_PANEL_POSITIONS: readonly ClipboardPanelPosition[] = ['off', 'left', 'right', 'below']
@@ -99,7 +101,8 @@ function merge(base: AppSettings, patch: SettingsPatch): AppSettings {
     background: { ...base.background, ...(patch.background ?? {}) },
     hideOnBlur: patch.hideOnBlur ?? base.hideOnBlur,
     commandHotkeys: patch.commandHotkeys ?? base.commandHotkeys,
-    windowPos: patch.windowPos === undefined ? base.windowPos : patch.windowPos
+    windowPos: patch.windowPos === undefined ? base.windowPos : patch.windowPos,
+    migrations: patch.migrations ?? base.migrations
   }
 }
 
@@ -172,6 +175,8 @@ function sanitizePatch(raw: unknown): SettingsPatch {
   if (appLogoSkin !== null) patch.appLogoSkin = appLogoSkin
   if (typeof p.hideOnBlur === 'boolean') patch.hideOnBlur = p.hideOnBlur
   if (typeof p.clipboardSuggest === 'boolean') patch.clipboardSuggest = p.clipboardSuggest
+  // 迁移标记整体替换（非拼接）：只收 string 数组，非数组丢弃
+  if (Array.isArray(p.migrations)) patch.migrations = p.migrations.filter((x): x is string => typeof x === 'string')
   // 数组即收（含空数组 = 清空全部指令绑定）；非数组整体丢弃由 merge 回退现值
   if (Array.isArray(p.commandHotkeys)) patch.commandHotkeys = sanitizeCommandHotkeys(p.commandHotkeys)
   if (p.windowPos === null || typeof p.windowPos === 'object') {
@@ -244,7 +249,21 @@ export class SettingsStore {
         ) {
           patch.transparency = { ...patch.transparency, glassFrost: clampOpacity(100 - clampOpacity(rawTx.opacity)) }
         }
+        // 一次性迁移：旧默认透明度整组 {T,55,T,±45} → opacity 15（防旧默认粘滞）。判定读 sanitize 前原始
+        // parsed；须在 glassFrost 派生后执行（派生按旧 55 算 45，先改 15 会错算 85）
+        const rawFile = (parsed ?? {}) as { migrations?: unknown; transparency?: Record<string, unknown> }
+        const rawMigrations: unknown[] = Array.isArray(rawFile.migrations) ? rawFile.migrations : []
+        const legacyTx = rawFile.transparency
+        const isLegacyDefaultTx = legacyTx?.enabled === true && legacyTx?.opacity === 55 && legacyTx?.blur === true
+          && (legacyTx?.glassFrost === undefined || legacyTx?.glassFrost === 45)
+        const migrated = !rawMigrations.includes(MIGRATION_TX_OPACITY_15) && isLegacyDefaultTx
+        if (migrated) {
+          patch.transparency = { ...patch.transparency, opacity: 15 }
+          patch.migrations = [...(patch.migrations ?? []), MIGRATION_TX_OPACITY_15]
+        }
         this.current = merge(this.current, patch)
+        // 迁移即置脏：will-quit flush 落盘 marker，防每次启动重判 + 用户调回 55 被复迁
+        if (migrated) this.dirty = true
       } catch {
         // 损坏先留证再按默认值处理，防首次写入静默覆盖残余
         const evidence = `${this.file}.corrupt-${corruptStamp()}`

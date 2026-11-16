@@ -278,7 +278,7 @@ describe('gtools:host settings:set', () => {
     expect((r.data as AppSettings).outlineColor).toBe('custom')
     expect((r.data as AppSettings).outlineCustomColor).toBe('#aabbcc')
     expect(store.settings.outlineColor).toBe('custom')
-    expect(detached.applyThemeToAll).toHaveBeenCalledWith('light', { enabled: true, opacity: 55, blur: true, glassFrost: 45 }, {
+    expect(detached.applyThemeToAll).toHaveBeenCalledWith('light', { enabled: true, opacity: 15, blur: true, glassFrost: 45 }, {
       enabled: true,
       width: 3,
       color: 'custom',

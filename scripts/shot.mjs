@@ -2,7 +2,9 @@
 // 用法：npm run shot -- --all | --only <pluginId> | --shell [--out <dir>]
 // 依赖外部先 npm run build（本脚本不代跑构建，只做产物前置检查）。
 import { app, BrowserWindow, ipcMain, nativeImage } from 'electron'
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { build } from 'esbuild'
+import { createRequire } from 'node:module'
+import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -54,16 +56,36 @@ function parseArgs(argv) {
   return mode
 }
 
-/** manifest.ts 是纯字面量（仅 import type + 类型注解），剥掉后 Function 求值；出现别的语法立即报错 */
-function evalManifest(src, dir) {
-  const code = src
-    .replace(/^import\b[^\n]*$/gm, '')
-    .replace(/const manifest\s*:\s*PluginManifest\s*=/, 'const manifest =')
-    .replace(/export\s+default\s+manifest\s*;?\s*$/, '')
-  if (/^\s*(import|export)\b/m.test(code)) {
-    throw new Error(`${dir}/manifest.ts 含未预期的高级语法，截图脚本需适配解析器`)
+/** manifest.ts 整包 esbuild bundle 后求值：TS 语法/值导入（web-quick-open 值导入 match→pinyin-pro）
+ *  正则剥壳喂 new Function 必 SyntaxError；alias 与 electron.vite.config 的 @sdk 同指向 */
+const bundleOpts = {
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  write: false,
+  alias: { '@sdk': join(ROOT, 'sdk') }
+}
+
+/** bundle 产物求值：残留 require（node: 内建/未内联外部包）在求值期显式抛错带 id，优于静默跳过 */
+function evalBundled(code, fromDir) {
+  const nodeRequire = createRequire(import.meta.url)
+  const requireStub = (id) => {
+    // 只认仓库内相对路径；其余（external 包/内建）manifest 求值期出现即失败
+    if ((id.startsWith('.') || id.startsWith('/')) && resolve(fromDir, id).startsWith(ROOT)) {
+      return nodeRequire(resolve(fromDir, id))
+    }
+    throw new Error(`manifest 求值期 require 未内联依赖 "${id}"`)
   }
-  const manifest = new Function(`${code}\nreturn manifest`)()
+  const mod = { exports: {} }
+  new Function('require', 'module', 'exports', code)(requireStub, mod, mod.exports)
+  return mod.exports
+}
+
+async function evalManifest(dir) {
+  const entry = join(PLUGINS_DIR, dir, 'manifest.ts')
+  const result = await build({ ...bundleOpts, entryPoints: [entry] })
+  const exp = evalBundled(result.outputFiles[0].text, dirname(entry))
+  const manifest = exp && typeof exp === 'object' && 'default' in exp ? exp.default : exp
   if (
     typeof manifest !== 'object' ||
     manifest === null ||
@@ -86,29 +108,36 @@ async function loadBuiltinManifests() {
   const dirs = ents.filter((e) => e.isDirectory()).map((e) => e.name).sort()
   const manifests = []
   for (const dir of dirs) {
-    const src = await readFile(join(PLUGINS_DIR, dir, 'manifest.ts'), 'utf-8')
-    manifests.push(evalManifest(src, dir))
+    manifests.push(await evalManifest(dir))
   }
   return manifests
+}
+
+/** DEFAULT_SETTINGS 真源加载（同 esbuild 管道 bundle sdk/settings.ts）：手写字面缺 transparency 时
+ *  渲染层 applyVisualSettings 直接 TypeError，截图必白屏 */
+async function loadDefaultSettings() {
+  const entry = join(ROOT, 'sdk', 'settings.ts')
+  const result = await build({ ...bundleOpts, entryPoints: [entry] })
+  const exp = evalBundled(result.outputFiles[0].text, ROOT)
+  const settings = exp?.DEFAULT_SETTINGS
+  if (typeof settings !== 'object' || settings === null) throw new Error('sdk/settings.ts 缺 DEFAULT_SETTINGS 导出')
+  return settings
 }
 
 // 截图宿主 IPC 容错：渲染层启动必需 app:init / plugin:enter；插件能力面给确定性的空值降级，
 // 保证页面渲染不白屏（不做真实网络/剪贴板/文件操作）。storage 用内存实现保持 set→get 语义。
 const memoryStorage = new Map()
-const DEFAULT_SETTINGS = {
-  hotkey: { darwin: 'Alt+Space', win32: 'Ctrl+Alt+Space' },
-  theme: 'light',
-  disabledPlugins: []
-}
+// 场景级主题覆写（三模式材质验收）：null=真源默认 light
+let themeOverride = null
 
-function setupShotIpc(manifests) {
+function setupShotIpc(manifests, defaultSettings) {
   ipcMain.handle('gtools:host', (_e, req) => {
     const api = req?.api
     if (api === 'app:init') {
       return {
         ok: true,
         data: {
-          settings: DEFAULT_SETTINGS,
+          settings: themeOverride === null ? defaultSettings : { ...defaultSettings, theme: themeOverride },
           plugins: manifests.map((m) => ({ manifest: m, enabled: true })),
           loadIssues: [],
           externalDetected: []
@@ -261,9 +290,10 @@ async function reloadWithStorage(wc, mutateJs) {
   await settle(wc, SETTLE_MS)
 }
 
-async function runScenario({ name, hash, type, file, query, recentSeed }) {
+async function runScenario({ name, hash, type, file, query, recentSeed, theme }) {
   const isRecent = type === 'shell-recent'
   const isShellGrid = type === 'shell-empty' || isRecent
+  themeOverride = theme ?? null
   const { win, loaded, consoleErrors } = createShotWindow(hash, isShellGrid ? SHELL_GRID_WIN_H : WIN_H)
   try {
     await loaded
@@ -302,27 +332,38 @@ async function runScenario({ name, hash, type, file, query, recentSeed }) {
       await sleep(TYPE_SETTLE_MS)
     }
 
+    // wintx 注入须后置于一切 reload/输入（reload 清 dataset）：darwin='1' 顺带触发 base.css
+    // 透明边距 padding，外圈影/材质入镜可做视觉验收
+    await wc.executeJavaScript(
+      `document.documentElement.dataset.wintx = ${JSON.stringify(process.platform === 'darwin' ? '1' : '0')}; true`
+    )
+    await settle(wc, SETTLE_MS)
+
     // DOM 自检：确认目标态真的渲染出来（deep-link 未命中/插件崩了在这里暴露）
-    const dom = await wc.executeJavaScript(`(() => ({
-      searchbox: !!document.querySelector('.searchbox input'),
-      titlebar: !!document.querySelector('.plugin-titlebar'),
-      pluginError: document.querySelector('.plugin-error')?.textContent?.trim() ?? '',
-      resultItems: document.querySelectorAll('.result-list .item').length,
-      hlCount: document.querySelectorAll('.result-list .hl').length,
-      appCells: document.querySelectorAll('.empty-state .app-cell').length,
-      pinBadges: document.querySelectorAll('.empty-state .app-cell .pin-badge').length,
-      demoBadge: !!document.querySelector('.empty-state .demo-badge'),
-      recentCells: document.querySelectorAll('.empty-state .recent-cell').length,
-      recentVisible: (() => { const el = document.querySelector('.empty-state .recent-row'); if (!el) return false;
-        const r = el.getBoundingClientRect(); return r.top < innerHeight && r.bottom > 0 })()
-    }))()`)
+    const dom = await wc.executeJavaScript(`(() => {
+      const recent = [...document.querySelectorAll('.empty-state .section')]
+        .find((s) => (s.querySelector('.sec-title')?.textContent ?? '').includes('最近打开')) ?? null
+      const rr = recent?.getBoundingClientRect()
+      return {
+        searchbox: !!document.querySelector('.searchbox input'),
+        pluginView: !!document.querySelector('.plugin-page'),
+        pluginError: document.querySelector('.plugin-error')?.textContent?.trim() ?? '',
+        resultItems: document.querySelectorAll('.result-view .result-cell').length,
+        hlCount: document.querySelectorAll('.result-view .hl').length,
+        appCells: document.querySelectorAll('.empty-state .app-cell').length,
+        pinBadges: document.querySelectorAll('.empty-state .app-cell .pin-badge').length,
+        demoBadge: !!document.querySelector('.empty-state .demo-badge'),
+        recentCells: recent ? recent.querySelectorAll('.app-grid .app-cell').length : 0,
+        recentVisible: !!rr && rr.top < innerHeight && rr.bottom > 0
+      }
+    })()`)
     if (type === 'plugin') {
-      if (!dom.titlebar) throw new Error(`deep-link 未进入插件视图（hash=${hash}）`)
+      if (!dom.pluginView) throw new Error(`deep-link 未进入插件视图（hash=${hash}）`)
       if (dom.pluginError !== '') throw new Error(`插件视图报错：${dom.pluginError}`)
     } else {
       // 插件模式下外壳模板不渲染 .searchbox，该检查只对 shell 场景有意义
       if (!dom.searchbox) throw new Error('外壳未渲染（缺 .searchbox）')
-      if (dom.titlebar) throw new Error('空态场景误入插件视图')
+      if (dom.pluginView) throw new Error('空态场景误入插件视图')
       if (type === 'shell-query' && dom.resultItems === 0) throw new Error(`搜索 "${typed}" 无结果项`)
       if (type === 'shell-highlight') {
         if (dom.resultItems === 0) throw new Error(`搜索 "${typed}" 无结果项`)
@@ -387,6 +428,7 @@ async function main() {
     app.exit(1)
     return
   }
+  const defaultSettings = await loadDefaultSettings()
 
   const outDir = resolve(ROOT, mode.out ?? join('.zcode', 'screenshots'))
   await mkdir(outDir, { recursive: true })
@@ -417,6 +459,16 @@ async function main() {
     })
   }
   if (mode.all) {
+    // 三模式材质验收（瓷实化改造）：demo 空态 × light/dark/glass，走真源默认透明链路 + wintx 注入
+    for (const t of ['light', 'dark', 'glass']) {
+      scenarios.push({
+        name: `shell-theme-${t}`,
+        type: 'shell-empty',
+        theme: t,
+        hash: SHELL_DEMO_HASH,
+        file: join(outDir, `shell-theme-${t}.png`)
+      })
+    }
     for (const m of manifests) {
       scenarios.push({ name: m.id, type: 'plugin', hash: `plugin=${m.id}&demo=1`, file: join(outDir, `${m.id}.png`) })
     }
@@ -429,7 +481,7 @@ async function main() {
     })
   }
 
-  setupShotIpc(manifests)
+  setupShotIpc(manifests, defaultSettings)
 
   let okCount = 0
   for (const s of scenarios) {

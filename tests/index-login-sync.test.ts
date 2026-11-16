@@ -40,7 +40,7 @@ vi.mock('electron', () => ({
 }))
 
 vi.mock('../src/main/login-item', () => ({
-  syncLoginItem: vi.fn((...args: unknown[]) => (state.syncImpl ? state.syncImpl(...args) : 'applied'))
+  syncLoginItemWithFingerprint: vi.fn((...args: unknown[]) => (state.syncImpl ? state.syncImpl(...args) : 'applied'))
 }))
 // 构造类 mock 须用 function 实现（vi.fn 箭头实现不可 new）
 vi.mock('../src/main/settings-store', () => ({
@@ -122,7 +122,7 @@ vi.mock('../src/main/tray', () => ({ createTray: vi.fn() }))
 vi.mock('../src/main/logo-skin', () => ({ applyAppLogoSkin: vi.fn() }))
 
 interface IdxCtx {
-  syncLoginItem: Mock
+  syncLoginItemWithFingerprint: Mock
   setupIpc: Mock
   app: { getVersion: () => string }
 }
@@ -137,7 +137,7 @@ async function bootIndex(): Promise<IdxCtx> {
   const electron = await import('electron')
   await import('../src/main/index')
   return {
-    syncLoginItem: login.syncLoginItem as unknown as Mock,
+    syncLoginItemWithFingerprint: login.syncLoginItemWithFingerprint as unknown as Mock,
     setupIpc: ipc.setupIpc as unknown as Mock,
     app: electron.app as unknown as { getVersion: () => string }
   }
@@ -155,16 +155,16 @@ async function flushMacrotasks(rounds = 3): Promise<void> {
 
 describe('主进程启动登录项同步（index.ts 引导链）', () => {
   // 引导链 mock 全即时 resolve，但全量并行 worker 饱和时调度延迟可超 vitest 默认 5s（CI 双核更甚），给足超时
-  it('同步挪出启动关键路径：引导链微任务内（IPC 已注册）不跑 syncLoginItem，setImmediate 后才跑且 want 取自 settings', async () => {
+  it('同步挪出启动关键路径：引导链微任务内（IPC 已注册）不跑登录项同步，setImmediate 后才跑且 want 取自 settings', async () => {
     const ctx = await bootIndex()
     expect(ctx.setupIpc).not.toHaveBeenCalled() // whenReady 未 resolve，bootstrap 未启动
     state.readyResolve!()
     await drainMicrotasks(() => ctx.setupIpc.mock.calls.length > 0)
     expect(ctx.setupIpc).toHaveBeenCalledTimes(1) // 引导链已走到 IPC 注册（先于登录项同步的代码位）
-    expect(ctx.syncLoginItem).not.toHaveBeenCalled() // 关键锁：不得在引导链内同步执行
+    expect(ctx.syncLoginItemWithFingerprint).not.toHaveBeenCalled() // 关键锁：不得在引导链内同步执行
     await flushMacrotasks()
-    expect(ctx.syncLoginItem).toHaveBeenCalledTimes(1)
-    expect(ctx.syncLoginItem).toHaveBeenCalledWith(ctx.app, true) // 种子 launchAtLogin: true
+    expect(ctx.syncLoginItemWithFingerprint).toHaveBeenCalledTimes(1)
+    expect(ctx.syncLoginItemWithFingerprint).toHaveBeenCalledWith(ctx.app, true, expect.stringContaining('login-item.json')) // 种子 launchAtLogin: true
   }, 20000)
 
   it('同步失败被接住入 appLog：error/main 条目带版本号与错误信息，不杀宿主', async () => {

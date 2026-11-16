@@ -474,14 +474,14 @@ backend/index.ts（主进程）：
 ### 5.1 主题（T2.1）
 
 - **机制**：`themes.css` 定义 CSS 变量全集（--bg / --fg / --fg-dim / --accent / --border / --danger 等），`<html data-theme="light|dark">` 切换；全部 UI（含插件视图）只允许取变量，禁止硬编码色值（判据 4 的静态检查项）。
-- **透明效果**（v0.0.6 起为通用设置，所有主题可开；设置项 `transparency: { enabled, opacity(0-100), blur }`，默认开/55/开）：
+- **透明效果**（v0.0.6 起为通用设置，所有主题可开；设置项 `transparency: { enabled, opacity(0-100), blur }`，默认开/15/开（0.0.67 起，旧默认 55 已由启动迁移一次性搬到 15））：
   - 渲染层：`html[data-transparency='on']` + `--tx=opacity/100` 注入，themes.css 据此把着色层变量（--bg / --bg-raised / 边框 / 投影 / 顶光 sheen）半透明化，alpha = (1-—tx)×系数；前景色沿用当前主题，保证可读性不依赖桌面明暗；
   - 磨霜分平台（`applyThemeToBrowserWindow`，v0.0.22 起不截图不读壁纸）：
     - win32：不透明窗 + `setBackgroundMaterial('acrylic')`（Win10 API 静默无效退化为半透明）；透明档（blur 关）才带 `transparent: true`（Windows 透明窗不可拖缘调整大小，标志只能创建时定，记入 WeakSet，跨类别走 recreateSearchWindow）；
     - mac：**恒透明窗 + 零 vibrancy**——`setVibrancy('under-window')` 按整窗矩形磨霜，会把霜面延伸到卡片外 32/32/48 透明边距（实测「外圈玻璃块」），且不透明窗叠 alpha 底色在显隐/缩放时白闪（v0.0.21 及之前 light 主题闪烁根因之一）；霜面由 `.app` / `.detached` 的 `backdrop-filter: var(--glass-filter)` 实时采样桌面承担（透明窗上 CSS backdrop-filter 可采到窗后内容，实测验证）；
-    - blur 开关经 `html[data-blur]` 联动 `--glass-filter`（blur(14-16px) ↔ none/blur(1.5px)）；透明关：不透明主题底色 `'#f2f3f5' | '#1e1e1e'`；
+    - blur 开关经 `html[data-blur]` 联动 `--glass-filter`（blur(14-16px) ↔ none/blur(1.5px)）；透明关：不透明主题底色 `'#f7f7f9' | '#1e1e1e'`；
 - **玻璃主题**（v0.0.22 起）：glass 主题 = 薄白 tint（--bg ≈ 0.06-0.62 alpha）+ 上述磨霜机制的磨砂档（blur 开）/清透档（blur 关），霜面实时透出真实桌面；无独立材质字段。
-  - 磨砂度曲线（v0.0.27 真玻璃化，与仓库根 glass-lab.html 定稿配方一致）：透明度滑杆在 glass 主题下语义为**磨砂度**——0 = 厚磨砂玻璃（不透但字清）、55 = 默认档、100 = 清玻璃，任何档位都有玻璃感；厚度参数包络不倒退（blur = 1.5px + 34px·(1-t)^0.9，55 档 18.1 ≥ 旧恒定 14）。
+  - 磨砂度曲线（v0.0.27 真玻璃化，与仓库根 glass-lab.html 定稿配方一致）：透明度滑杆在 glass 主题下语义为**磨砂度**——0 = 厚磨砂玻璃（不透但字清）、15 = 默认档（0.0.67 起，旧默认 55）、100 = 清玻璃，任何档位都有玻璃感；厚度参数包络不倒退（blur = 1.5px + 34px·(1-t)^0.9，15 档 ≈30.9 ≥ 旧恒定 14）。
   - 新 token 族：--glass-blur/contrast/sat/sheen/depth/shadow-k（:root 惰性默认、glass 块按 --tx/--txp/--txf calc 覆写；--txf=(1-t)^0.9 由 App.vue/独立窗 JS 注入，CSS 算不出幂次）+ --disp-c1/c2 色散环两端色（青/品红，纯装饰）；厚度感由 .app/.detached/.searchbox 的 sheen 层 + 厚玻璃壁伪元素（--glass-depth 环带）+ 色散 inset 线承担。
   - win32 降级（`html[data-wintx='0'][data-theme='glass']`）：不透明窗上 DWM 亚克力霜面 CSS backdrop 采不到，tint 整体抬高 + .app 叠 feTurbulence 噪点自绘玻璃颗粒。
 - **已废弃机制**（v0.0.16-v0.0.21 的 wallpaper/acrylic/clear 三档 glassMaterial、壁纸读取桥、快照折射层、胶囊 feDisplacementMap 透镜、win32 渲染层快照流、glass-backdrop/glass-capability/wallpaper 三个服务）已全量删除——「透明玻璃本身就是实时的」，任何靠截图/读壁纸伪造背景的方案不再回来；旧档残留 `glassMaterial` 键加载时忽略。

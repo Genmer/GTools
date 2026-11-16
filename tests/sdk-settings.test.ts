@@ -144,6 +144,15 @@ describe('sdk/settings：流动速度 sanitizeOutlineFlowSpeed 与时长 rimFlow
   })
 })
 
+describe('sdk/settings：默认透明度与迁移标记', () => {
+  it('默认透明度 opacity=15（0.0.67 起瓷实化），migrations 默认含 txOpacityDefault15（新装机=已迁语义）', () => {
+    expect(DEFAULT_SETTINGS.transparency).toEqual({ enabled: true, opacity: 15, blur: true, glassFrost: 45 })
+    expect(DEFAULT_SETTINGS.migrations).toContain('txOpacityDefault15')
+    // 精确集守卫：DEFAULT 误加未真实跑过的 marker 会伪造「已迁」语义，只许恰含这一枚
+    expect(DEFAULT_SETTINGS.migrations).toEqual(['txOpacityDefault15'])
+  })
+})
+
 describe('sdk/settings：应用日志底色 sanitizeAppLogSkin', () => {
   it('默认 appLogSkin=black', () => {
     expect(DEFAULT_SETTINGS.appLogSkin).toBe('black')

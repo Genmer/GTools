@@ -15,8 +15,11 @@ asar: true
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/
 mac:
-  # 本机无开发者证书，ad-hoc 签名；完全未签名的 app 会被 SMAppService 拒绝，登录项静默失效
-  identity: null
+  # 无开发者证书：ad-hoc 签名（identity null 是整个跳过签名，不是 ad-hoc）。ad-hoc 的登录项在 BTM 按 cdhash 绑定、
+  # 更新即失效，靠 login-item 指纹刷新兜底；钥匙串里有受信任的本地自签证书时可改 CSC_NAME 注入换成跨版本稳定身份
+  identity: "-"
+  # ad-hoc 无 Team ID，hardened runtime 的 library validation 会拒载 Electron Framework，必须关
+  hardenedRuntime: false
   category: public.app-category.productivity
   icon: build/icon.icns
   target:

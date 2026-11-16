@@ -223,7 +223,7 @@ describe('settings-store', () => {
     const store = new SettingsStore(dir, fs)
     await store.load()
     expect(store.settings.theme).toBe('glass')
-    expect(store.settings.transparency).toEqual({ enabled: true, opacity: 55, blur: true, glassFrost: 45 })
+    expect(store.settings.transparency).toEqual({ enabled: true, opacity: 15, blur: true, glassFrost: 45 })
   })
 
   it('transparency 校验：合法字段收录，opacity 越界夹取 0-100，坏类型丢弃', async () => {
@@ -671,9 +671,10 @@ describe('settings-store', () => {
       await store.load()
       return store.settings.transparency
     }
+    // {T,55,T,45} 无 marker：被 txOpacityDefault15 迁移改 15（glassFrost 已带字段不派生仍 45）
     expect(await loadTx({ enabled: true, opacity: 55, blur: true, glassFrost: 45 })).toEqual({
       enabled: true,
-      opacity: 55,
+      opacity: 15,
       blur: true,
       glassFrost: 45
     })
@@ -823,5 +824,105 @@ describe('settings-store', () => {
     const reopened = new SettingsStore(dir, fs)
     await reopened.load()
     expect(reopened.settings.background).toEqual({ enabled: true, file: 'current.jpg', dim: 60 })
+  })
+})
+
+describe('一次性迁移 txOpacityDefault15（默认透明度 55→15）', () => {
+  const MARKER = 'txOpacityDefault15'
+  const loadWith = async (file: Record<string, unknown>): Promise<{ store: SettingsStore; fs: FakeFs }> => {
+    const fs = fakeFs({ [`${dir}/settings.json`]: JSON.stringify(file) })
+    const store = new SettingsStore(dir, fs)
+    await store.load()
+    return { store, fs }
+  }
+
+  it('① 旧档 {T,55,T,45} 无 marker：迁 15 并记录 marker，flush 后文件含 migrations', async () => {
+    const { store, fs } = await loadWith({ transparency: { enabled: true, opacity: 55, blur: true, glassFrost: 45 } })
+    expect(store.settings.transparency).toEqual({ enabled: true, opacity: 15, blur: true, glassFrost: 45 })
+    expect(store.settings.migrations).toContain(MARKER)
+    await store.flush()
+    const saved = JSON.parse(fs.files.get(`${dir}/settings.json`)!)
+    expect(saved.transparency.opacity).toBe(15)
+    expect(saved.migrations).toContain(MARKER)
+  })
+
+  it('② {T,55,T} 缺 glassFrost 双迁：派生 45（按旧 55）+ opacity 15，不产生 85', async () => {
+    const { store } = await loadWith({ transparency: { enabled: true, opacity: 55, blur: true } })
+    expect(store.settings.transparency).toEqual({ enabled: true, opacity: 15, blur: true, glassFrost: 45 })
+  })
+
+  it('③ 带 marker 的 {T,55,T,45} 不迁（防粘滞）：用户显式调回 55 保持 55', async () => {
+    const { store } = await loadWith({
+      transparency: { enabled: true, opacity: 55, blur: true, glassFrost: 45 },
+      migrations: [MARKER]
+    })
+    expect(store.settings.transparency.opacity).toBe(55)
+  })
+
+  it('④ 非整组不迁：enabled:false / blur:false / opacity:60 / glassFrost:70 四例保持原值', async () => {
+    const cases = [
+      { transparency: { enabled: false, opacity: 55, blur: true, glassFrost: 45 } },
+      { transparency: { enabled: true, opacity: 55, blur: false, glassFrost: 45 } },
+      { transparency: { enabled: true, opacity: 60, blur: true, glassFrost: 45 } },
+      { transparency: { enabled: true, opacity: 55, blur: true, glassFrost: 70 } }
+    ]
+    for (const file of cases) {
+      const { store } = await loadWith(file)
+      expect(store.settings.transparency).toEqual(file.transparency)
+    }
+  })
+
+  it('⑤ 迁移即置脏：load 后无需 update 直接 flush 落盘 marker（will-quit 兜底）', async () => {
+    const { store, fs } = await loadWith({ transparency: { enabled: true, opacity: 55, blur: true, glassFrost: 45 } })
+    await store.flush()
+    expect(JSON.parse(fs.files.get(`${dir}/settings.json`)!).migrations).toContain(MARKER)
+    // 非整组（不迁）时 load 不置脏，flush 不产生写（writes 为空即未落盘）
+    const clean = await loadWith({ transparency: { enabled: true, opacity: 60, blur: true, glassFrost: 45 } })
+    await clean.store.flush()
+    expect(clean.fs.writes).toEqual([])
+  })
+
+  it('⑥ migrations sanitize：非数组丢弃回退默认（含 marker），数组内非 string 滤除', async () => {
+    const bad = await loadWith({
+      transparency: { enabled: true, opacity: 55, blur: true, glassFrost: 45 },
+      migrations: 'x'
+    })
+    // 'x' 丢弃 → merge 回退 DEFAULT 的 marker；transparency 仍按无 marker 判定迁移
+    expect(bad.store.settings.migrations).toEqual([MARKER])
+    expect(bad.store.settings.transparency.opacity).toBe(15) // 注释宣称的「仍判定迁移」由值锁定
+    const mixed = await loadWith({
+      transparency: { enabled: true, opacity: 20, blur: true, glassFrost: 45 },
+      migrations: [1, 'a']
+    })
+    expect(mixed.store.settings.migrations).toEqual(['a'])
+  })
+
+  it('⑦ 备份恢复语义：load→update({T,55,T})→flush→新 store load 仍 55（marker 随整包落盘保留）', async () => {
+    const fs = fakeFs()
+    const a = new SettingsStore(dir, fs)
+    await a.load()
+    await a.update({ transparency: { enabled: true, opacity: 55, blur: true } })
+    await a.flush()
+    const b = new SettingsStore(dir, fs)
+    await b.load()
+    expect(b.settings.transparency).toEqual({ enabled: true, opacity: 55, blur: true, glassFrost: 45 })
+  })
+
+  it('⑧ migrations 空数组 + 旧默认整组：空数组不含 marker 视为未迁过，照迁 15 且 marker 顶替空数组', async () => {
+    const { store } = await loadWith({
+      transparency: { enabled: true, opacity: 55, blur: true, glassFrost: 45 },
+      migrations: []
+    })
+    expect(store.settings.transparency).toEqual({ enabled: true, opacity: 15, blur: true, glassFrost: 45 })
+    expect(store.settings.migrations).toEqual([MARKER])
+  })
+
+  it('⑨ migrations 含非 string 元素但 marker 在：判定读原始 parsed 不迁（防粘滞不被脏元素绕过），sanitize 滤后仅存 marker', async () => {
+    const { store } = await loadWith({
+      transparency: { enabled: true, opacity: 55, blur: true, glassFrost: 45 },
+      migrations: [1, MARKER]
+    })
+    expect(store.settings.transparency.opacity).toBe(55)
+    expect(store.settings.migrations).toEqual([MARKER])
   })
 })

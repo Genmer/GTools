@@ -44,7 +44,7 @@ import { rebindHotkey, suspendHotkeys, resumeHotkeys, armHotkeyProbe, disarmHotk
 import { applyAppLogoSkin } from '../logo-skin'
 import { applyTraySkin } from '../tray'
 import { createHotkeyCapture, type HotkeyCaptureHandler } from '../hotkey-capture'
-import { syncLoginItem } from '../login-item'
+import { syncLoginItemWithFingerprint } from '../login-item'
 import {
   defaultBackupFileName,
   parseBackup,
@@ -588,7 +588,7 @@ export function setupIpc(deps: {
           // 只在显式携带且为严格 boolean 时同步 OS 登录项（与 sanitizePatch 同闸，防渲染层传脏值）；写失败即不落盘，保证 OS 态=内存态=文件态一致
           if (typeof p.launchAtLogin === 'boolean') {
             try {
-              syncLoginItem(app, p.launchAtLogin)
+              syncLoginItemWithFingerprint(app, p.launchAtLogin, join(app.getPath('userData'), 'login-item.json'))
             } catch (err) {
               // login-item 头注释契约：OS 写入异常上抛由调用方呈现；此处接住转 ok:false 且不落盘（settings.update 在后）
               deps.appLog.push('error', 'main', `开机启动设置失败 v${app.getVersion()}：${err instanceof Error ? err.message : String(err)}`)

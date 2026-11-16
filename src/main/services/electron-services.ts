@@ -272,7 +272,7 @@ export function createElectronServices(opts: {
       secureWebContents(win.webContents)
       // macOS 全屏覆盖：浮窗常驻全工作区可见（含全屏空间），不切走前台 app 全屏
       if (process.platform === 'darwin') {
-        win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+        win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
       }
       if (o.show) {
         if (o.focus) win.show()
@@ -355,7 +355,7 @@ export function createElectronServices(opts: {
       secureWebContents(win.webContents)
       // macOS 全屏覆盖：截图取景 overlay 挂全屏空间可见，全屏应用上取景不切空间
       if (process.platform === 'darwin') {
-        win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+        win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
       }
       void win.loadURL(url)
       const handle: OverlayHandle = {

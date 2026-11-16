@@ -1271,10 +1271,12 @@ html[data-wintx='1'] .app {
 /* win32 不透明窗（DWM 亚克力霜面 CSS 采不到）：feTurbulence 噪点自绘玻璃颗粒，叠 sheen 之上。
    blur-on 增补：切模糊触发 recreateSearchWindow 后 DWM 单活霜面槽烧毁不可复活，平灰态靠噪点兜底；
    须叠 data-transparency='on' 门——纯色档（enabled=false）可能残留 blur=true，实色观感零改动。
+   darwin 补噪点：恒 wintx=1（window.ts），磨霜是 backdrop-filter 无颗粒，清透档（blur off）不加。
    栈序有意偏离常态栈「纱罩+图片插最前」的字面：噪点居首压在背景图上——颗粒属窗口玻璃材质，
    须浮于照片之上才不被整层盖死；启用自定义背景时纱罩/图片退居噪点之后 */
 html[data-wintx='0'][data-theme='glass'] .app,
-html[data-wintx='0'][data-transparency='on'][data-blur='on'] .app {
+html[data-wintx='0'][data-transparency='on'][data-blur='on'] .app,
+html[data-wintx='1'][data-transparency='on'][data-blur='on'] .app {
   background:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E")
       padding-box,

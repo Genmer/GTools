@@ -305,6 +305,8 @@ describe('normalizeSettings', () => {
       outlineFlowSpeed: 3,
       appLogSkin: 'white',
       appLogoSkin: 'white',
+      // migrations 不在备份白名单：规整结果继承 DEFAULT 的一次性迁移标记（format.ts 白名单语义）
+      migrations: ['txOpacityDefault15'],
       commandHotkeys: [],
       windowPos: null
     })
@@ -320,6 +322,13 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings({ transparency: { opacity: 30, glassFrost: 'x' } }).transparency.glassFrost).toBe(45)
     expect(normalizeSettings({ transparency: { blur: false } }).transparency.glassFrost).toBe(45)
     expect(normalizeSettings({}).transparency.glassFrost).toBe(45)
+  })
+
+  it('旧默认整组 {T,55,T} 备份恢复：规整不做 55→15 迁移（防粘滞由继承 marker 承担），glassFrost 按旧 55 派生 45', () => {
+    const s = normalizeSettings({ transparency: { enabled: true, opacity: 55, blur: true } })
+    expect(s.transparency).toEqual({ enabled: true, opacity: 55, blur: true, glassFrost: 45 })
+    // 恢复落盘后 SettingsStore.load 读到 marker 不复迁（与 settings-store.test ③⑦ 对账）
+    expect(s.migrations).toEqual(['txOpacityDefault15'])
   })
 
   it('background 段一律忽略（导入不恢复，同 launchAtLogin/clipboardPanel）', () => {

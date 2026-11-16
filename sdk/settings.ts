@@ -13,7 +13,10 @@ export interface TransparencySettings {
   glassFrost: number
 }
 
-export const DEFAULT_TRANSPARENCY: TransparencySettings = { enabled: true, opacity: 55, blur: true, glassFrost: 45 }
+export const DEFAULT_TRANSPARENCY: TransparencySettings = { enabled: true, opacity: 15, blur: true, glassFrost: 45 }
+
+/** 一次性迁移标记：默认透明度 55→15 后，旧档整组 {T,55,T,±45} 迁 15（防旧默认粘滞） */
+export const MIGRATION_TX_OPACITY_15 = 'txOpacityDefault15'
 
 /** 剪贴板记录面板（Win+V 式）：position 即开与位置，'off' 关闭（关闭态不采集） */
 export type ClipboardPanelPosition = 'off' | 'left' | 'right' | 'below'
@@ -78,6 +81,8 @@ export interface AppSettings {
   commandHotkeys: CommandHotkey[]
   /** 上次主窗位置（用户拖动后记忆，仅当所在屏与唤起时光标屏一致时沿用）；机器相关，不随备份迁移 */
   windowPos: { x: number; y: number } | null
+  /** 已完成的一次性迁移标记（防旧默认复迁）；新装机默认即含，备份规整/恢复不携带 */
+  migrations: string[]
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -99,7 +104,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   background: { ...DEFAULT_BACKGROUND },
   hideOnBlur: true,
   commandHotkeys: [],
-  windowPos: null
+  windowPos: null,
+  migrations: [MIGRATION_TX_OPACITY_15]
 }
 
 export const OUTLINE_WIDTH_MIN = 0

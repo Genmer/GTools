@@ -249,3 +249,49 @@ describe('themes.css：轮廓流动动画门控（色段沿环带空间位移，
     expect(idx).toBeGreaterThan(flowIdx)
   })
 })
+
+describe('themes.css：瓷实化材质（接触影贴底 / hairline 环 / 兜底同步）', () => {
+  it('三组接触影首层常量化：dark 透明 0.24 / light 透明 0.18 / glass 0.18（不随透明度消失）', () => {
+    expect(blockOf("html[data-transparency='on'][data-theme='dark']")).toContain('0 1px 3px rgba(0, 0, 0, 0.24)')
+    expect(blockOf("html[data-transparency='on'][data-theme='light']")).toContain('0 1px 3px rgba(15, 23, 42, 0.18)')
+    expect(blockOf("html[data-theme='glass']")).toContain('0 1px 3px rgba(20, 32, 52, 0.18)')
+  })
+
+  it('四块 --window-ring 均前插上缘亮线 + hairline 描边（原晕段保留）', () => {
+    const rings = [
+      ":root,\nhtml[data-theme='light']",
+      "html[data-theme='dark']",
+      "html[data-transparency='on'][data-theme='dark']",
+      "html[data-transparency='on'][data-theme='light']"
+    ]
+    for (const sel of rings) {
+      const body = blockOf(sel)
+      expect(body, sel).toContain('inset 0 1px 0')
+      expect(body, sel).toContain('inset 0 0 0 1px')
+    }
+  })
+
+  it('glass 色散环零改动守卫：--window-ring 仍以 var(--disp-c1) 色散线开头且不吃 hairline 段', () => {
+    const body = blockOf("html[data-theme='glass']")
+    expect(body).toContain('--window-ring: inset 0 1px 0 var(--disp-c1), inset 0 -1px 0 var(--disp-c2)')
+    expect(body).not.toContain('inset 0 0 0 1px rgba(15, 23, 42')
+  })
+
+  it('--bg-raised 中性化 #f7f7f9（原 #f2f3f5 全仓清零）', () => {
+    expect(bare).toContain('--bg-raised: #f7f7f9')
+    expect(bare).not.toContain('#f2f3f5')
+  })
+
+  it('兜底字面与新默认同步：tx 0.15 / txp 0.6141 / txf 0.8639，旧 0.55/0.0911/0.4874 兜底全清', () => {
+    expect(bare).toContain('var(--tx, 0.15)')
+    expect(bare).toContain('var(--txp, 0.6141)')
+    expect(bare).toContain('var(--txf, 0.8639)')
+    expect(bare).not.toContain('var(--tx, 0.55)')
+    expect(bare).not.toContain('var(--txp, 0.0911)')
+    expect(bare).not.toContain('var(--txf, 0.4874)')
+    // 静态计数守卫：36 处兜底是全量替换动作，仅存性断言抓不住「漏改多数、仅剩一处新值」的假绿
+    expect((bare.match(/var\(--tx, 0\.15\)/g) ?? []).length).toBe(25)
+    expect((bare.match(/var\(--txp, 0\.6141\)/g) ?? []).length).toBe(8)
+    expect((bare.match(/var\(--txf, 0\.8639\)/g) ?? []).length).toBe(1)
+  })
+})

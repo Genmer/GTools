@@ -66,7 +66,8 @@ export function createClipboardFlyoutWindow(): BrowserWindow | null {
   bindDetachedMarginSync(w, withMargin)
   secureWebContents(w.webContents)
   try {
-    w.setAlwaysOnTop(true, 'floating')
+    // 主窗唤起时已抬到 screen-saver 层级，飞窗必须同级才不被主窗压住
+    w.setAlwaysOnTop(true, 'screen-saver')
   } catch {
     // 平台不支持层级时 best-effort，正确性不依赖置顶
   }

@@ -200,8 +200,9 @@ html[data-wintx='1'] .detached {
   height: 100%;
 }
 /* win32 不透明窗（独立窗不持系统材质，blur 开由主题底色补观感）：feTurbulence 噪点自绘玻璃颗粒，
-   叠 sheen 之上（同主窗 .app 手法） */
-html[data-wintx='0'][data-blur='on'] .detached {
+   叠 sheen 之上（同主窗 .app 手法）；darwin 侧带 transparency 门——纯色档残留 blur=true 不误铺 */
+html[data-wintx='0'][data-blur='on'] .detached,
+html[data-wintx='1'][data-transparency='on'][data-blur='on'] .detached {
   background:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E")
       padding-box,

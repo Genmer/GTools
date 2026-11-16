@@ -172,6 +172,12 @@ export function createSearchWindow(): BrowserWindow {
     }
   })
   if (transparent) transparentWindows.add(win)
+  // macOS 全屏覆盖：常驻全工作区可见（含全屏空间），显隐不翻动标志。
+  // 不可带 skipTransformProcessType：Electron 借 TransformProcessType 把进程变为 UIElement，
+  // 这是 Apple 10.14+ 窗口浮在全屏空间上的先决条件；dock 已 hide，变换无副作用
+  if (process.platform === 'darwin') {
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  }
   // closed/render-process-gone 等回调晚于窗口重建触发时模块 win 可能已指向新窗，回调只认本窗
   const self = win
 
@@ -295,13 +301,19 @@ export function showSearchWindow(): void {
     lastProgrammaticPos = target
     win.setPosition(target.x, target.y, false)
   }
-  // macOS 全屏覆盖：普通 show 会切走前台 app 的全屏空间（回桌面）；先挂「全工作区可见
-  // （含全屏空间）」再显（uTools 同款手法），隐藏时复位防窗口常驻各空间
+  // macOS 全屏覆盖已随窗口创建常驻挂上（createSearchWindow），此处不再翻动标志（防重挂竞态）
   if (process.platform === 'darwin') {
+    // 幂等重申全空间可见（true→true 无翻动）；全屏空间里 show+focus 直接激活 app 会被踢回
+    // 窗口"户籍"桌面（闪出全屏），先不激活把窗落到当前空间再取键盘焦点，激活时窗口已在此空间
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    win.setAlwaysOnTop(true, 'screen-saver', 1)
+    win.showInactive()
+    win.moveTop()
+    win.focus()
+  } else {
+    win.show()
+    win.focus()
   }
-  win.show()
-  win.focus()
   lastShownAt = Date.now()
   showClipboardFlyout()
 }
@@ -317,9 +329,6 @@ export function hideSearchWindow(): void {
     persistWindowPos?.(rememberedPos)
   }
   win?.hide()
-  if (process.platform === 'darwin' && win && !win.isDestroyed()) {
-    win.setVisibleOnAllWorkspaces(false)
-  }
 }
 
 /** 外壳按态请求窗口高度（空态应用网格加高，ui-style-guide §1.5）：锚定左上角只改高，超出工作区由系统夹紧。
@@ -419,7 +428,7 @@ export function applyThemeToBrowserWindow(
       // 材质生效前提是窗口底色透明（不透明色会从内部盖死 DWM 霜面，与调用顺序无关）；
       // 材质未生效（API 缺失/独立窗）时不透明窗必须回退主题实色防透明黑底
       target.setBackgroundColor(
-        transparent || materialApplied ? '#00000000' : theme === 'dark' ? '#1e1e1e' : '#f2f3f5'
+        transparent || materialApplied ? '#00000000' : theme === 'dark' ? '#1e1e1e' : '#f7f7f9'
       )
     }
   } catch {
@@ -515,7 +524,7 @@ export function createDetachedWindow(opts: DetachedWindowOptions): DetachedWindo
   if (opts.alwaysOnTop) w.setAlwaysOnTop(true, 'floating')
   // macOS 全屏覆盖：与主窗同法，分离窗常驻全工作区可见（含全屏空间），不切走前台 app 全屏
   if (process.platform === 'darwin') {
-    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
   }
   // 独立窗不申请系统材质：DWM 霜面槽唯一，attach 即抢死主窗霜面（磨砂观感由噪点+CSS 曲线承担）
   applyThemeToBrowserWindow(w, currentTheme, currentTransparency, false)
