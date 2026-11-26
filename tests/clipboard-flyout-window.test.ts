@@ -5,6 +5,7 @@ const fakeFlyout = vi.hoisted(() => ({
   win: null as null | {
     isDestroyed: ReturnType<typeof vi.fn>
     setAlwaysOnTop: ReturnType<typeof vi.fn>
+    setVisibleOnAllWorkspaces: ReturnType<typeof vi.fn>
     on: ReturnType<typeof vi.fn>
     loadURL: ReturnType<typeof vi.fn>
     loadFile: ReturnType<typeof vi.fn>
@@ -50,6 +51,8 @@ import {
 } from '../src/main/clipboard-flyout-window'
 import { applyThemeToBrowserWindow, getSearchWindow } from '../src/main/window'
 
+const realPlatform = process.platform
+
 // 主窗 (400,100,800,600) 不透明：right 锚 (1206,100,300,420)、left 锚 (94,100,300,420)
 const fakeMainDef = {
   isVisible: vi.fn(() => true),
@@ -62,6 +65,7 @@ function makeFlyoutWin(): NonNullable<typeof fakeFlyout.win> {
   return {
     isDestroyed: vi.fn(() => false),
     setAlwaysOnTop: vi.fn(),
+    setVisibleOnAllWorkspaces: vi.fn(),
     on: vi.fn(),
     loadURL: vi.fn(),
     loadFile: vi.fn(),
@@ -135,6 +139,22 @@ describe('applyThemeToClipboardFlyout', () => {
     expect(first).toBe(second)
     expect(BrowserWindow).toHaveBeenCalledTimes(1)
     expect(applyThemeToBrowserWindow).toHaveBeenCalledWith(first, 'dark', expect.anything(), false)
+  })
+
+  it('darwin：建窗即挂全空间可见（含全屏空间），且带 skipTransformProcessType（主窗浮在全屏应用上时面板跟随）', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
+    try {
+      fakeFlyout.win = makeFlyoutWin()
+      vi.mocked(getSearchWindow).mockReturnValue(fakeMain)
+      createClipboardFlyoutWindow()
+      expect(fakeFlyout.win.setVisibleOnAllWorkspaces).toHaveBeenCalledTimes(1)
+      expect(fakeFlyout.win.setVisibleOnAllWorkspaces).toHaveBeenCalledWith(true, {
+        visibleOnFullScreen: true,
+        skipTransformProcessType: true
+      })
+    } finally {
+      Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true })
+    }
   })
 })
 

@@ -71,6 +71,10 @@ export function createClipboardFlyoutWindow(): BrowserWindow | null {
   } catch {
     // 平台不支持层级时 best-effort，正确性不依赖置顶
   }
+  // 主窗浮在全屏应用上时面板跟随：同挂全空间可见（含全屏空间）；必带 skipTransformProcessType（见 window.ts）
+  if (process.platform === 'darwin') {
+    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
+  }
   w.on('closed', () => {
     if (flyout === w) flyout = null
   })

@@ -261,6 +261,8 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.whenReady().then(() => {
+    // 隐藏 Dock 图标，同时把进程定型为 UIElement——darwin 窗口浮在全屏空间上的前提；
+    // 此后各窗口的 setVisibleOnAllWorkspaces 必须带 skipTransformProcessType，否则会被转回前台型（见 window.ts）
     if (process.platform === 'darwin') app.dock?.hide()
     // 启动链兜底：半途失败不留无托盘无快捷键的僵尸进程，通知后退出
     void bootstrap().catch((err) => {

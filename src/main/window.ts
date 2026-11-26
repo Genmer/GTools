@@ -172,11 +172,11 @@ export function createSearchWindow(): BrowserWindow {
     }
   })
   if (transparent) transparentWindows.add(win)
-  // macOS 全屏覆盖：常驻全工作区可见（含全屏空间），显隐不翻动标志。
-  // 不可带 skipTransformProcessType：Electron 借 TransformProcessType 把进程变为 UIElement，
-  // 这是 Apple 10.14+ 窗口浮在全屏空间上的先决条件；dock 已 hide，变换无副作用
+  // macOS 全屏覆盖：窗口常驻全工作区可见（含全屏空间）。进程须一直是 UIElement（启动时 app.dock.hide() 定型），
+  // 所以本文件与飞窗/浮窗/取景遮罩一样必带 skipTransformProcessType：Electron 默认路径在关标志时会把进程
+  // 转回前台型，且 1 秒内再开会跳过不执行，之后窗口进不了全屏空间（唤起被切回桌面）
   if (process.platform === 'darwin') {
-    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
   }
   // closed/render-process-gone 等回调晚于窗口重建触发时模块 win 可能已指向新窗，回调只认本窗
   const self = win
@@ -301,12 +301,12 @@ export function showSearchWindow(): void {
     lastProgrammaticPos = target
     win.setPosition(target.x, target.y, false)
   }
-  // macOS 全屏覆盖已随窗口创建常驻挂上（createSearchWindow），此处不再翻动标志（防重挂竞态）
   if (process.platform === 'darwin') {
-    // 幂等重申全空间可见（true→true 无翻动）；全屏空间里 show+focus 直接激活 app 会被踢回
-    // 窗口"户籍"桌面（闪出全屏），先不激活把窗落到当前空间再取键盘焦点，激活时窗口已在此空间
-    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    // 隐藏状态下把标志关→开一次，让窗口重新归到当前空间（可见时不翻动，防把窗踢出所在空间）
+    if (!win.isVisible()) win.setVisibleOnAllWorkspaces(false, { skipTransformProcessType: true })
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
     win.setAlwaysOnTop(true, 'screen-saver', 1)
+    // 先不激活地显示，让窗口先落到当前空间（含别的应用的全屏空间），再取键盘焦点
     win.showInactive()
     win.moveTop()
     win.focus()
