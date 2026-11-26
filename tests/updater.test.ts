@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
-import { compareVersions, createUpdater, parseLatestRelease, parseLatestReleaseFeed, pickAsset, REPO_URL, type UpdaterFetch } from '../src/main/services/updater'
+import {
+  compareVersions,
+  createUpdater,
+  parseLatestRelease,
+  parseLatestReleaseFeed,
+  pickAsset,
+  releaseAssetUrl,
+  REPO_URL,
+  type UpdaterFetch
+} from '../src/main/services/updater'
 
 const ok200 = (body: string): { ok: boolean; status: number; body: string } => ({ ok: true, status: 200, body })
 
@@ -24,6 +33,18 @@ function releaseBody(over: Record<string, unknown> = {}): string {
 const asset = (name: string): { name: string; browser_download_url: string } => ({
   name,
   browser_download_url: `https://github.com/Genmer/GTools/releases/download/v0.0.23/${name}`
+})
+
+describe('releaseAssetUrl', () => {
+  it('拼出的地址与资产清单里的正式下载地址逐字一致（CI 产物改名而此处没跟上时本用例先红）', () => {
+    const assets = [asset('GTools-0.0.23.dmg'), asset('GTools.Setup.0.0.23.exe')]
+    for (const platform of ['darwin', 'win32'] as const) {
+      expect(releaseAssetUrl('0.0.23', platform)).toBe(pickAsset(assets, { platform, arch: 'x64' }))
+    }
+  })
+  it('无安装包产物的平台返回 null（UI 回退发布页）', () => {
+    expect(releaseAssetUrl('0.0.23', 'linux')).toBeNull()
+  })
 })
 
 describe('compareVersions', () => {
@@ -173,7 +194,7 @@ describe('createUpdater', () => {
     expect(r).toEqual({ ok: false, error: '检查更新失败（HTTP 403，接口限流（多为共享代理出口 IP 额度耗尽））' })
     expect(fetch).toHaveBeenCalledTimes(2) // API + feed 都试过
   })
-  it('API 403（共享代理限流）→ atom feed 兜底成功：版本取 <id> 尾段，downloadUrl 空回退发布页', async () => {
+  it('API 403（共享代理限流）→ atom feed 兜底成功：版本取 <id> 尾段，安装包地址按固定命名拼出', async () => {
     const feed = feedBody('v0.0.24')
     const fetch = vi
       .fn(async (url: string) =>
@@ -185,11 +206,48 @@ describe('createUpdater', () => {
     if (r.ok) {
       expect(r.data.latest).toBe('0.0.24')
       expect(r.data.hasUpdate).toBe(true)
-      expect(r.data.downloadUrl).toBeNull()
+      expect(r.data.downloadUrl).toBe('https://github.com/Genmer/GTools/releases/download/v0.0.24/GTools-0.0.24.dmg')
       expect(r.data.releaseUrl).toBe('https://github.com/Genmer/GTools/releases/tag/v0.0.24')
     }
-    const o = u.open('download')
-    if (o.ok) expect(o.url).toBe('https://github.com/Genmer/GTools/releases/tag/v0.0.24')
+    expect(u.open('download')).toEqual({ ok: true, url: 'https://github.com/Genmer/GTools/releases/download/v0.0.24/GTools-0.0.24.dmg' })
+  })
+  it('feed 兜底在 win32 拼出 .exe 安装包地址', async () => {
+    const fetch = vi.fn(async (url: string) =>
+      url.includes('releases.atom') ? ok200(feedBody('v0.0.24')) : { ok: false, status: 429, body: '' }
+    ) as unknown as UpdaterFetch
+    const u = createUpdater({ fetch, version: '0.0.23', platform: 'win32', arch: 'x64' })
+    const r = await u.check()
+    expect(r.ok && r.data.downloadUrl).toBe('https://github.com/Genmer/GTools/releases/download/v0.0.24/GTools.Setup.0.0.24.exe')
+  })
+  it('API 网络层异常（超时/断连 reject）同样退到 feed 兜底，不直接报检测失败', async () => {
+    const fetch = vi.fn(async (url: string) => {
+      if (url.includes('releases.atom')) return ok200(feedBody('v0.0.24'))
+      throw new Error('The operation was aborted due to timeout')
+    }) as unknown as UpdaterFetch
+    const u = createUpdater({ fetch, version: '0.0.23', platform: 'darwin', arch: 'x64' })
+    const r = await u.check()
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.data.latest).toBe('0.0.24')
+      expect(r.data.downloadUrl).toBe('https://github.com/Genmer/GTools/releases/download/v0.0.24/GTools-0.0.24.dmg')
+    }
+  })
+  it('API 网络异常且 feed 也网络异常：落中文网络错误', async () => {
+    const fetch = vi.fn(async () => {
+      throw new Error('socket hang up')
+    }) as unknown as UpdaterFetch
+    const u = createUpdater({ fetch, version: '0.0.23', platform: 'darwin', arch: 'x64' })
+    const r = await u.check()
+    expect(r).toEqual({ ok: false, error: '检查更新失败：网络连接失败或超时' })
+    expect(fetch).toHaveBeenCalledTimes(2) // API + feed 都试过
+  })
+  it('API 网络异常、feed 返回非 2xx：报网络错误（没有 HTTP 状态码可报）', async () => {
+    const fetch = vi.fn(async (url: string) => {
+      if (url.includes('releases.atom')) return { ok: false, status: 503, body: '' }
+      throw new Error('aborted')
+    }) as unknown as UpdaterFetch
+    const u = createUpdater({ fetch, version: '0.0.23', platform: 'darwin', arch: 'x64' })
+    expect(await u.check()).toEqual({ ok: false, error: '检查更新失败：网络连接失败或超时' })
   })
   it('网络层异常（fetch reject/超时）在 check() 内 catch 成中文，无英文技术串冒泡', async () => {
     const fetch = vi.fn(async () => {

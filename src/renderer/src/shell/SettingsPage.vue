@@ -72,6 +72,13 @@ const panelPositions: { id: ClipboardPanelPosition; label: string }[] = [
   { id: 'right', label: '窗口右侧' },
   { id: 'below', label: '输入框下方' }
 ]
+// 「剪贴板历史」插件是剪贴板功能的总开关：插件禁用即面板不显示、后台不采集，方位选择随之失效
+const clipboardPluginOff = computed(() => props.plugins.find((p) => p.manifest.id === 'clipboard')?.enabled === false)
+const panelPositionDesc = computed(() =>
+  clipboardPluginOff.value
+    ? '「剪贴板历史」插件已禁用：面板不显示、后台不采集；重新启用后按这里选的方位恢复'
+    : '左侧/右侧/下方均在主窗外侧飞出（Win+V 式），下方贴主窗底缘、空间不足自动翻转到上方；主窗隐藏时面板随之隐藏；关闭即停止采集'
+)
 
 async function setClipboardPanel(position: ClipboardPanelPosition): Promise<void> {
   const r = await host('settings:set', { clipboardPanel: { position } })
@@ -486,7 +493,7 @@ onBeforeUnmount(() => {
             <div class="row">
               <div class="row-main">
                 <span class="name">记录面板位置</span>
-                <span class="desc">左侧/右侧/下方均在主窗外侧飞出（Win+V 式），下方贴主窗底缘、空间不足自动翻转到上方；主窗隐藏时面板随之隐藏；关闭即停止采集</span>
+                <span class="desc">{{ panelPositionDesc }}</span>
               </div>
               <div class="seg">
                 <button
@@ -494,6 +501,7 @@ onBeforeUnmount(() => {
                   :key="p.id"
                   class="seg-item"
                   :class="{ active: (settings?.clipboardPanel?.position ?? 'right') === p.id }"
+                  :disabled="clipboardPluginOff"
                   @click="setClipboardPanel(p.id)"
                 >
                   {{ p.label }}

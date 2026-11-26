@@ -89,9 +89,10 @@ vi.mock('../src/main/services/api-center', () => ({
   }),
   migrateLegacyTranslate: vi.fn(async () => {})
 }))
+const clipSvc = vi.hoisted(() => ({ start: vi.fn(), setEnabled: vi.fn() }))
 vi.mock('../src/main/services/clipboard-history', () => ({
   ClipboardHistoryService: vi.fn(function () {
-    return { start: vi.fn(), setEnabled: vi.fn() }
+    return clipSvc
   })
 }))
 vi.mock('../src/main/services/background', () => ({ BackgroundService: vi.fn(function () { return {} }) }))
@@ -185,5 +186,30 @@ describe('主进程启动登录项同步（index.ts 引导链）', () => {
     } finally {
       state.syncImpl = null
     }
+  }, 20000)
+})
+
+describe('启动时剪贴板记录面板跟随「剪贴板历史」插件开关（index.ts 引导链）', () => {
+  /** 按给定插件启停与面板方位装配，引导链走到 IPC 注册后取面板方位设置记录 */
+  async function bootWithClipboard(disabledPlugins: string[], position: 'off' | 'right'): Promise<Mock> {
+    seedSettings.disabledPlugins = disabledPlugins
+    seedSettings.clipboardPanel = { position }
+    const ctx = await bootIndex()
+    state.readyResolve!()
+    await drainMicrotasks(() => ctx.setupIpc.mock.calls.length > 0)
+    const flyout = await import('../src/main/clipboard-flyout-window')
+    return flyout.setClipboardFlyoutPosition as unknown as Mock
+  }
+
+  it('插件启用 + 方位 right → 启动采集，面板方位 right', async () => {
+    const setPos = await bootWithClipboard([], 'right')
+    expect(clipSvc.start).toHaveBeenCalledTimes(1)
+    expect(setPos).toHaveBeenCalledWith('right')
+  }, 20000)
+
+  it('插件禁用 + 方位 right → 不启动采集，面板按关闭装配', async () => {
+    const setPos = await bootWithClipboard(['clipboard'], 'right')
+    expect(clipSvc.start).not.toHaveBeenCalled()
+    expect(setPos).toHaveBeenCalledWith('off')
   }, 20000)
 })

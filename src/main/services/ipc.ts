@@ -1,4 +1,4 @@
-import { ipcMain, dialog as electronDialog, app } from 'electron'
+import { ipcMain, dialog as electronDialog, app, shell } from 'electron'
 import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import * as nodeFs from 'node:fs/promises'
@@ -236,8 +236,54 @@ export function setupIpc(deps: {
     fs: downloaderFs,
     dir: updateCacheDir,
     platform: services.app.platform,
-    onProgress: (snap) => broadcast('update-download-progress', snap)
+    onProgress: (snap) => {
+      broadcast('update-download-progress', snap)
+      if (snap.state === 'downloaded') {
+        void promptUpdateWhenDownloaded().catch((err) => console.error('GTools 更新提示失败：', err))
+      }
+    }
   })
+
+  /** darwin 无静默安装：打开安装包（挂载 dmg 并弹出 Finder 窗口）后退出，由用户把 GTools 拖进「应用程序」；打开失败不退出 */
+  async function openInstallerAndQuit(installerPath: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (installInFlight) return { ok: false, error: '安装正在进行' }
+    installInFlight = true
+    try {
+      // Electron shell.openPath 成功 resolve 空串、失败 resolve 错误文案（services.shell.openPath 会吞掉）
+      const openError = await shell.openPath(installerPath)
+      if (openError !== '') return { ok: false, error: `安装包打开失败：${openError}` }
+      await runQuitCleanup()
+      app.exit(0) // 不触发 will-quit，清理已在上面手动执行
+      return { ok: true }
+    } finally {
+      installInFlight = false
+    }
+  }
+
+  /** darwin 下载完成即弹更新提示：对话框挂在主窗上跟着主窗走（独立对话框进不了别的应用的全屏空间），主窗隐藏时先唤起；
+   *  对话框夺焦会触发失焦藏窗，故包 suspendBlurHide */
+  async function promptUpdateWhenDownloaded(): Promise<void> {
+    if (services.app.platform !== 'darwin') return
+    const snap = downloader.status()
+    if (snap.state !== 'downloaded' || snap.installerPath === null) return
+    const version = /^GTools-(\d+(?:\.\d+)*)\.dmg$/i.exec(snap.fileName ?? '')?.[1]
+    const options = {
+      type: 'info' as const,
+      message: version ? `GTools v${version} 已下载完成` : '新版本安装包已下载完成',
+      detail: '立即更新会退出 GTools 并打开安装包，请把 GTools 拖进「应用程序」完成替换。',
+      buttons: ['立即更新', '稍后'],
+      defaultId: 0,
+      cancelId: 1
+    }
+    const parent = getSearchWindow()
+    if (parent !== null && !parent.isVisible()) showSearchWindow()
+    const { response } = await (parent
+      ? suspendBlurHide(() => electronDialog.showMessageBox(parent, options))
+      : electronDialog.showMessageBox(options))
+    if (response !== 0) return
+    const r = await openInstallerAndQuit(snap.installerPath)
+    if (!r.ok) await electronDialog.showMessageBox({ type: 'error', message: r.error, buttons: ['好'] })
+  }
 
   // 指令热键触发：弹主窗 → 通知渲染层进命令态 → 启 backend（对齐 plugin:enter 语义，backend 结果不阻塞触发）
   const fireCommandHotkey = (pluginId: string, commandId: string): void => {
@@ -340,6 +386,15 @@ export function setupIpc(deps: {
     await loader.setEnabled(id, false)
     services.window.float.closeAllForPlugin(id)
     deps.detached.closeForPlugin(id)
+  }
+
+  // 记录面板与后台采集跟随「剪贴板历史」插件：插件禁用即不显示不采集（方位只存盘，重新启用后恢复）
+  function syncClipboardPanel(s: AppSettings): void {
+    const on = !s.disabledPlugins.includes('clipboard') && s.clipboardPanel.position !== 'off'
+    deps.clipboardHistory?.setEnabled(on)
+    setClipboardFlyoutPosition(on ? s.clipboardPanel.position : 'off')
+    // 主窗可见时再锚定一次，吃方位切换
+    if (on && getSearchWindow()?.isVisible()) reanchorClipboardFlyout()
   }
 
   /** 退出前清理链（app:relaunch 与 update:install 共用）：浮窗/独立窗回收、backend 停止、防抖中的 settings 与 apiCenter 落盘，3s 超时兜底防挂死 */
@@ -486,6 +541,7 @@ export function setupIpc(deps: {
       if (shouldEnable && !wasEnabled) await loader.setEnabled(id, true)
       else if (!shouldEnable && wasEnabled) await disablePlugin(id)
     }
+    syncClipboardPanel(nextSettings)
 
     const warnings = [...parsed.warnings]
     if (commandSkipped) warnings.push(commandSkipped)
@@ -619,12 +675,7 @@ export function setupIpc(deps: {
           if (typeof p.hideOnBlur === 'boolean') {
             applyHideOnBlur(next.hideOnBlur)
           }
-          if (p.clipboardPanel) {
-            deps.clipboardHistory?.setEnabled(next.clipboardPanel.position !== 'off')
-            // 飞窗语义换挡（F6）：非 off 且主窗可见 → 惰性显示；off → 关窗；可见时再锚定一次吃方位切换
-            setClipboardFlyoutPosition(next.clipboardPanel.position)
-            if (next.clipboardPanel.position !== 'off' && getSearchWindow()?.isVisible()) reanchorClipboardFlyout()
-          }
+          if (p.clipboardPanel) syncClipboardPanel(next)
           // 指令热键持久化后重注册（sanitize 在 store 内）；已落盘即 ok:true，部分未生效以 warnings 附带
           let hotkeyNotice: string | null = null
           if (Array.isArray(p.commandHotkeys)) {
@@ -770,6 +821,7 @@ export function setupIpc(deps: {
           }
           const disabled = loader.registry.all().filter((e) => !e.enabled).map((e) => e.manifest.id)
           await settings.update({ disabledPlugins: disabled })
+          if (id === 'clipboard') syncClipboardPanel(settings.settings)
           // 启禁切换后重算指令热键：禁用即注销其绑定（否则热键残留、按下只弹空窗），启用即恢复注册
           syncCommandHotkeys(currentBindings(), settings.settings.hotkey[hotkeyPlatform()], fireCommandHotkey, undefined, hotkeySyncOpts())
           broadcast('plugin-state-changed', { id, enabled, plugins: pluginsSnapshot(loader) })
@@ -991,8 +1043,9 @@ export function setupIpc(deps: {
               installInFlight = false
             }
           }
-          await services.shell.openPath(snap.installerPath)
-          return { ok: true, data: null }
+          // darwin：打开安装包后退出（与下载完成弹窗的「立即更新」同一条路径）
+          const opened = await openInstallerAndQuit(snap.installerPath)
+          return opened.ok ? { ok: true, data: null } : opened
         }
         case 'update:open': {
           // 渲染层只传意图不传 URL，目标地址由主进程闭包缓存 + 白名单后交 openExternal

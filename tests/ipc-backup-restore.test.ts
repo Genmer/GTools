@@ -3,7 +3,7 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-// 备份文件与导入前快照写真实临时目录（restore 链路真读真写），只 mock electron 与 window 模块
+// 备份文件与导入前快照写真实临时目录（restore 链路真读真写），只 mock electron、window 与剪贴板飞窗模块
 const state = vi.hoisted(() => ({
   userDataDir: '/nonexistent-gtools-ipc-restore',
   backupFile: '',
@@ -40,6 +40,13 @@ vi.mock('../src/main/window', () => ({
   showSearchWindow: vi.fn(),
   suspendBlurHide: vi.fn((fn: () => unknown) => fn())
 }))
+vi.mock('../src/main/clipboard-flyout-window', () => ({
+  applyThemeToClipboardFlyout: vi.fn(),
+  getClipboardFlyoutWindow: vi.fn(() => null),
+  isClipboardFlyoutSender: vi.fn(() => false),
+  reanchorClipboardFlyout: vi.fn(),
+  setClipboardFlyoutPosition: vi.fn()
+}))
 vi.mock('../src/main/logo-skin', () => ({ applyAppLogoSkin: vi.fn(), logoIconPath: vi.fn(() => null) }))
 vi.mock('../src/main/tray', () => ({ createTray: vi.fn(), applyTraySkin: vi.fn(), destroyTray: vi.fn() }))
 
@@ -47,6 +54,7 @@ import { ipcMain } from 'electron'
 import { setupIpc } from '../src/main/services/ipc'
 import { AppLog } from '../src/main/services/app-log'
 import { applyThemeToWindow, getSearchWindow } from '../src/main/window'
+import { setClipboardFlyoutPosition } from '../src/main/clipboard-flyout-window'
 import { SettingsStore, type FsLike } from '../src/main/settings-store'
 import { parseBackup, serializeBackup } from '../src/main/services/backup'
 import { DEFAULT_SETTINGS, OUTLINE_CUSTOM_COLOR_DEFAULT, type AppSettings } from '@sdk/settings'
@@ -92,7 +100,7 @@ function makeLoader() {
   }
 }
 
-async function boot(seed: Partial<AppSettings> = {}): Promise<{
+async function boot(seed: Partial<AppSettings> = {}, extra: { clipboardHistory?: unknown } = {}): Promise<{
   store: SettingsStore
   host: Host
   detached: { applyThemeToAll: Mock }
@@ -119,7 +127,8 @@ async function boot(seed: Partial<AppSettings> = {}): Promise<{
     apiCenter: { config: {}, sanitized: () => ({}), replaceAll: vi.fn(async () => {}) },
     nativeApps: {},
     detached,
-    onHotkeyToggle: vi.fn()
+    onHotkeyToggle: vi.fn(),
+    ...extra
   } as unknown as Parameters<typeof setupIpc>[0])
   const call = (ipcMain.handle as unknown as Mock).mock.calls.find(([ch]) => ch === 'gtools:host')
   if (!call) throw new Error('gtools:host 未注册')
@@ -150,7 +159,8 @@ beforeEach(() => {
   state.confirmResponse = 0
   // backup:export/import 已加主窗 sender 守卫：sender() 的 id 1 需匹配主窗假窗
   vi.mocked(getSearchWindow).mockReturnValue({
-    webContents: { id: 1, on: vi.fn(), send: vi.fn(), removeListener: vi.fn(), isDestroyed: () => false }
+    webContents: { id: 1, on: vi.fn(), send: vi.fn(), removeListener: vi.fn(), isDestroyed: () => false },
+    isVisible: vi.fn(() => false)
   } as unknown as ReturnType<typeof getSearchWindow>)
 })
 
@@ -320,5 +330,20 @@ describe('gtools:host backup:import 轮廓环字段恢复', () => {
     expect(loader.suspendBackend).toHaveBeenCalledTimes(2)
     // finally 兜底：两个被 stop 的 backend 都复活，单个复活失败也不拖垮其余
     expect(loader.ensureBackendStarted).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('gtools:host backup:import 剪贴板记录面板跟随「剪贴板历史」插件开关', () => {
+  it('备份里该插件为禁用：导入后停止采集、面板关闭（本机方位设置不动）', async () => {
+    await writeBackup('clip-off.gtools', { disabledPlugins: ['clipboard'] })
+    const history = { setEnabled: vi.fn(), onChanged: vi.fn() }
+    const { host, store, entries } = await boot({}, { clipboardHistory: history })
+    entries.set('clipboard', { manifest: { id: 'clipboard' }, enabled: true, backend: null, backendStarted: false })
+    const r = await host(sender(), { api: 'backup:import' })
+    expect(r.ok).toBe(true)
+    expect(store.settings.disabledPlugins).toContain('clipboard')
+    expect(store.settings.clipboardPanel.position).toBe('right')
+    expect(history.setEnabled).toHaveBeenLastCalledWith(false)
+    expect(setClipboardFlyoutPosition).toHaveBeenLastCalledWith('off')
   })
 })

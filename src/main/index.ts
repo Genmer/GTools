@@ -151,7 +151,10 @@ async function bootstrap(): Promise<void> {
     // vault 经 writeTextEphemeral 写入的密码/用户名不入面板历史（敏感指纹豁免）
     isExempted: services.clipboard.isTextExempted
   })
-  if (settingsStore.settings.clipboardPanel.position !== 'off') clipboardHistory.start()
+  // 「剪贴板历史」插件禁用 = 整个剪贴板功能关闭：不采集、不显示面板（运行时切换见 ipc.ts syncClipboardPanel）
+  const clipboardPanelOn =
+    !settingsStore.settings.disabledPlugins.includes('clipboard') && settingsStore.settings.clipboardPanel.position !== 'off'
+  if (clipboardPanelOn) clipboardHistory.start()
 
   // 自定义背景（题5）：固定名重编码产物目录，file 相对名白名单在 settings-store 单点约束
   // fs/promises 重载返回类型与 BackgroundFs 不全一致，显式构造注入对象代替双重断言
@@ -186,7 +189,7 @@ async function bootstrap(): Promise<void> {
   applyAppLogoSkin(settingsStore.settings.appLogoSkin)
   createSearchWindow()
   // 飞窗方位与设置对齐：主窗此刻不可见 → 仅记录，首次 showSearchWindow 惰性显示（F6 语义）
-  setClipboardFlyoutPosition(settingsStore.settings.clipboardPanel.position)
+  setClipboardFlyoutPosition(clipboardPanelOn ? settingsStore.settings.clipboardPanel.position : 'off')
 
   // 插件独立窗口管理器（每插件单实例，禁用插件/退出时统一回收）
   const detached = new DetachedWindowManager({

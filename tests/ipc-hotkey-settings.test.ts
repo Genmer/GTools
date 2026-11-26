@@ -511,6 +511,36 @@ describe('gtools:host 剪贴板四通道复合守卫与双投（题1 R4/R5）', 
     await host(sender(), { api: 'settings:set', payload: { clipboardPanel: { position: 'off' } } })
     expect(vi.mocked(setClipboardFlyoutPosition)).toHaveBeenCalledWith('off')
   })
+
+  it('「剪贴板历史」插件禁用即总开关：面板关、采集停；重新启用按已存方位恢复', async () => {
+    const history = { setEnabled: vi.fn(), onChanged: vi.fn() }
+    const { host, store } = await boot({}, ['clipboard'], { clipboardHistory: history })
+    await host(sender(), { api: 'plugins:set-enabled', payload: { id: 'clipboard', enabled: false } })
+    expect(store.settings.disabledPlugins).toContain('clipboard')
+    expect(history.setEnabled).toHaveBeenLastCalledWith(false)
+    expect(setClipboardFlyoutPosition).toHaveBeenLastCalledWith('off')
+    // 插件禁用期间改方位：只存盘，面板与采集保持关闭
+    await host(sender(), { api: 'settings:set', payload: { clipboardPanel: { position: 'below' } } })
+    expect(store.settings.clipboardPanel.position).toBe('below')
+    expect(history.setEnabled).toHaveBeenLastCalledWith(false)
+    expect(setClipboardFlyoutPosition).toHaveBeenLastCalledWith('off')
+    await host(sender(), { api: 'plugins:set-enabled', payload: { id: 'clipboard', enabled: true } })
+    expect(history.setEnabled).toHaveBeenLastCalledWith(true)
+    expect(setClipboardFlyoutPosition).toHaveBeenLastCalledWith('below')
+  })
+
+  it('其它插件启停不碰剪贴板面板；面板方位「关闭」时插件启停也不开采集', async () => {
+    const history = { setEnabled: vi.fn(), onChanged: vi.fn() }
+    const { host } = await boot({ clipboardPanel: { position: 'off' } }, ['clipboard', 'notes'], { clipboardHistory: history })
+    await host(sender(), { api: 'plugins:set-enabled', payload: { id: 'notes', enabled: false } })
+    expect(history.setEnabled).not.toHaveBeenCalled()
+    expect(setClipboardFlyoutPosition).not.toHaveBeenCalled()
+    await host(sender(), { api: 'plugins:set-enabled', payload: { id: 'clipboard', enabled: false } })
+    expect(history.setEnabled).toHaveBeenLastCalledWith(false)
+    await host(sender(), { api: 'settings:set', payload: { clipboardPanel: { position: 'right' } } })
+    expect(history.setEnabled).toHaveBeenLastCalledWith(false)
+    expect(setClipboardFlyoutPosition).toHaveBeenLastCalledWith('off')
+  })
 })
 
 describe('gtools:host background:choose/clear/get（题5 F3）', () => {

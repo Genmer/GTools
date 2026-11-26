@@ -12,6 +12,8 @@ vi.mock('electron', () => ({
     relaunch: vi.fn(),
     exit: vi.fn()
   },
+  // darwin 打开安装包走 Electron shell.openPath：成功 resolve 空串，失败 resolve 错误文案
+  shell: { openPath: vi.fn() },
   globalShortcut: {
     register: vi.fn(() => true),
     unregister: vi.fn(),
@@ -54,16 +56,19 @@ vi.mock('node:child_process', async (importOriginal) => {
   return { ...actual, spawn: vi.fn() }
 })
 
-import { app, ipcMain } from 'electron'
+import { app, dialog as electronDialog, ipcMain, shell } from 'electron'
 import { spawn } from 'node:child_process'
 import { setupIpc } from '../src/main/services/ipc'
 import { AppLog } from '../src/main/services/app-log'
-import { getSearchWindow } from '../src/main/window'
+import { getSearchWindow, showSearchWindow, suspendBlurHide } from '../src/main/window'
 import { SettingsStore, type FsLike } from '../src/main/settings-store'
 import { unregisterAllHotkeys } from '../src/main/shortcut'
 import type { UpdateDownloadSnapshot } from '../src/main/services/update-downloader'
 
 const spawnMock = spawn as unknown as Mock
+// showMessageBox 是重载签名（带/不带 parent），断言 mock.calls 走无类型别名
+const showBox = electronDialog.showMessageBox as unknown as Mock
+const openPathMock = shell.openPath as unknown as Mock
 
 const snapIdle = (): UpdateDownloadSnapshot => ({
   state: 'idle',
@@ -117,7 +122,6 @@ async function boot(
   host: Host
   fetch: Mock
   openExternal: Mock
-  openPath: Mock
   cleanupOrder: string[]
 }> {
   const store = new SettingsStore('C:\\tmp\\gtools-test', noopFs, 1)
@@ -134,7 +138,6 @@ async function boot(
   }
   const fetch = vi.fn(async () => ({ ok: true, status: 200, body: releaseBody() }))
   const openExternal = vi.fn(async () => {})
-  const openPath = vi.fn(async () => {})
   // settings.flush 走实例 spy 记序（真实实现本就用 noopFs，替换无副作用）
   vi.spyOn(store, 'flush').mockImplementation(async () => {
     cleanupOrder.push('settings.flush')
@@ -159,7 +162,7 @@ async function boot(
       app: { version: '0.0.1', platform: opts.platform ?? 'darwin', arch: 'arm64' },
       clipboard: { readText: vi.fn(readText) },
       net: { fetch, fetchStream: vi.fn() },
-      shell: { openExternal, openPath }
+      shell: { openExternal }
     },
     apiCenter: { config: {}, sanitized: () => ({}), replaceAll: vi.fn(async () => {}), flush: apiFlush },
     nativeApps: {},
@@ -175,12 +178,15 @@ async function boot(
   } as unknown as Parameters<typeof setupIpc>[0])
   const call = (ipcMain.handle as unknown as Mock).mock.calls.find(([ch]) => ch === 'gtools:host')
   if (!call) throw new Error('gtools:host 未注册')
-  return { host: call[1] as Host, fetch, openExternal, openPath, cleanupOrder }
+  return { host: call[1] as Host, fetch, openExternal, cleanupOrder }
 }
 
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(getSearchWindow).mockReturnValue(null)
+  openPathMock.mockResolvedValue('')
+  // 默认点「稍后」：只有显式改成「立即更新」的用例才会走到打开安装包与退出
+  showBox.mockResolvedValue({ response: 1, checkboxChecked: false })
   downloaderFake.start.mockImplementation(async () => ({ ok: true, data: snapIdle() }))
   downloaderFake.cancel.mockImplementation(() => snapIdle())
   downloaderFake.status.mockImplementation(() => snapIdle())
@@ -189,7 +195,8 @@ beforeEach(() => {
 
 function withFakeWindow(): void {
   vi.mocked(getSearchWindow).mockReturnValue({
-    webContents: { id: 1, on: vi.fn(), send: vi.fn(), removeListener: vi.fn(), isDestroyed: () => false }
+    webContents: { id: 1, on: vi.fn(), send: vi.fn(), removeListener: vi.fn(), isDestroyed: () => false },
+    isVisible: vi.fn(() => false)
   } as unknown as ReturnType<typeof getSearchWindow>)
 }
 
@@ -365,7 +372,7 @@ describe('gtools:host update:download/cancel/install', () => {
     expect(downloaderFake.start).toHaveBeenCalledWith('https://github.com/Genmer/GTools/releases/download/v9.9.9/GTools-9.9.9.dmg')
   })
 
-  it('check 成功但 downloadUrl=null（feed 兜底无资产）→ update:download 拒绝且不进 downloader（UI 回退发布页）', async () => {
+  it('API 限流走 feed 兜底：安装包地址按固定命名拼出，update:download 照常进 downloader（页面出「下载」按钮而非「前往下载」）', async () => {
     const feed = (tag: string): string =>
       `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry>` +
       `<id>tag:github.com,2008:Repository/1385365197/${tag}</id>` +
@@ -376,6 +383,21 @@ describe('gtools:host update:download/cancel/install', () => {
       call++
       return call === 1 ? { ok: false, status: 403, body: '' } : { ok: true, status: 200, body: feed('v9.9.9') }
     })
+    withFakeWindow()
+    const check = await host(sender(), { api: 'update:check' })
+    const derived = 'https://github.com/Genmer/GTools/releases/download/v9.9.9/GTools-9.9.9.dmg'
+    expect(check.ok && (check.data as { downloadUrl: string | null }).downloadUrl).toBe(derived)
+    const r = await host(sender(), { api: 'update:download' })
+    expect(r.ok).toBe(true)
+    expect(downloaderFake.start).toHaveBeenCalledWith(derived)
+  })
+
+  it('check 成功但资产无法消歧（downloadUrl=null）→ update:download 拒绝且不进 downloader（UI 回退发布页）', async () => {
+    const { host } = await bootWithFetch(async () => ({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({ tag_name: 'v9.9.9', html_url: 'https://github.com/Genmer/GTools/releases/tag/v9.9.9', assets: [] })
+    }))
     withFakeWindow()
     const check = await host(sender(), { api: 'update:check' })
     expect(check.ok && (check.data as { downloadUrl: string | null }).downloadUrl).toBeNull()
@@ -508,36 +530,144 @@ describe('gtools:host update:download/cancel/install', () => {
     expect(app.exit).not.toHaveBeenCalled()
   })
 
-  it('install darwin 非 downloaded 态拒绝：不 openPath 不退出', async () => {
-    const { host, openPath } = await boot()
+  it('install darwin 非 downloaded 态拒绝：不打开安装包不退出', async () => {
+    const { host } = await boot()
     withFakeWindow()
     const r = await host(sender(), { api: 'update:install' })
     expect(r).toEqual({ ok: false, error: '安装包尚未下载完成' })
-    expect(openPath).not.toHaveBeenCalled()
+    expect(openPathMock).not.toHaveBeenCalled()
     expect(app.exit).not.toHaveBeenCalled()
   })
 
-  it('install darwin：openPath 打开安装包、不退出', async () => {
-    const { host, openPath } = await boot()
+  it('install darwin：打开安装包 → 退出清理链 → 退出（随后由用户把 GTools 拖进「应用程序」）', async () => {
+    const { host, cleanupOrder } = await boot()
     withFakeWindow()
     const installerPath = '/Users/test/Library/Application Support/GTools/update-cache/GTools-9.9.9.dmg'
     downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
     const r = await host(sender(), { api: 'update:install' })
     expect(r).toEqual({ ok: true, data: null })
-    expect(openPath).toHaveBeenCalledWith(installerPath)
-    expect(app.exit).not.toHaveBeenCalled()
+    expect(openPathMock).toHaveBeenCalledWith(installerPath)
+    expect(cleanupOrder).toEqual(['float.closeAll', 'detached.closeAll', 'disposeAll', 'settings.flush', 'apiCenter.flush'])
+    expect(app.exit).toHaveBeenCalledWith(0)
+    expect(app.relaunch).not.toHaveBeenCalled()
     expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it('install darwin：安装包打开失败时不退出，错误回给页面', async () => {
+    const { host, cleanupOrder } = await boot()
+    withFakeWindow()
+    const installerPath = '/cache/GTools-9.9.9.dmg'
+    downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
+    openPathMock.mockResolvedValue('The file does not exist.')
+    const r = await host(sender(), { api: 'update:install' })
+    expect(r).toEqual({ ok: false, error: '安装包打开失败：The file does not exist.' })
+    expect(app.exit).not.toHaveBeenCalled()
+    expect(cleanupOrder).toEqual([])
   })
 
   it('onProgress 快照经主窗广播 update-download-progress 通道', async () => {
     await boot()
-    const send = vi.fn()
-    vi.mocked(getSearchWindow).mockReturnValue({
-      webContents: { id: 1, on: vi.fn(), send, removeListener: vi.fn(), isDestroyed: () => false }
-    } as unknown as ReturnType<typeof getSearchWindow>)
-    const snap = snapDownloaded('/cache/GTools-9.9.9.dmg')
+    withFakeWindow()
+    const main = getSearchWindow() as unknown as { webContents: { send: Mock } }
+    const snap: UpdateDownloadSnapshot = { ...snapIdle(), state: 'downloading', fileName: 'GTools-9.9.9.dmg' }
     downloaderDeps.current?.onProgress?.(snap)
-    expect(send).toHaveBeenCalledWith('update-download-progress', snap)
+    expect(main.webContents.send).toHaveBeenCalledWith('update-download-progress', snap)
+  })
+
+  it('darwin 下载完成自动弹更新提示（版本号取自安装包文件名）；选「稍后」不打开安装包不退出', async () => {
+    await boot()
+    const installerPath = '/cache/GTools-9.9.9.dmg'
+    downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
+    downloaderDeps.current?.onProgress?.(snapDownloaded(installerPath))
+    await vi.waitFor(() => expect(showBox).toHaveBeenCalledTimes(1))
+    expect(showBox.mock.calls[0][0]).toMatchObject({
+      message: 'GTools v9.9.9 已下载完成',
+      buttons: ['立即更新', '稍后'],
+      defaultId: 0,
+      cancelId: 1
+    })
+    expect(openPathMock).not.toHaveBeenCalled()
+    expect(app.exit).not.toHaveBeenCalled()
+  })
+
+  it('darwin 提示里选「立即更新」：打开安装包 → 退出清理链 → 退出', async () => {
+    const { cleanupOrder } = await boot()
+    showBox.mockResolvedValue({ response: 0, checkboxChecked: false })
+    const installerPath = '/cache/GTools-9.9.9.dmg'
+    downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
+    downloaderDeps.current?.onProgress?.(snapDownloaded(installerPath))
+    await vi.waitFor(() => expect(app.exit).toHaveBeenCalledWith(0))
+    expect(openPathMock).toHaveBeenCalledWith(installerPath)
+    expect(cleanupOrder).toEqual(['float.closeAll', 'detached.closeAll', 'disposeAll', 'settings.flush', 'apiCenter.flush'])
+  })
+
+  it('darwin 选「立即更新」但安装包打开失败：不退出，另弹错误提示', async () => {
+    await boot()
+    showBox.mockResolvedValue({ response: 0, checkboxChecked: false })
+    openPathMock.mockResolvedValue('The file does not exist.')
+    const installerPath = '/cache/GTools-9.9.9.dmg'
+    downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
+    downloaderDeps.current?.onProgress?.(snapDownloaded(installerPath))
+    await vi.waitFor(() => expect(showBox).toHaveBeenCalledTimes(2))
+    expect(showBox.mock.calls[1][0]).toMatchObject({ type: 'error', message: '安装包打开失败：The file does not exist.' })
+    expect(app.exit).not.toHaveBeenCalled()
+  })
+
+  it('主窗可见时更新提示直接附着在主窗上（不重复唤起），并包 suspendBlurHide 防对话框夺焦触发失焦藏窗', async () => {
+    await boot()
+    withFakeWindow()
+    const main = getSearchWindow() as unknown as ReturnType<typeof getSearchWindow> & { isVisible: Mock }
+    main.isVisible.mockReturnValue(true)
+    const installerPath = '/cache/GTools-9.9.9.dmg'
+    downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
+    downloaderDeps.current?.onProgress?.(snapDownloaded(installerPath))
+    await vi.waitFor(() => expect(showBox).toHaveBeenCalledTimes(1))
+    expect(showBox.mock.calls[0][0]).toBe(main)
+    expect(showSearchWindow).not.toHaveBeenCalled()
+    expect(suspendBlurHide).toHaveBeenCalledTimes(1)
+  })
+
+  it('主窗隐藏时先唤起主窗，再把更新提示附着上去（独立对话框进不了别的应用的全屏空间）', async () => {
+    await boot()
+    withFakeWindow()
+    const main = getSearchWindow() as unknown as ReturnType<typeof getSearchWindow>
+    const installerPath = '/cache/GTools-9.9.9.dmg'
+    downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
+    downloaderDeps.current?.onProgress?.(snapDownloaded(installerPath))
+    await vi.waitFor(() => expect(showBox).toHaveBeenCalledTimes(1))
+    expect(showSearchWindow).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(showSearchWindow).mock.invocationCallOrder[0]).toBeLessThan(showBox.mock.invocationCallOrder[0])
+    expect(showBox.mock.calls[0][0]).toBe(main)
+  })
+
+  it('主窗已不存在时更新提示独立弹出', async () => {
+    await boot()
+    const installerPath = '/cache/GTools-9.9.9.dmg'
+    downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
+    downloaderDeps.current?.onProgress?.(snapDownloaded(installerPath))
+    await vi.waitFor(() => expect(showBox).toHaveBeenCalledTimes(1))
+    expect(showBox.mock.calls[0][0]).toMatchObject({ buttons: ['立即更新', '稍后'] })
+    expect(showBox.mock.calls[0]).toHaveLength(1)
+    expect(showSearchWindow).not.toHaveBeenCalled()
+  })
+
+  it('win32 下载完成不弹提示（页面走「重启并安装」）', async () => {
+    await boot(async () => '', { platform: 'win32' })
+    const installerPath = 'C:\\tmp\\gtools-test\\update-cache\\GTools.Setup.9.9.9.exe'
+    downloaderFake.status.mockImplementation(() => snapDownloaded(installerPath))
+    downloaderDeps.current?.onProgress?.(snapDownloaded(installerPath))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(showBox).not.toHaveBeenCalled()
+  })
+
+  it('下载中/失败的快照不弹提示', async () => {
+    await boot()
+    const downloading: UpdateDownloadSnapshot = { ...snapIdle(), state: 'downloading', fileName: 'GTools-9.9.9.dmg' }
+    const failed: UpdateDownloadSnapshot = { ...snapIdle(), state: 'failed', error: '下载失败（HTTP 404）' }
+    downloaderDeps.current?.onProgress?.(downloading)
+    downloaderDeps.current?.onProgress?.(failed)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(showBox).not.toHaveBeenCalled()
   })
 })
 

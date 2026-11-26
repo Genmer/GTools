@@ -167,16 +167,18 @@ const fmtSpeed = (bps: number): string => `${(bps / 1048576).toFixed(1)} MB/s`
       </template>
       <template v-else-if="state === 'downloaded'">
         <p class="update-line ok">安装包已就绪</p>
+        <p v-if="platform === 'darwin'" class="dim">更新会退出 GTools 并打开安装包，请把 GTools 拖进「应用程序」完成替换</p>
         <p v-if="updateError" class="update-line danger">{{ updateError }}</p>
         <div class="actions">
-          <button class="btn primary" :disabled="installPending" @click="installUpdate">{{ platform === 'win32' ? '重启并安装' : '打开安装包' }}</button>
+          <button class="btn primary" :disabled="installPending" @click="installUpdate">{{ platform === 'win32' ? '重启并安装' : '立即更新' }}</button>
         </div>
       </template>
       <template v-else-if="state === 'download-failed'">
         <p class="update-line danger">下载失败：{{ downloadSnap?.error ?? updateError }}</p>
         <div class="actions">
           <button v-if="downloadUrl" class="btn primary" @click="startDownload">重试下载</button>
-          <button v-else class="btn primary" @click="openUpdate('download')">前往下载</button>
+          <!-- 有直链但下载失败时去发布页手动下（直链按命名规则拼的，拼错只会 404） -->
+          <button class="btn" :class="{ primary: !downloadUrl }" @click="openUpdate(downloadUrl ? 'release' : 'download')">前往下载</button>
           <button class="btn text" @click="checkUpdate">重新检测</button>
         </div>
       </template>

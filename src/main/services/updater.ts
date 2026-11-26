@@ -5,6 +5,15 @@ export const RELEASE_PREFIX = 'https://github.com/Genmer/GTools/releases/'
 const LATEST_RELEASE_API = 'https://api.github.com/repos/Genmer/GTools/releases/latest'
 const RELEASES_FEED = 'https://github.com/Genmer/GTools/releases.atom'
 
+/**
+ * 发布页订阅不带资产清单，兜底时安装包地址按仓库固定命名拼：GTools-<版本>.dmg / GTools.Setup.<版本>.exe
+ * （CI 产物改名须同步此处，否则下载报 HTTP 404）
+ */
+export function releaseAssetUrl(version: string, platform: string): string | null {
+  const name = platform === 'darwin' ? `GTools-${version}.dmg` : platform === 'win32' ? `GTools.Setup.${version}.exe` : null
+  return name === null ? null : `${RELEASE_PREFIX}download/v${version}/${name}`
+}
+
 /** 版本比较（a<b 返回 -1）：剥 'v' 前缀、按 '.' 切数字段、长度不等补零；须用本函数而非字符串比较（0.0.9 < 0.0.10） */
 export function compareVersions(a: string, b: string): number {
   const pa = a.replace(/^v/, '').split('.').map(Number)
@@ -80,7 +89,7 @@ export interface UpdateCheckResult {
   downloadUrl: string | null
 }
 
-/** atom feed 兜底解析：版本取 <id> 尾段 tag（<title> 是 release 名，可能与 tag 不一致），链接取 <link href>；feed 无资产清单，downloadUrl 由调用方置空 */
+/** atom feed 兜底解析：版本取 <id> 尾段 tag（<title> 是 release 名，可能与 tag 不一致），链接取 <link href>；feed 无资产清单，downloadUrl 由调用方按命名规则拼（releaseAssetUrl） */
 export function parseLatestReleaseFeed(
   body: string
 ): { ok: true; release: { latest: string; releaseUrl: string } } | { ok: false; error: string } {
@@ -109,14 +118,22 @@ export function createUpdater(deps: { fetch: UpdaterFetch; version: string; plat
   return {
     async check() {
       try {
-        const res = await deps.fetch(LATEST_RELEASE_API, { headers: { Accept: 'application/vnd.github+json' } })
-        if (!res.ok) {
+        // API 与 feed 在本机网络上会各自失灵：API 网络层异常（超时/断连）与 HTTP 非 2xx 同样退到 feed 兜底
+        let api: Awaited<ReturnType<UpdaterFetch>> | null = null
+        try {
+          api = await deps.fetch(LATEST_RELEASE_API, { headers: { Accept: 'application/vnd.github+json' } })
+        } catch {
+          // 落到下方 feed 兜底
+        }
+        if (api === null || !api.ok) {
           // API 匿名额度 60 次/时按出口 IP 计（共享代理环境常态 403/429）：atom feed 走 github.com 网页端无此限额
           const feed = await deps.fetch(RELEASES_FEED)
           if (feed.ok) {
             const parsed = parseLatestReleaseFeed(feed.body)
             if (parsed.ok) {
-              cached = { releaseUrl: parsed.release.releaseUrl, downloadUrl: null }
+              // feed 无资产清单：安装包地址按固定命名拼（拼错只表现为下载 HTTP 404，UI 可回退发布页）
+              const downloadUrl = releaseAssetUrl(parsed.release.latest, deps.platform)
+              cached = { releaseUrl: parsed.release.releaseUrl, downloadUrl }
               return {
                 ok: true,
                 data: {
@@ -124,15 +141,16 @@ export function createUpdater(deps: { fetch: UpdaterFetch; version: string; plat
                   latest: parsed.release.latest,
                   hasUpdate: compareVersions(parsed.release.latest, deps.version) > 0,
                   releaseUrl: parsed.release.releaseUrl,
-                  downloadUrl: null
+                  downloadUrl
                 }
               }
             }
           }
-          const hint = res.status === 403 || res.status === 429 ? '，接口限流（多为共享代理出口 IP 额度耗尽）' : ''
-          return { ok: false, error: `检查更新失败（HTTP ${res.status}${hint}）` }
+          if (api === null) return { ok: false, error: '检查更新失败：网络连接失败或超时' }
+          const hint = api.status === 403 || api.status === 429 ? '，接口限流（多为共享代理出口 IP 额度耗尽）' : ''
+          return { ok: false, error: `检查更新失败（HTTP ${api.status}${hint}）` }
         }
-        const parsed = parseLatestRelease(res.body, { platform: deps.platform, arch: deps.arch })
+        const parsed = parseLatestRelease(api.body, { platform: deps.platform, arch: deps.arch })
         if (!parsed.ok) return parsed
         const { latest, releaseUrl, downloadUrl } = parsed.release
         cached = { releaseUrl, downloadUrl }
